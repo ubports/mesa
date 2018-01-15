@@ -446,4 +446,13 @@ Description: free implementation of the OpenCL API -- ICD runtime
  provides a standardized interface for computational analysis on graphical
  processing units.
 
+Package: libgles1-mesa
+Section: oldlibs
+Priority: extra
+Architecture: all
+Depends: ${misc:Depends}
+Multi-Arch: foreign
+Description: transitional dummy package
+ This is a transitional dummy package, it can be safely removed.
+
 # vim: tw=0
