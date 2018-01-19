@@ -1,3 +1,9 @@
+mesa (11.2.1+0ubports1) xenial; urgency=medium
+
+  * Import to UBports 
+
+ -- Marius Gripsgard <marius@ubports.com>  Fri, 19 Jan 2018 06:06:10 +0100
+
 mesa (11.2.0-1ubuntu2.2) xenial; urgency=medium
 
   * bxt-add-2x6-variant.diff:
