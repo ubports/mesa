@@ -497,7 +497,7 @@ Index: mesa/src/egl/drivers/dri2/platform_mir.c
 +   struct dri2_egl_config *dri2_conf = dri2_egl_config(conf);
 +   struct dri2_egl_surface *dri2_surf;
 +   const __DRIconfig *config;
-+   MirWindowParameters win_params;
++   MirSurfaceParameters win_params;
 +
 +   (void) drv;
 +
