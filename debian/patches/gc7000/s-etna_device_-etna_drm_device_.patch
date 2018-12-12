@@ -1,0 +1,214 @@
+From: =?utf-8?q?Guido_G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Wed, 10 Oct 2018 20:36:00 +0200
+Subject: s/etna_device_/etna_drm_device_/
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Guido Günther <guido.gunther@puri.sm>
+---
+ src/gallium/drivers/etnaviv/etnaviv_drmif.h          | 10 +++++-----
+ src/gallium/drivers/etnaviv/etnaviv_screen.c         |  2 +-
+ src/gallium/winsys/etnaviv/drm/etnaviv_drm_bo.c      |  4 ++--
+ .../winsys/etnaviv/drm/etnaviv_drm_bo_cache.c        |  4 ++--
+ src/gallium/winsys/etnaviv/drm/etnaviv_drm_device.c  | 20 ++++++++++----------
+ src/gallium/winsys/etnaviv/drm/etnaviv_drm_priv.h    |  2 +-
+ src/gallium/winsys/etnaviv/drm/etnaviv_drm_winsys.c  |  6 +++---
+ 7 files changed, 24 insertions(+), 24 deletions(-)
+
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_drmif.h b/src/gallium/drivers/etnaviv/etnaviv_drmif.h
+index 437fdf1..6cc4c2a 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_drmif.h
++++ b/src/gallium/drivers/etnaviv/etnaviv_drmif.h
+@@ -86,11 +86,11 @@ enum etna_param_id {
+ /* device functions:
+  */
+ 
+-struct etna_device *etna_device_new(int fd);
+-struct etna_device *etna_device_new_dup(int fd);
+-struct etna_device *etna_device_ref(struct etna_device *dev);
+-void etna_device_del(struct etna_device *dev);
+-int etna_device_fd(struct etna_device *dev);
++struct etna_device *etna_drm_device_new(int fd);
++struct etna_device *etna_drm_device_new_dup(int fd);
++struct etna_device *etna_drm_device_ref(struct etna_device *dev);
++void etna_drm_device_del(struct etna_device *dev);
++int etna_drm_device_fd(struct etna_device *dev);
+ 
+ /* gpu functions:
+  */
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_screen.c b/src/gallium/drivers/etnaviv/etnaviv_screen.c
+index ac1b1f0..0ecf308 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_screen.c
++++ b/src/gallium/drivers/etnaviv/etnaviv_screen.c
+@@ -95,7 +95,7 @@ etna_screen_destroy(struct pipe_screen *pscreen)
+       FREE(screen->ro);
+ 
+    if (screen->dev)
+-      etna_device_del(screen->dev);
++      etna_drm_device_del(screen->dev);
+ 
+    FREE(screen);
+ }
+diff --git a/src/gallium/winsys/etnaviv/drm/etnaviv_drm_bo.c b/src/gallium/winsys/etnaviv/drm/etnaviv_drm_bo.c
+index db840a4..e8d0d3a 100644
+--- a/src/gallium/winsys/etnaviv/drm/etnaviv_drm_bo.c
++++ b/src/gallium/winsys/etnaviv/drm/etnaviv_drm_bo.c
+@@ -95,7 +95,7 @@ static struct etna_bo *bo_from_handle(struct etna_device *dev,
+ 		return NULL;
+ 	}
+ 
+-	bo->dev = etna_device_ref(dev);
++	bo->dev = etna_drm_device_ref(dev);
+ 	bo->size = size;
+ 	bo->handle = handle;
+ 	bo->flags = flags;
+@@ -252,7 +252,7 @@ void etna_drm_bo_del(struct etna_bo *bo)
+ 		goto out;
+ 
+ 	bo_del(bo);
+-	etna_device_del_locked(dev);
++	etna_drm_device_del_locked(dev);
+ out:
+ 	pthread_mutex_unlock(&table_lock);
+ }
+diff --git a/src/gallium/winsys/etnaviv/drm/etnaviv_drm_bo_cache.c b/src/gallium/winsys/etnaviv/drm/etnaviv_drm_bo_cache.c
+index f2775b4..e00dfb7 100644
+--- a/src/gallium/winsys/etnaviv/drm/etnaviv_drm_bo_cache.c
++++ b/src/gallium/winsys/etnaviv/drm/etnaviv_drm_bo_cache.c
+@@ -170,7 +170,7 @@ struct etna_bo *etna_bo_cache_alloc(struct etna_bo_cache *cache, uint32_t *size,
+ 		bo = find_in_bucket(bucket, flags);
+ 		if (bo) {
+ 			p_atomic_set(&bo->refcnt, 1);
+-			etna_device_ref(bo->dev);
++			etna_drm_device_ref(bo->dev);
+ 			return bo;
+ 		}
+ 	}
+@@ -195,7 +195,7 @@ int etna_bo_cache_free(struct etna_bo_cache *cache, struct etna_bo *bo)
+ 		/* bo's in the bucket cache don't have a ref and
+ 		 * don't hold a ref to the dev:
+ 		 */
+-		etna_device_del_locked(bo->dev);
++		etna_drm_device_del_locked(bo->dev);
+ 
+ 		return 0;
+ 	}
+diff --git a/src/gallium/winsys/etnaviv/drm/etnaviv_drm_device.c b/src/gallium/winsys/etnaviv/drm/etnaviv_drm_device.c
+index 29e2e87..b23ec9c 100644
+--- a/src/gallium/winsys/etnaviv/drm/etnaviv_drm_device.c
++++ b/src/gallium/winsys/etnaviv/drm/etnaviv_drm_device.c
+@@ -40,7 +40,7 @@
+ 
+ static pthread_mutex_t table_lock = PTHREAD_MUTEX_INITIALIZER;
+ 
+-struct etna_device *etna_device_new(int fd)
++struct etna_device *etna_drm_device_new(int fd)
+ {
+ 	struct etna_device *dev = calloc(sizeof(*dev), 1);
+ 
+@@ -58,10 +58,10 @@ struct etna_device *etna_device_new(int fd)
+ 
+ /* like etna_device_new() but creates it's own private dup() of the fd
+  * which is close()d when the device is finalized. */
+-struct etna_device *etna_device_new_dup(int fd)
++struct etna_device *etna_drm_device_new_dup(int fd)
+ {
+ 	int dup_fd = dup(fd);
+-	struct etna_device *dev = etna_device_new(dup_fd);
++	struct etna_device *dev = etna_drm_device_new(dup_fd);
+ 
+ 	if (dev)
+ 		dev->closefd = 1;
+@@ -71,14 +71,14 @@ struct etna_device *etna_device_new_dup(int fd)
+ 	return dev;
+ }
+ 
+-struct etna_device *etna_device_ref(struct etna_device *dev)
++struct etna_device *etna_drm_device_ref(struct etna_device *dev)
+ {
+ 	p_atomic_inc(&dev->refcnt);
+ 
+ 	return dev;
+ }
+ 
+-static void etna_device_del_impl(struct etna_device *dev)
++static void etna_drm_device_del_impl(struct etna_device *dev)
+ {
+ 	etna_bo_cache_cleanup(&dev->bo_cache, 0);
+ 	drmHashDestroy(dev->handle_table);
+@@ -90,25 +90,25 @@ static void etna_device_del_impl(struct etna_device *dev)
+ 	free(dev);
+ }
+ 
+-void etna_device_del_locked(struct etna_device *dev)
++void etna_drm_device_del_locked(struct etna_device *dev)
+ {
+ 	if (!p_atomic_dec_zero(&dev->refcnt))
+ 		return;
+ 
+-	etna_device_del_impl(dev);
++	etna_drm_device_del_impl(dev);
+ }
+ 
+-void etna_device_del(struct etna_device *dev)
++void etna_drm_device_del(struct etna_device *dev)
+ {
+ 	if (!p_atomic_dec_zero(&dev->refcnt))
+ 		return;
+ 
+ 	pthread_mutex_lock(&table_lock);
+-	etna_device_del_impl(dev);
++	etna_drm_device_del_impl(dev);
+ 	pthread_mutex_unlock(&table_lock);
+ }
+ 
+-int etna_device_fd(struct etna_device *dev)
++int etna_drm_device_fd(struct etna_device *dev)
+ {
+    return dev->fd;
+ }
+diff --git a/src/gallium/winsys/etnaviv/drm/etnaviv_drm_priv.h b/src/gallium/winsys/etnaviv/drm/etnaviv_drm_priv.h
+index dc7385a..6ecbab1 100644
+--- a/src/gallium/winsys/etnaviv/drm/etnaviv_drm_priv.h
++++ b/src/gallium/winsys/etnaviv/drm/etnaviv_drm_priv.h
+@@ -85,7 +85,7 @@ struct etna_bo *etna_bo_cache_alloc(struct etna_bo_cache *cache,
+ int etna_bo_cache_free(struct etna_bo_cache *cache, struct etna_bo *bo);
+ 
+ /* for where @table_lock is already held: */
+-void etna_device_del_locked(struct etna_device *dev);
++void etna_drm_device_del_locked(struct etna_device *dev);
+ 
+ /* a GEM buffer object allocated from the DRM device */
+ struct etna_bo {
+diff --git a/src/gallium/winsys/etnaviv/drm/etnaviv_drm_winsys.c b/src/gallium/winsys/etnaviv/drm/etnaviv_drm_winsys.c
+index 8e3f7a0..4e2a878 100644
+--- a/src/gallium/winsys/etnaviv/drm/etnaviv_drm_winsys.c
++++ b/src/gallium/winsys/etnaviv/drm/etnaviv_drm_winsys.c
+@@ -43,7 +43,7 @@ screen_create(struct renderonly *ro)
+    uint64_t val;
+    int i;
+ 
+-   dev = etna_device_new_dup(ro->gpu_fd);
++   dev = etna_drm_device_new_dup(ro->gpu_fd);
+    if (!dev) {
+       fprintf(stderr, "Error creating device\n");
+       return NULL;
+@@ -80,7 +80,7 @@ etna_drm_screen_destroy(struct pipe_screen *pscreen)
+    mtx_lock(&etna_screen_mutex);
+    destroy = --screen->refcnt == 0;
+    if (destroy) {
+-      int fd = etna_device_fd(screen->dev);
++      int fd = etna_drm_device_fd(screen->dev);
+       util_hash_table_remove(etna_tab, intptr_to_pointer(fd));
+    }
+    mtx_unlock(&etna_screen_mutex);
+@@ -133,7 +133,7 @@ etna_drm_screen_create_renderonly(struct renderonly *ro)
+    } else {
+       pscreen = screen_create(ro);
+       if (pscreen) {
+-         int fd = etna_device_fd(etna_screen(pscreen)->dev);
++         int fd = etna_drm_device_fd(etna_screen(pscreen)->dev);
+          util_hash_table_set(etna_tab, intptr_to_pointer(fd), pscreen);
+ 
+          /* Bit of a hack, to avoid circular linkage dependency,

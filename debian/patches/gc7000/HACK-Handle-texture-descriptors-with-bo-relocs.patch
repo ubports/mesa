@@ -1,0 +1,164 @@
+From: =?utf-8?q?Guido_G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Tue, 2 Oct 2018 15:56:16 +0200
+Subject: HACK: Handle texture descriptors with bo relocs
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+This is just a hack until we have  proper upstream solution. Don't try
+this at home.
+
+Signed-off-by: Guido Günther <guido.gunther@puri.sm>
+---
+ src/gallium/drivers/etnaviv/etnaviv_drmif.h         | 13 +++++++++++++
+ src/gallium/drivers/etnaviv/etnaviv_texture_desc.c  | 14 +++++++++++---
+ src/gallium/drivers/etnaviv/etnaviv_texture_desc.h  |  3 +++
+ .../winsys/etnaviv/drm/etnaviv_drm_cmd_stream.c     | 21 +++++++++++++++++++++
+ src/gallium/winsys/etnaviv/drm/etnaviv_drm_priv.h   |  4 ++++
+ 5 files changed, 52 insertions(+), 3 deletions(-)
+
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_drmif.h b/src/gallium/drivers/etnaviv/etnaviv_drmif.h
+index 73a73cf..4609882 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_drmif.h
++++ b/src/gallium/drivers/etnaviv/etnaviv_drmif.h
+@@ -193,6 +193,19 @@ struct etna_reloc {
+ 
+ void etna_drm_cmd_stream_reloc(struct etna_cmd_stream *stream, const struct etna_reloc *r);
+ 
++struct etna_bo_reloc {
++	struct etna_bo *patch_bo;	       /* the bo we patch */
++	struct etna_bo *bo;
++#define ETNA_RELOC_READ             0x0001
++#define ETNA_RELOC_WRITE            0x0002
++	uint32_t flags;
++
++	uint32_t patch_offset;
++	uint32_t offset;
++};
++
++void etna_drm_bo_reloc(struct etna_cmd_stream *stream, const struct etna_bo_reloc *r);
++
+ /* performance monitoring functions:
+  */
+ 
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c b/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c
+index d857dc9..95c2905 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c
++++ b/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c
+@@ -162,9 +162,14 @@ etna_create_sampler_view_desc(struct pipe_context *pctx, struct pipe_resource *p
+                           TEXDESC_LOG_SIZE_EXT_HEIGHT(etna_log2_fixp88(base_height)));
+    DESC_SET(SIZE, VIVS_TE_SAMPLER_SIZE_WIDTH(base_width) |
+                   VIVS_TE_SAMPLER_SIZE_HEIGHT(base_height));
+-   /* FIXME: etna_bo_gpu_address does not exist in libdrm */
+-   for (int lod = 0; lod <= res->base.last_level; ++lod)
+-      DESC_SET(LOD_ADDR(lod), /* etna_bo_gpu_address(res->bo) + */ res->levels[lod].offset);
++   sv->maxlod = res->base.last_level;
++   for (int lod = 0; lod <= res->base.last_level; ++lod) {
++      sv->TEXDESC_LOD_ADDR[lod].patch_bo = sv->bo;
++      sv->TEXDESC_LOD_ADDR[lod].patch_offset = TEXDESC_LOD_ADDR(lod);
++      sv->TEXDESC_LOD_ADDR[lod].bo = res->bo;
++      sv->TEXDESC_LOD_ADDR[lod].offset = res->levels[lod].offset;
++      sv->TEXDESC_LOD_ADDR[lod].flags = ETNA_RELOC_READ;
++   }
+ #undef DESC_SET
+ 
+    etna_drm_bo_cpu_fini(sv->bo);
+@@ -224,6 +229,9 @@ etna_emit_texture_desc(struct etna_context *ctx)
+             etna_set_state(stream, VIVS_NTE_DESCRIPTOR_SAMP_CTRL1(x), ss->SAMP_CTRL1 | sv->SAMP_CTRL1);
+             etna_set_state(stream, VIVS_NTE_DESCRIPTOR_SAMP_LOD_MINMAX(x), ss->SAMP_LOD_MINMAX);
+             etna_set_state(stream, VIVS_NTE_DESCRIPTOR_SAMP_LOD_BIAS(x), ss->SAMP_LOD_BIAS);
++
++            for (int y = 0; y <= sv->maxlod; y++)
++               etna_drm_bo_reloc(stream, &sv->TEXDESC_LOD_ADDR[y]);
+          }
+       }
+    }
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_texture_desc.h b/src/gallium/drivers/etnaviv/etnaviv_texture_desc.h
+index d94a0fa..73d152c 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_texture_desc.h
++++ b/src/gallium/drivers/etnaviv/etnaviv_texture_desc.h
+@@ -34,6 +34,7 @@
+ #include "pipe/p_state.h"
+ 
+ #include "hw/state_3d.xml.h"
++#include "hw/texdesc_3d.xml.h"
+ 
+ struct etna_context;
+ 
+@@ -60,6 +61,8 @@ struct etna_sampler_view_desc {
+ 
+    struct etna_bo *bo;
+    struct etna_reloc DESC_ADDR;
++   struct etna_bo_reloc TEXDESC_LOD_ADDR[TEXDESC_LOD_ADDR__LEN];
++   int maxlod;
+ };
+ 
+ static inline struct etna_sampler_view_desc *
+diff --git a/src/gallium/winsys/etnaviv/drm/etnaviv_drm_cmd_stream.c b/src/gallium/winsys/etnaviv/drm/etnaviv_drm_cmd_stream.c
+index 637bf7e..31f920c 100644
+--- a/src/gallium/winsys/etnaviv/drm/etnaviv_drm_cmd_stream.c
++++ b/src/gallium/winsys/etnaviv/drm/etnaviv_drm_cmd_stream.c
+@@ -102,6 +102,7 @@ void etna_drm_cmd_stream_del(struct etna_cmd_stream *stream)
+ 
+ 	free(stream->buffer);
+ 	free(priv->submit.relocs);
++	free(priv->submit.bo_relocs);
+ 	free(priv->submit.pmrs);
+ 	free(priv);
+ }
+@@ -113,6 +114,7 @@ static void reset_buffer(struct etna_cmd_stream *stream)
+ 	stream->offset = 0;
+ 	priv->submit.nr_bos = 0;
+ 	priv->submit.nr_relocs = 0;
++	priv->submit.nr_bo_relocs = 0;
+ 	priv->submit.nr_pmrs = 0;
+ 	priv->nr_bos = 0;
+ 
+@@ -190,6 +192,8 @@ static void flush(struct etna_cmd_stream *stream, int in_fence_fd,
+ 		.nr_bos = priv->submit.nr_bos,
+ 		.relocs = VOID2U64(priv->submit.relocs),
+ 		.nr_relocs = priv->submit.nr_relocs,
++		.bo_relocs = VOID2U64(priv->submit.bo_relocs),
++		.nr_bo_relocs = priv->submit.nr_bo_relocs,
+ 		.pmrs = VOID2U64(priv->submit.pmrs),
+ 		.nr_pmrs = priv->submit.nr_pmrs,
+ 		.stream = VOID2U64(stream->buffer),
+@@ -264,6 +268,23 @@ void etna_drm_cmd_stream_reloc(struct etna_cmd_stream *stream,
+ 	etna_drm_cmd_stream_emit(stream, addr);
+ }
+ 
++
++void etna_drm_bo_reloc(struct etna_cmd_stream *stream, const struct etna_bo_reloc *r)
++{
++	struct etna_cmd_stream_priv *priv = etna_cmd_stream_priv(stream);
++	struct drm_etnaviv_gem_submit_bo_reloc *bo_reloc;
++	uint32_t idx = APPEND(&priv->submit, bo_relocs);
++
++	bo_reloc = &priv->submit.bo_relocs[idx];
++
++	bo_reloc->patch_idx = bo2idx(stream, r->patch_bo, r->flags);
++	bo_reloc->patch_offset = r->patch_offset;
++	bo_reloc->reloc_idx = bo2idx(stream, r->bo, r->flags);
++	bo_reloc->reloc_offset = r->offset;
++	bo_reloc->flags = 0;
++}
++
++
+ void etna_drm_cmd_stream_perf(struct etna_cmd_stream *stream, const struct etna_perf *p)
+ {
+ 	struct etna_cmd_stream_priv *priv = etna_cmd_stream_priv(stream);
+diff --git a/src/gallium/winsys/etnaviv/drm/etnaviv_drm_priv.h b/src/gallium/winsys/etnaviv/drm/etnaviv_drm_priv.h
+index 6ecbab1..46bda00 100644
+--- a/src/gallium/winsys/etnaviv/drm/etnaviv_drm_priv.h
++++ b/src/gallium/winsys/etnaviv/drm/etnaviv_drm_priv.h
+@@ -141,6 +141,10 @@ struct etna_cmd_stream_priv {
+ 		struct drm_etnaviv_gem_submit_reloc *relocs;
+ 		uint32_t nr_relocs, max_relocs;
+ 
++		/* reloc's table: */
++		struct drm_etnaviv_gem_submit_bo_reloc *bo_relocs;
++		uint32_t nr_bo_relocs, max_bo_relocs;
++
+ 		/* perf's table: */
+ 		struct drm_etnaviv_gem_submit_pmr *pmrs;
+ 		uint32_t nr_pmrs, max_pmrs;

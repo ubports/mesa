@@ -1,0 +1,178 @@
+From: =?utf-8?q?Guido_G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Wed, 10 Oct 2018 20:36:00 +0200
+Subject: s/etna_perfmon_/etna_drm_perfmon_/
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Guido Günther <guido.gunther@puri.sm>
+---
+ src/gallium/drivers/etnaviv/etnaviv_drmif.h        |  8 +++----
+ src/gallium/drivers/etnaviv/etnaviv_query_pm.c     |  6 ++---
+ src/gallium/drivers/etnaviv/etnaviv_screen.c       |  2 +-
+ .../winsys/etnaviv/drm/etnaviv_drm_perfmon.c       | 26 +++++++++++-----------
+ 4 files changed, 21 insertions(+), 21 deletions(-)
+
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_drmif.h b/src/gallium/drivers/etnaviv/etnaviv_drmif.h
+index 4f83d1b..73a73cf 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_drmif.h
++++ b/src/gallium/drivers/etnaviv/etnaviv_drmif.h
+@@ -196,10 +196,10 @@ void etna_drm_cmd_stream_reloc(struct etna_cmd_stream *stream, const struct etna
+ /* performance monitoring functions:
+  */
+ 
+-struct etna_perfmon *etna_perfmon_create(struct etna_pipe *pipe);
+-void etna_perfmon_del(struct etna_perfmon *perfmon);
+-struct etna_perfmon_domain *etna_perfmon_get_dom_by_name(struct etna_perfmon *pm, const char *name);
+-struct etna_perfmon_signal *etna_perfmon_get_sig_by_name(struct etna_perfmon_domain *dom, const char *name);
++struct etna_perfmon *etna_drm_perfmon_create(struct etna_pipe *pipe);
++void etna_drm_perfmon_del(struct etna_perfmon *perfmon);
++struct etna_perfmon_domain *etna_drm_perfmon_get_dom_by_name(struct etna_perfmon *pm, const char *name);
++struct etna_perfmon_signal *etna_drm_perfmon_get_sig_by_name(struct etna_perfmon_domain *dom, const char *name);
+ 
+ struct etna_perf {
+ #define ETNA_PM_PROCESS_PRE             0x0001
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_query_pm.c b/src/gallium/drivers/etnaviv/etnaviv_query_pm.c
+index 15204b7..3810199 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_query_pm.c
++++ b/src/gallium/drivers/etnaviv/etnaviv_query_pm.c
+@@ -436,11 +436,11 @@ etna_pm_query_signal(struct etna_perfmon *perfmon,
+ {
+    struct etna_perfmon_domain *domain;
+ 
+-   domain = etna_perfmon_get_dom_by_name(perfmon, source->domain);
++   domain = etna_drm_perfmon_get_dom_by_name(perfmon, source->domain);
+    if (!domain)
+       return NULL;
+ 
+-   return etna_perfmon_get_sig_by_name(domain, source->signal);
++   return etna_drm_perfmon_get_sig_by_name(domain, source->signal);
+ }
+ 
+ static inline bool
+@@ -604,7 +604,7 @@ etna_pm_create_query(struct etna_context *ctx, unsigned query_type)
+ void
+ etna_pm_query_setup(struct etna_screen *screen)
+ {
+-   screen->perfmon = etna_perfmon_create(screen->pipe);
++   screen->perfmon = etna_drm_perfmon_create(screen->pipe);
+ 
+    if (!screen->perfmon)
+       return;
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_screen.c b/src/gallium/drivers/etnaviv/etnaviv_screen.c
+index bca77bc..a92ee00 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_screen.c
++++ b/src/gallium/drivers/etnaviv/etnaviv_screen.c
+@@ -83,7 +83,7 @@ etna_screen_destroy(struct pipe_screen *pscreen)
+    struct etna_screen *screen = etna_screen(pscreen);
+ 
+    if (screen->perfmon)
+-      etna_perfmon_del(screen->perfmon);
++      etna_drm_perfmon_del(screen->perfmon);
+ 
+    if (screen->pipe)
+       etna_drm_pipe_del(screen->pipe);
+diff --git a/src/gallium/winsys/etnaviv/drm/etnaviv_drm_perfmon.c b/src/gallium/winsys/etnaviv/drm/etnaviv_drm_perfmon.c
+index ea493f6..4d1d337 100644
+--- a/src/gallium/winsys/etnaviv/drm/etnaviv_drm_perfmon.c
++++ b/src/gallium/winsys/etnaviv/drm/etnaviv_drm_perfmon.c
+@@ -27,7 +27,7 @@
+ 
+ #include "etnaviv_drm_priv.h"
+ 
+-static int etna_perfmon_query_signals(struct etna_perfmon *pm, struct etna_perfmon_domain *dom)
++static int etna_drm_perfmon_query_signals(struct etna_perfmon *pm, struct etna_perfmon_domain *dom)
+ {
+ 	struct etna_device *dev = pm->pipe->gpu->dev;
+ 	struct drm_etnaviv_pm_signal req = {
+@@ -60,7 +60,7 @@ static int etna_perfmon_query_signals(struct etna_perfmon *pm, struct etna_perfm
+ 	return 0;
+ }
+ 
+-static int etna_perfmon_query_domains(struct etna_perfmon *pm)
++static int etna_drm_perfmon_query_domains(struct etna_perfmon *pm)
+ {
+ 	struct etna_device *dev = pm->pipe->gpu->dev;
+ 	struct drm_etnaviv_pm_domain req = {
+@@ -91,7 +91,7 @@ static int etna_perfmon_query_domains(struct etna_perfmon *pm)
+ 
+ 		/* Query all available signals for this domain. */
+ 		if (req.nr_signals > 0) {
+-			ret = etna_perfmon_query_signals(pm, dom);
++			ret = etna_drm_perfmon_query_signals(pm, dom);
+ 			if (ret)
+ 				return ret;
+ 		}
+@@ -100,7 +100,7 @@ static int etna_perfmon_query_domains(struct etna_perfmon *pm)
+ 	return 0;
+ }
+ 
+-static void etna_perfmon_free_signals(struct etna_perfmon_domain *dom)
++static void etna_drm_perfmon_free_signals(struct etna_perfmon_domain *dom)
+ {
+ 	struct etna_perfmon_signal *sig, *next;
+ 
+@@ -110,18 +110,18 @@ static void etna_perfmon_free_signals(struct etna_perfmon_domain *dom)
+ 	}
+ }
+ 
+-static void etna_perfmon_free_domains(struct etna_perfmon *pm)
++static void etna_drm_perfmon_free_domains(struct etna_perfmon *pm)
+ {
+ 	struct etna_perfmon_domain *dom, *next;
+ 
+ 	LIST_FOR_EACH_ENTRY_SAFE(dom, next, &pm->domains, head) {
+-		etna_perfmon_free_signals(dom);
++		etna_drm_perfmon_free_signals(dom);
+ 		list_del(&dom->head);
+ 		free(dom);
+ 	}
+ }
+ 
+-struct etna_perfmon *etna_perfmon_create(struct etna_pipe *pipe)
++struct etna_perfmon *etna_drm_perfmon_create(struct etna_pipe *pipe)
+ {
+ 	struct etna_perfmon *pm;
+ 	int ret;
+@@ -136,27 +136,27 @@ struct etna_perfmon *etna_perfmon_create(struct etna_pipe *pipe)
+ 	pm->pipe = pipe;
+ 
+ 	/* query all available domains and sources for this device */
+-	ret = etna_perfmon_query_domains(pm);
++	ret = etna_drm_perfmon_query_domains(pm);
+ 	if (ret)
+ 		goto fail;
+ 
+ 	return pm;
+ 
+ fail:
+-	etna_perfmon_del(pm);
++	etna_drm_perfmon_del(pm);
+ 	return NULL;
+ }
+ 
+-void etna_perfmon_del(struct etna_perfmon *pm)
++void etna_drm_perfmon_del(struct etna_perfmon *pm)
+ {
+ 	if (!pm)
+ 		return;
+ 
+-	etna_perfmon_free_domains(pm);
++	etna_drm_perfmon_free_domains(pm);
+ 	free(pm);
+ }
+ 
+-struct etna_perfmon_domain *etna_perfmon_get_dom_by_name(struct etna_perfmon *pm, const char *name)
++struct etna_perfmon_domain *etna_drm_perfmon_get_dom_by_name(struct etna_perfmon *pm, const char *name)
+ {
+ 	struct etna_perfmon_domain *dom;
+ 
+@@ -170,7 +170,7 @@ struct etna_perfmon_domain *etna_perfmon_get_dom_by_name(struct etna_perfmon *pm
+ 	return NULL;
+ }
+ 
+-struct etna_perfmon_signal *etna_perfmon_get_sig_by_name(struct etna_perfmon_domain *dom, const char *name)
++struct etna_perfmon_signal *etna_drm_perfmon_get_sig_by_name(struct etna_perfmon_domain *dom, const char *name)
+ {
+ 	struct etna_perfmon_signal *signal;
+ 

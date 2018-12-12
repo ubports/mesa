@@ -1,0 +1,139 @@
+From: =?utf-8?q?Guido_G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Wed, 10 Oct 2018 11:27:56 +0200
+Subject: Use mesa's atomic definitions
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Guido Günther <guido.gunther@puri.sm>
+---
+ src/gallium/drivers/etnaviv/drm/etnaviv_bo.c       | 6 +++---
+ src/gallium/drivers/etnaviv/drm/etnaviv_bo_cache.c | 2 +-
+ src/gallium/drivers/etnaviv/drm/etnaviv_device.c   | 9 ++++-----
+ src/gallium/drivers/etnaviv/drm/etnaviv_priv.h     | 7 +++++--
+ 4 files changed, 13 insertions(+), 11 deletions(-)
+
+diff --git a/src/gallium/drivers/etnaviv/drm/etnaviv_bo.c b/src/gallium/drivers/etnaviv/drm/etnaviv_bo.c
+index be88241..31ad484 100644
+--- a/src/gallium/drivers/etnaviv/drm/etnaviv_bo.c
++++ b/src/gallium/drivers/etnaviv/drm/etnaviv_bo.c
+@@ -95,7 +95,7 @@ static struct etna_bo *bo_from_handle(struct etna_device *dev,
+ 	bo->size = size;
+ 	bo->handle = handle;
+ 	bo->flags = flags;
+-	atomic_set(&bo->refcnt, 1);
++	p_atomic_set(&bo->refcnt, 1);
+ 	list_inithead(&bo->list);
+ 	/* add ourselves to the handle table: */
+ 	drmHashInsert(dev->handle_table, handle, bo);
+@@ -133,7 +133,7 @@ struct etna_bo *etna_bo_new(struct etna_device *dev, uint32_t size,
+ 
+ struct etna_bo *etna_bo_ref(struct etna_bo *bo)
+ {
+-	atomic_inc(&bo->refcnt);
++	p_atomic_inc(&bo->refcnt);
+ 
+ 	return bo;
+ }
+@@ -239,7 +239,7 @@ void etna_bo_del(struct etna_bo *bo)
+ 	if (!bo)
+ 		return;
+ 
+-	if (!atomic_dec_and_test(&bo->refcnt))
++	if (!p_atomic_dec_zero(&bo->refcnt))
+ 		return;
+ 
+ 	pthread_mutex_lock(&table_lock);
+diff --git a/src/gallium/drivers/etnaviv/drm/etnaviv_bo_cache.c b/src/gallium/drivers/etnaviv/drm/etnaviv_bo_cache.c
+index 6da847c..fa0d2a2 100644
+--- a/src/gallium/drivers/etnaviv/drm/etnaviv_bo_cache.c
++++ b/src/gallium/drivers/etnaviv/drm/etnaviv_bo_cache.c
+@@ -169,7 +169,7 @@ struct etna_bo *etna_bo_cache_alloc(struct etna_bo_cache *cache, uint32_t *size,
+ 		*size = bucket->size;
+ 		bo = find_in_bucket(bucket, flags);
+ 		if (bo) {
+-			atomic_set(&bo->refcnt, 1);
++			p_atomic_set(&bo->refcnt, 1);
+ 			etna_device_ref(bo->dev);
+ 			return bo;
+ 		}
+diff --git a/src/gallium/drivers/etnaviv/drm/etnaviv_device.c b/src/gallium/drivers/etnaviv/drm/etnaviv_device.c
+index c1833da..921ff4d 100644
+--- a/src/gallium/drivers/etnaviv/drm/etnaviv_device.c
++++ b/src/gallium/drivers/etnaviv/drm/etnaviv_device.c
+@@ -34,7 +34,6 @@
+ #include <pthread.h>
+ 
+ #include <xf86drm.h>
+-#include <xf86atomic.h>
+ 
+ #include "etnaviv_priv.h"
+ #include "etnaviv_drmif.h"
+@@ -48,7 +47,7 @@ struct etna_device *etna_device_new(int fd)
+ 	if (!dev)
+ 		return NULL;
+ 
+-	atomic_set(&dev->refcnt, 1);
++	p_atomic_set(&dev->refcnt, 1);
+ 	dev->fd = fd;
+ 	dev->handle_table = drmHashCreate();
+ 	dev->name_table = drmHashCreate();
+@@ -74,7 +73,7 @@ struct etna_device *etna_device_new_dup(int fd)
+ 
+ struct etna_device *etna_device_ref(struct etna_device *dev)
+ {
+-	atomic_inc(&dev->refcnt);
++	p_atomic_inc(&dev->refcnt);
+ 
+ 	return dev;
+ }
+@@ -93,7 +92,7 @@ static void etna_device_del_impl(struct etna_device *dev)
+ 
+ void etna_device_del_locked(struct etna_device *dev)
+ {
+-	if (!atomic_dec_and_test(&dev->refcnt))
++	if (!p_atomic_dec_zero(&dev->refcnt))
+ 		return;
+ 
+ 	etna_device_del_impl(dev);
+@@ -101,7 +100,7 @@ void etna_device_del_locked(struct etna_device *dev)
+ 
+ void etna_device_del(struct etna_device *dev)
+ {
+-	if (!atomic_dec_and_test(&dev->refcnt))
++	if (!p_atomic_dec_zero(&dev->refcnt))
+ 		return;
+ 
+ 	pthread_mutex_lock(&table_lock);
+diff --git a/src/gallium/drivers/etnaviv/drm/etnaviv_priv.h b/src/gallium/drivers/etnaviv/drm/etnaviv_priv.h
+index 97ac714..8eb2e02 100644
+--- a/src/gallium/drivers/etnaviv/drm/etnaviv_priv.h
++++ b/src/gallium/drivers/etnaviv/drm/etnaviv_priv.h
+@@ -40,6 +40,9 @@
+ 
+ #include <xf86drm.h>
+ 
++#include "util/list.h"
++#include "util/u_atomic.h"
++
+ #include "etnaviv_drmif.h"
+ #include "etnaviv_drm.h"
+ 
+@@ -56,7 +59,7 @@ struct etna_bo_cache {
+ 
+ struct etna_device {
+ 	int fd;
+-	atomic_t refcnt;
++	int refcnt;
+ 
+ 	/* tables to keep track of bo's, to avoid "evil-twin" etna_bo objects:
+ 	 *
+@@ -92,7 +95,7 @@ struct etna_bo {
+ 	uint32_t        flags;
+ 	uint32_t        name;           /* flink global handle (DRI2 name) */
+ 	uint64_t        offset;         /* offset to mmap() */
+-	atomic_t        refcnt;
++	int		refcnt;
+ 
+ 	/* in the common case, a bo won't be referenced by more than a single
+ 	 * command stream.  So to avoid looping over all the bo's in the

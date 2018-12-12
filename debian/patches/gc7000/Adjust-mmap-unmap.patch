@@ -1,0 +1,60 @@
+From: =?utf-8?q?Guido_G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Wed, 10 Oct 2018 11:27:56 +0200
+Subject: Adjust mmap/unmap
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Guido Günther <guido.gunther@puri.sm>
+---
+ src/gallium/drivers/etnaviv/drm/etnaviv_bo.c           | 10 +++++++---
+ src/gallium/drivers/etnaviv/etnaviv_compiler_cmdline.c |  1 +
+ 2 files changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/src/gallium/drivers/etnaviv/drm/etnaviv_bo.c b/src/gallium/drivers/etnaviv/drm/etnaviv_bo.c
+index 31ad484..d370d9e 100644
+--- a/src/gallium/drivers/etnaviv/drm/etnaviv_bo.c
++++ b/src/gallium/drivers/etnaviv/drm/etnaviv_bo.c
+@@ -24,6 +24,10 @@
+  *    Christian Gmeiner <christian.gmeiner@gmail.com>
+  */
+ 
++#include <sys/mman.h>
++
++#include "os/os_mman.h"
++
+ #include "etnaviv_priv.h"
+ #include "etnaviv_drmif.h"
+ 
+@@ -42,7 +46,7 @@ static void set_name(struct etna_bo *bo, uint32_t name)
+ void bo_del(struct etna_bo *bo)
+ {
+ 	if (bo->map)
+-		drm_munmap(bo->map, bo->size);
++		os_munmap(bo->map, bo->size);
+ 
+ 	if (bo->name)
+ 		drmHashDelete(bo->dev->name_table, bo->name);
+@@ -314,8 +318,8 @@ void *etna_bo_map(struct etna_bo *bo)
+ 			get_buffer_info(bo);
+ 		}
+ 
+-		bo->map = drm_mmap(0, bo->size, PROT_READ | PROT_WRITE,
+-				MAP_SHARED, bo->dev->fd, bo->offset);
++		bo->map = os_mmap(0, bo->size, PROT_READ | PROT_WRITE,
++				  MAP_SHARED, bo->dev->fd, bo->offset);
+ 		if (bo->map == MAP_FAILED) {
+ 			ERROR_MSG("mmap failed: %s", strerror(errno));
+ 			bo->map = NULL;
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_compiler_cmdline.c b/src/gallium/drivers/etnaviv/etnaviv_compiler_cmdline.c
+index bdaa78e..ecf5ddd 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_compiler_cmdline.c
++++ b/src/gallium/drivers/etnaviv/etnaviv_compiler_cmdline.c
+@@ -29,6 +29,7 @@
+ #include <fcntl.h>
+ #include <sys/mman.h>
+ #include <sys/stat.h>
++#include <sys/mman.h>
+ #include <unistd.h>
+ 
+ #include "tgsi/tgsi_dump.h"

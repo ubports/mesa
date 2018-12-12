@@ -1,0 +1,30 @@
+From: =?utf-8?q?Guido_G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Thu, 23 Aug 2018 12:37:38 +0000
+Subject: HACK: etnaviv: hack around "BO stride is too small for RS engine
+ width padding"
+
+by simply ignoring it.
+---
+ src/gallium/drivers/etnaviv/etnaviv_resource.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_resource.c b/src/gallium/drivers/etnaviv/etnaviv_resource.c
+index 3808c29..46463a9 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_resource.c
++++ b/src/gallium/drivers/etnaviv/etnaviv_resource.c
+@@ -538,13 +538,13 @@ etna_resource_from_handle(struct pipe_screen *pscreen,
+       BUG("BO stride %u is too small for RS engine width padding (%zu, format %s)",
+           level->stride, util_format_get_stride(tmpl->format, level->padded_width),
+           util_format_name(tmpl->format));
+-      goto fail;
++      // goto fail;
+    }
+    if (etna_bo_size(rsc->bo) < level->stride * level->padded_height) {
+       BUG("BO size %u is too small for RS engine height padding (%u, format %s)",
+           etna_bo_size(rsc->bo), level->stride * level->padded_height,
+           util_format_name(tmpl->format));
+-      goto fail;
++      // goto fail;
+    }
+ 
+    if (rsc->layout == ETNA_LAYOUT_LINEAR) {

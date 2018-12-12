@@ -1,14 +1,15 @@
+From: Dylan Baker <dylan@pnwbakers.com>
+Date: Tue, 4 Dec 2018 13:52:21 -0800
+Subject: [5/5] meson: Add toggle for glx-direct
+
 From patchwork Tue Dec  4 21:52:21 2018
 Content-Type: text/plain; charset="utf-8"
 MIME-Version: 1.0
 Content-Transfer-Encoding: 7bit
-Subject: [5/5] meson: Add toggle for glx-direct
-From: Dylan Baker <dylan@pnwbakers.com>
 X-Patchwork-Id: 265800
 Message-Id: <20181204215221.18155-6-dylan@pnwbakers.com>
 To: mesa-dev@lists.freedesktop.org
 Cc: ignatenko.brain@gmail.com, cefiar@gmail.com
-Date: Tue,  4 Dec 2018 13:52:21 -0800
 
 GNU Hurd needs to turn off glx-direct, rather than special case it,
 we'll just add a toggle.
@@ -18,10 +19,10 @@ we'll just add a toggle.
  2 files changed, 7 insertions(+), 3 deletions(-)
 
 diff --git a/meson.build b/meson.build
-index 3f835e2b952..3aacfa04900 100644
+index 27d15f6..3d38c20 100644
 --- a/meson.build
 +++ b/meson.build
-@@ -51,6 +51,7 @@ with_valgrind = get_option('valgrind')
+@@ -52,6 +52,7 @@ with_valgrind = get_option('valgrind')
  with_libunwind = get_option('libunwind')
  with_asm = get_option('asm')
  with_glx_read_only_text = get_option('glx-read-only-text')
@@ -29,7 +30,7 @@ index 3f835e2b952..3aacfa04900 100644
  with_osmesa = get_option('osmesa')
  with_swr_arches = get_option('swr-arches')
  with_tools = get_option('tools')
-@@ -365,9 +366,6 @@ if with_glvnd
+@@ -366,9 +367,6 @@ if with_glvnd
    endif
  endif
  
@@ -40,7 +41,7 @@ index 3f835e2b952..3aacfa04900 100644
    with_vulkan_icd_dir = join_paths(get_option('datadir'), 'vulkan/icd.d')
  endif
 diff --git a/meson_options.txt b/meson_options.txt
-index a1d5ab0e185..589d10bb3f3 100644
+index a1d5ab0..589d10b 100644
 --- a/meson_options.txt
 +++ b/meson_options.txt
 @@ -318,3 +318,9 @@ option(

@@ -1,0 +1,118 @@
+From: =?utf-8?q?Guido_G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Wed, 10 Oct 2018 20:36:00 +0200
+Subject: s/etna_pipe_/etna_drm_pipe_/
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Guido Günther <guido.gunther@puri.sm>
+---
+ src/gallium/drivers/etnaviv/etnaviv_drmif.h             |  8 ++++----
+ src/gallium/drivers/etnaviv/etnaviv_fence.c             |  2 +-
+ src/gallium/drivers/etnaviv/etnaviv_screen.c            |  4 ++--
+ src/gallium/winsys/etnaviv/drm/etnaviv_drm_cmd_stream.c |  2 +-
+ src/gallium/winsys/etnaviv/drm/etnaviv_drm_pipe.c       | 10 +++++-----
+ 5 files changed, 13 insertions(+), 13 deletions(-)
+
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_drmif.h b/src/gallium/drivers/etnaviv/etnaviv_drmif.h
+index e270f63..455e334 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_drmif.h
++++ b/src/gallium/drivers/etnaviv/etnaviv_drmif.h
+@@ -104,10 +104,10 @@ int etna_drm_gpu_get_param(struct etna_gpu *gpu, enum etna_param_id param,
+ /* pipe functions:
+  */
+ 
+-struct etna_pipe *etna_pipe_new(struct etna_gpu *gpu, enum etna_pipe_id id);
+-void etna_pipe_del(struct etna_pipe *pipe);
+-int etna_pipe_wait(struct etna_pipe *pipe, uint32_t timestamp, uint32_t ms);
+-int etna_pipe_wait_ns(struct etna_pipe *pipe, uint32_t timestamp, uint64_t ns);
++struct etna_pipe *etna_drm_pipe_new(struct etna_gpu *gpu, enum etna_pipe_id id);
++void etna_drm_pipe_del(struct etna_pipe *pipe);
++int etna_drm_pipe_wait(struct etna_pipe *pipe, uint32_t timestamp, uint32_t ms);
++int etna_drm_pipe_wait_ns(struct etna_pipe *pipe, uint32_t timestamp, uint64_t ns);
+ 
+ 
+ /* buffer-object functions:
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_fence.c b/src/gallium/drivers/etnaviv/etnaviv_fence.c
+index cf3e677..0a83f34 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_fence.c
++++ b/src/gallium/drivers/etnaviv/etnaviv_fence.c
+@@ -67,7 +67,7 @@ etna_screen_fence_finish(struct pipe_screen *pscreen, struct pipe_context *ctx,
+    if (fence->fence_fd != -1)
+ 	return !sync_wait(fence->fence_fd, timeout / 1000000);
+ 
+-   if (etna_pipe_wait_ns(fence->screen->pipe, fence->timestamp, timeout))
++   if (etna_drm_pipe_wait_ns(fence->screen->pipe, fence->timestamp, timeout))
+       return false;
+ 
+    return true;
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_screen.c b/src/gallium/drivers/etnaviv/etnaviv_screen.c
+index 5ebcfd0..bca77bc 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_screen.c
++++ b/src/gallium/drivers/etnaviv/etnaviv_screen.c
+@@ -86,7 +86,7 @@ etna_screen_destroy(struct pipe_screen *pscreen)
+       etna_perfmon_del(screen->perfmon);
+ 
+    if (screen->pipe)
+-      etna_pipe_del(screen->pipe);
++      etna_drm_pipe_del(screen->pipe);
+ 
+    if (screen->gpu)
+       etna_drm_gpu_del(screen->gpu);
+@@ -927,7 +927,7 @@ etna_screen_create(struct etna_device *dev, struct etna_gpu *gpu,
+    /* Disable autodisable for correct rendering with TS */
+    etna_mesa_debug |= ETNA_DBG_NO_AUTODISABLE;
+ 
+-   screen->pipe = etna_pipe_new(gpu, ETNA_PIPE_3D);
++   screen->pipe = etna_drm_pipe_new(gpu, ETNA_PIPE_3D);
+    if (!screen->pipe) {
+       DBG("could not create 3d pipe");
+       goto fail;
+diff --git a/src/gallium/winsys/etnaviv/drm/etnaviv_drm_cmd_stream.c b/src/gallium/winsys/etnaviv/drm/etnaviv_drm_cmd_stream.c
+index 2b66b95..25c18e2 100644
+--- a/src/gallium/winsys/etnaviv/drm/etnaviv_drm_cmd_stream.c
++++ b/src/gallium/winsys/etnaviv/drm/etnaviv_drm_cmd_stream.c
+@@ -242,7 +242,7 @@ void etna_cmd_stream_finish(struct etna_cmd_stream *stream)
+ 	struct etna_cmd_stream_priv *priv = etna_cmd_stream_priv(stream);
+ 
+ 	flush(stream, -1, NULL);
+-	etna_pipe_wait(priv->pipe, priv->last_timestamp, 5000);
++	etna_drm_pipe_wait(priv->pipe, priv->last_timestamp, 5000);
+ 	reset_buffer(stream);
+ }
+ 
+diff --git a/src/gallium/winsys/etnaviv/drm/etnaviv_drm_pipe.c b/src/gallium/winsys/etnaviv/drm/etnaviv_drm_pipe.c
+index 6039508..d36d10e 100644
+--- a/src/gallium/winsys/etnaviv/drm/etnaviv_drm_pipe.c
++++ b/src/gallium/winsys/etnaviv/drm/etnaviv_drm_pipe.c
+@@ -26,12 +26,12 @@
+ 
+ #include "etnaviv_drm_priv.h"
+ 
+-int etna_pipe_wait(struct etna_pipe *pipe, uint32_t timestamp, uint32_t ms)
++int etna_drm_pipe_wait(struct etna_pipe *pipe, uint32_t timestamp, uint32_t ms)
+ {
+-	return etna_pipe_wait_ns(pipe, timestamp, ms * 1000000);
++	return etna_drm_pipe_wait_ns(pipe, timestamp, ms * 1000000);
+ }
+ 
+-int etna_pipe_wait_ns(struct etna_pipe *pipe, uint32_t timestamp, uint64_t ns)
++int etna_drm_pipe_wait_ns(struct etna_pipe *pipe, uint32_t timestamp, uint64_t ns)
+ {
+ 	struct etna_device *dev = pipe->gpu->dev;
+ 	int ret;
+@@ -55,12 +55,12 @@ int etna_pipe_wait_ns(struct etna_pipe *pipe, uint32_t timestamp, uint64_t ns)
+ 	return 0;
+ }
+ 
+-void etna_pipe_del(struct etna_pipe *pipe)
++void etna_drm_pipe_del(struct etna_pipe *pipe)
+ {
+ 	free(pipe);
+ }
+ 
+-struct etna_pipe *etna_pipe_new(struct etna_gpu *gpu, enum etna_pipe_id id)
++struct etna_pipe *etna_drm_pipe_new(struct etna_gpu *gpu, enum etna_pipe_id id)
+ {
+ 	struct etna_pipe *pipe;
+ 

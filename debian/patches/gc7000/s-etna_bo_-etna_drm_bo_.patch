@@ -1,0 +1,595 @@
+From: =?utf-8?q?Guido_G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Wed, 10 Oct 2018 20:36:00 +0200
+Subject: s/etna_bo_/etna_drm_bo_/
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Guido Günther <guido.gunther@puri.sm>
+---
+ src/gallium/drivers/etnaviv/etnaviv_context.c      |  8 +++----
+ src/gallium/drivers/etnaviv/etnaviv_drmif.h        | 26 +++++++++++-----------
+ src/gallium/drivers/etnaviv/etnaviv_query_hw.c     | 16 ++++++-------
+ src/gallium/drivers/etnaviv/etnaviv_query_pm.c     | 12 +++++-----
+ src/gallium/drivers/etnaviv/etnaviv_resource.c     | 22 +++++++++---------
+ src/gallium/drivers/etnaviv/etnaviv_rs.c           | 12 +++++-----
+ src/gallium/drivers/etnaviv/etnaviv_screen.c       |  4 ++--
+ src/gallium/drivers/etnaviv/etnaviv_shader.c       | 10 ++++-----
+ src/gallium/drivers/etnaviv/etnaviv_texture_desc.c | 10 ++++-----
+ src/gallium/drivers/etnaviv/etnaviv_transfer.c     | 12 +++++-----
+ src/gallium/winsys/etnaviv/drm/etnaviv_drm_bo.c    | 26 +++++++++++-----------
+ .../winsys/etnaviv/drm/etnaviv_drm_bo_cache.c      |  2 +-
+ .../winsys/etnaviv/drm/etnaviv_drm_cmd_stream.c    |  4 ++--
+ 13 files changed, 82 insertions(+), 82 deletions(-)
+
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_context.c b/src/gallium/drivers/etnaviv/etnaviv_context.c
+index 0be7cc3..81c8596 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_context.c
++++ b/src/gallium/drivers/etnaviv/etnaviv_context.c
+@@ -499,13 +499,13 @@ etna_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
+ 
+    if (screen->specs.halti >= 5) {
+       /* Create an empty dummy texture descriptor */
+-      ctx->dummy_desc_bo = etna_bo_new(ctx->screen->dev, 0x100, DRM_ETNA_GEM_CACHE_WC);
++      ctx->dummy_desc_bo = etna_drm_bo_new(ctx->screen->dev, 0x100, DRM_ETNA_GEM_CACHE_WC);
+       if (!ctx->dummy_desc_bo)
+          goto fail;
+-      uint32_t *buf = etna_bo_map(ctx->dummy_desc_bo);
+-      etna_bo_cpu_prep(ctx->dummy_desc_bo, DRM_ETNA_PREP_WRITE);
++      uint32_t *buf = etna_drm_bo_map(ctx->dummy_desc_bo);
++      etna_drm_bo_cpu_prep(ctx->dummy_desc_bo, DRM_ETNA_PREP_WRITE);
+       memset(buf, 0, 0x100);
+-      etna_bo_cpu_fini(ctx->dummy_desc_bo);
++      etna_drm_bo_cpu_fini(ctx->dummy_desc_bo);
+       ctx->DUMMY_DESC_ADDR.bo = ctx->dummy_desc_bo;
+       ctx->DUMMY_DESC_ADDR.offset = 0;
+       ctx->DUMMY_DESC_ADDR.flags = ETNA_RELOC_READ;
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_drmif.h b/src/gallium/drivers/etnaviv/etnaviv_drmif.h
+index 5a6bef8..437fdf1 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_drmif.h
++++ b/src/gallium/drivers/etnaviv/etnaviv_drmif.h
+@@ -113,21 +113,21 @@ int etna_pipe_wait_ns(struct etna_pipe *pipe, uint32_t timestamp, uint64_t ns);
+ /* buffer-object functions:
+  */
+ 
+-struct etna_bo *etna_bo_new(struct etna_device *dev,
++struct etna_bo *etna_drm_bo_new(struct etna_device *dev,
+ 		uint32_t size, uint32_t flags);
+-struct etna_bo *etna_bo_from_handle(struct etna_device *dev,
++struct etna_bo *etna_drm_bo_from_handle(struct etna_device *dev,
+ 		uint32_t handle, uint32_t size);
+-struct etna_bo *etna_bo_from_name(struct etna_device *dev, uint32_t name);
+-struct etna_bo *etna_bo_from_dmabuf(struct etna_device *dev, int fd);
+-struct etna_bo *etna_bo_ref(struct etna_bo *bo);
+-void etna_bo_del(struct etna_bo *bo);
+-int etna_bo_get_name(struct etna_bo *bo, uint32_t *name);
+-uint32_t etna_bo_handle(struct etna_bo *bo);
+-int etna_bo_dmabuf(struct etna_bo *bo);
+-uint32_t etna_bo_size(struct etna_bo *bo);
+-void * etna_bo_map(struct etna_bo *bo);
+-int etna_bo_cpu_prep(struct etna_bo *bo, uint32_t op);
+-void etna_bo_cpu_fini(struct etna_bo *bo);
++struct etna_bo *etna_drm_bo_from_name(struct etna_device *dev, uint32_t name);
++struct etna_bo *etna_drm_bo_from_dmabuf(struct etna_device *dev, int fd);
++struct etna_bo *etna_drm_bo_ref(struct etna_bo *bo);
++void etna_drm_bo_del(struct etna_bo *bo);
++int etna_drm_bo_get_name(struct etna_bo *bo, uint32_t *name);
++uint32_t etna_drm_bo_handle(struct etna_bo *bo);
++int etna_drm_bo_dmabuf(struct etna_bo *bo);
++uint32_t etna_drm_bo_size(struct etna_bo *bo);
++void * etna_drm_bo_map(struct etna_bo *bo);
++int etna_drm_bo_cpu_prep(struct etna_bo *bo, uint32_t op);
++void etna_drm_bo_cpu_fini(struct etna_bo *bo);
+ 
+ 
+ /* cmd stream functions:
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_query_hw.c b/src/gallium/drivers/etnaviv/etnaviv_query_hw.c
+index 0f3cd72..dc2a0d4 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_query_hw.c
++++ b/src/gallium/drivers/etnaviv/etnaviv_query_hw.c
+@@ -131,11 +131,11 @@ realloc_query_bo(struct etna_context *ctx, struct etna_hw_query *hq)
+    /* don't assume the buffer is zero-initialized */
+    rsc = etna_resource(hq->prsc);
+ 
+-   etna_bo_cpu_prep(rsc->bo, DRM_ETNA_PREP_WRITE);
++   etna_drm_bo_cpu_prep(rsc->bo, DRM_ETNA_PREP_WRITE);
+ 
+-   map = etna_bo_map(rsc->bo);
++   map = etna_drm_bo_map(rsc->bo);
+    memset(map, 0, 0x1000);
+-   etna_bo_cpu_fini(rsc->bo);
++   etna_drm_bo_cpu_fini(rsc->bo);
+ }
+ 
+ static boolean
+@@ -193,23 +193,23 @@ etna_hw_get_query_result(struct etna_context *ctx, struct etna_query *q,
+          return false;
+       }
+ 
+-      ret = etna_bo_cpu_prep(rsc->bo, DRM_ETNA_PREP_READ | DRM_ETNA_PREP_NOSYNC);
++      ret = etna_drm_bo_cpu_prep(rsc->bo, DRM_ETNA_PREP_READ | DRM_ETNA_PREP_NOSYNC);
+       if (ret)
+          return false;
+ 
+-      etna_bo_cpu_fini(rsc->bo);
++      etna_drm_bo_cpu_fini(rsc->bo);
+    }
+ 
+    /* flush that GPU executes all query related actions */
+    ctx->base.flush(&ctx->base, NULL, 0);
+ 
+    /* get the result */
+-   etna_bo_cpu_prep(rsc->bo, DRM_ETNA_PREP_READ);
++   etna_drm_bo_cpu_prep(rsc->bo, DRM_ETNA_PREP_READ);
+ 
+-   void *ptr = etna_bo_map(rsc->bo);
++   void *ptr = etna_drm_bo_map(rsc->bo);
+    p->result(hq, ptr, result);
+ 
+-   etna_bo_cpu_fini(rsc->bo);
++   etna_drm_bo_cpu_fini(rsc->bo);
+ 
+    return true;
+ }
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_query_pm.c b/src/gallium/drivers/etnaviv/etnaviv_query_pm.c
+index ade0b97..31044a7 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_query_pm.c
++++ b/src/gallium/drivers/etnaviv/etnaviv_query_pm.c
+@@ -465,13 +465,13 @@ static bool
+ realloc_query_bo(struct etna_context *ctx, struct etna_pm_query *pq)
+ {
+    if (pq->bo)
+-      etna_bo_del(pq->bo);
++      etna_drm_bo_del(pq->bo);
+ 
+-   pq->bo = etna_bo_new(ctx->screen->dev, 64, DRM_ETNA_GEM_CACHE_WC);
++   pq->bo = etna_drm_bo_new(ctx->screen->dev, 64, DRM_ETNA_GEM_CACHE_WC);
+    if (unlikely(!pq->bo))
+       return false;
+ 
+-   pq->data = etna_bo_map(pq->bo);
++   pq->data = etna_drm_bo_map(pq->bo);
+ 
+    return true;
+ }
+@@ -514,7 +514,7 @@ etna_pm_destroy_query(struct etna_context *ctx, struct etna_query *q)
+ {
+    struct etna_pm_query *pq = etna_pm_query(q);
+ 
+-   etna_bo_del(pq->bo);
++   etna_drm_bo_del(pq->bo);
+    FREE(pq);
+ }
+ 
+@@ -549,11 +549,11 @@ etna_pm_get_query_result(struct etna_context *ctx, struct etna_query *q,
+       if (!wait)
+          return false;
+ 
+-      if (!etna_bo_cpu_prep(pq->bo, DRM_ETNA_PREP_READ))
++      if (!etna_drm_bo_cpu_prep(pq->bo, DRM_ETNA_PREP_READ))
+          return false;
+ 
+       pq->ready = true;
+-      etna_bo_cpu_fini(pq->bo);
++      etna_drm_bo_cpu_fini(pq->bo);
+    }
+ 
+    result->u32 = pq->data[2] - pq->data[1];
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_resource.c b/src/gallium/drivers/etnaviv/etnaviv_resource.c
+index 8facdc1..98f96e4 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_resource.c
++++ b/src/gallium/drivers/etnaviv/etnaviv_resource.c
+@@ -103,7 +103,7 @@ etna_screen_resource_alloc_ts(struct pipe_screen *pscreen,
+          rsc, rt_ts_size);
+ 
+    struct etna_bo *rt_ts;
+-   rt_ts = etna_bo_new(screen->dev, rt_ts_size, DRM_ETNA_GEM_CACHE_WC);
++   rt_ts = etna_drm_bo_new(screen->dev, rt_ts_size, DRM_ETNA_GEM_CACHE_WC);
+ 
+    if (unlikely(!rt_ts)) {
+       BUG("Problem allocating tile status for resource");
+@@ -119,7 +119,7 @@ etna_screen_resource_alloc_ts(struct pipe_screen *pscreen,
+     * can result in crashes. Do this on the CPU as this only happens once
+     * per surface anyway and it's a small area, so it may not be worth
+     * queuing this to the GPU. */
+-   void *ts_map = etna_bo_map(rt_ts);
++   void *ts_map = etna_drm_bo_map(rt_ts);
+    memset(ts_map, screen->specs.ts_clear_value, rt_ts_size);
+ 
+    return true;
+@@ -289,7 +289,7 @@ etna_resource_alloc(struct pipe_screen *pscreen, unsigned layout,
+    uint32_t flags = DRM_ETNA_GEM_CACHE_WC;
+    if (templat->bind & PIPE_BIND_VERTEX_BUFFER)
+       flags |= DRM_ETNA_GEM_FORCE_MMU;
+-   struct etna_bo *bo = etna_bo_new(screen->dev, size, flags);
++   struct etna_bo *bo = etna_drm_bo_new(screen->dev, size, flags);
+    if (unlikely(bo == NULL)) {
+       BUG("Problem allocating video memory for resource");
+       goto free_rsc;
+@@ -299,7 +299,7 @@ etna_resource_alloc(struct pipe_screen *pscreen, unsigned layout,
+    rsc->ts_bo = 0; /* TS is only created when first bound to surface */
+ 
+    if (DBG_ENABLED(ETNA_DBG_ZERO)) {
+-      void *map = etna_bo_map(bo);
++      void *map = etna_drm_bo_map(bo);
+       memset(map, 0, size);
+    }
+ 
+@@ -465,10 +465,10 @@ etna_resource_destroy(struct pipe_screen *pscreen, struct pipe_resource *prsc)
+    struct etna_resource *rsc = etna_resource(prsc);
+ 
+    if (rsc->bo)
+-      etna_bo_del(rsc->bo);
++      etna_drm_bo_del(rsc->bo);
+ 
+    if (rsc->ts_bo)
+-      etna_bo_del(rsc->ts_bo);
++      etna_drm_bo_del(rsc->ts_bo);
+ 
+    if (rsc->scanout)
+       renderonly_scanout_destroy(rsc->scanout, etna_screen(pscreen)->ro);
+@@ -547,9 +547,9 @@ etna_resource_from_handle(struct pipe_screen *pscreen,
+           util_format_name(tmpl->format));
+       goto fail;
+    }
+-   if (etna_bo_size(rsc->bo) < level->stride * level->padded_height) {
++   if (etna_drm_bo_size(rsc->bo) < level->stride * level->padded_height) {
+       BUG("BO size %u is too small for RS engine height padding (%u, format %s)",
+-          etna_bo_size(rsc->bo), level->stride * level->padded_height,
++          etna_drm_bo_size(rsc->bo), level->stride * level->padded_height,
+           util_format_name(tmpl->format));
+       goto fail;
+    }
+@@ -608,16 +608,16 @@ etna_resource_get_handle(struct pipe_screen *pscreen,
+    handle->modifier = layout_to_modifier(rsc->layout);
+ 
+    if (handle->type == WINSYS_HANDLE_TYPE_SHARED) {
+-      return etna_bo_get_name(rsc->bo, &handle->handle) == 0;
++      return etna_drm_bo_get_name(rsc->bo, &handle->handle) == 0;
+    } else if (handle->type == WINSYS_HANDLE_TYPE_KMS) {
+       if (renderonly_get_handle(scanout, handle)) {
+          return TRUE;
+       } else {
+-         handle->handle = etna_bo_handle(rsc->bo);
++         handle->handle = etna_drm_bo_handle(rsc->bo);
+          return TRUE;
+       }
+    } else if (handle->type == WINSYS_HANDLE_TYPE_FD) {
+-      handle->handle = etna_bo_dmabuf(rsc->bo);
++      handle->handle = etna_drm_bo_dmabuf(rsc->bo);
+       return TRUE;
+    } else {
+       return FALSE;
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_rs.c b/src/gallium/drivers/etnaviv/etnaviv_rs.c
+index fc4f65d..ec1c4b4 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_rs.c
++++ b/src/gallium/drivers/etnaviv/etnaviv_rs.c
+@@ -446,19 +446,19 @@ etna_manual_blit(struct etna_resource *dst, struct etna_resource_level *dst_lev,
+ 
+    tile_size = util_format_get_blocksize(blit_info->src.format) * 4 * 4;
+ 
+-   smap = etna_bo_map(src->bo);
++   smap = etna_drm_bo_map(src->bo);
+    if (!smap)
+       return false;
+ 
+-   dmap = etna_bo_map(dst->bo);
++   dmap = etna_drm_bo_map(dst->bo);
+    if (!dmap)
+       return false;
+ 
+    srow = smap + src_offset;
+    drow = dmap + dst_offset;
+ 
+-   etna_bo_cpu_prep(src->bo, DRM_ETNA_PREP_READ);
+-   etna_bo_cpu_prep(dst->bo, DRM_ETNA_PREP_WRITE);
++   etna_drm_bo_cpu_prep(src->bo, DRM_ETNA_PREP_READ);
++   etna_drm_bo_cpu_prep(dst->bo, DRM_ETNA_PREP_WRITE);
+ 
+    for (int y = 0; y < blit_info->src.box.height; y += 4) {
+       memcpy(drow, srow, tile_size * blit_info->src.box.width);
+@@ -466,8 +466,8 @@ etna_manual_blit(struct etna_resource *dst, struct etna_resource_level *dst_lev,
+       drow += dst_lev->stride * 4;
+    }
+ 
+-   etna_bo_cpu_fini(dst->bo);
+-   etna_bo_cpu_fini(src->bo);
++   etna_drm_bo_cpu_fini(dst->bo);
++   etna_drm_bo_cpu_fini(src->bo);
+ 
+    return true;
+ }
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_screen.c b/src/gallium/drivers/etnaviv/etnaviv_screen.c
+index afcc466..ac1b1f0 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_screen.c
++++ b/src/gallium/drivers/etnaviv/etnaviv_screen.c
+@@ -876,9 +876,9 @@ etna_screen_bo_from_handle(struct pipe_screen *pscreen,
+    struct etna_bo *bo;
+ 
+    if (whandle->type == WINSYS_HANDLE_TYPE_SHARED) {
+-      bo = etna_bo_from_name(screen->dev, whandle->handle);
++      bo = etna_drm_bo_from_name(screen->dev, whandle->handle);
+    } else if (whandle->type == WINSYS_HANDLE_TYPE_FD) {
+-      bo = etna_bo_from_dmabuf(screen->dev, whandle->handle);
++      bo = etna_drm_bo_from_dmabuf(screen->dev, whandle->handle);
+    } else {
+       DBG("Attempt to import unsupported handle type %d", whandle->type);
+       return NULL;
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_shader.c b/src/gallium/drivers/etnaviv/etnaviv_shader.c
+index 27c735b..372b1a6 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_shader.c
++++ b/src/gallium/drivers/etnaviv/etnaviv_shader.c
+@@ -41,14 +41,14 @@ static bool etna_icache_upload_shader(struct etna_context *ctx, struct etna_shad
+ {
+    if (v->bo)
+       return true;
+-   v->bo = etna_bo_new(ctx->screen->dev, v->code_size*4, DRM_ETNA_GEM_CACHE_WC);
++   v->bo = etna_drm_bo_new(ctx->screen->dev, v->code_size*4, DRM_ETNA_GEM_CACHE_WC);
+    if (!v->bo)
+       return false;
+ 
+-   void *buf = etna_bo_map(v->bo);
+-   etna_bo_cpu_prep(v->bo, DRM_ETNA_PREP_WRITE);
++   void *buf = etna_drm_bo_map(v->bo);
++   etna_drm_bo_cpu_prep(v->bo, DRM_ETNA_PREP_WRITE);
+    memcpy(buf, v->code, v->code_size*4);
+-   etna_bo_cpu_fini(v->bo);
++   etna_drm_bo_cpu_fini(v->bo);
+    DBG("Uploaded %s of %u words to bo %p", v->processor == PIPE_SHADER_FRAGMENT ? "fs":"vs", v->code_size, v->bo);
+    return true;
+ }
+@@ -402,7 +402,7 @@ etna_delete_shader_state(struct pipe_context *pctx, void *ss)
+       t = v;
+       v = v->next;
+       if (t->bo)
+-         etna_bo_del(t->bo);
++         etna_drm_bo_del(t->bo);
+       etna_destroy_shader(t);
+    }
+ 
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c b/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c
+index 311c41b..522967b 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c
++++ b/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c
+@@ -129,12 +129,12 @@ etna_create_sampler_view_desc(struct pipe_context *pctx, struct pipe_resource *p
+    }
+ 
+    /* Create texture descriptor */
+-   sv->bo = etna_bo_new(ctx->screen->dev, 0x100, DRM_ETNA_GEM_CACHE_WC);
++   sv->bo = etna_drm_bo_new(ctx->screen->dev, 0x100, DRM_ETNA_GEM_CACHE_WC);
+    if (!sv->bo)
+       goto error;
+ 
+-   uint32_t *buf = etna_bo_map(sv->bo);
+-   etna_bo_cpu_prep(sv->bo, DRM_ETNA_PREP_WRITE);
++   uint32_t *buf = etna_drm_bo_map(sv->bo);
++   etna_drm_bo_cpu_prep(sv->bo, DRM_ETNA_PREP_WRITE);
+    memset(buf, 0, 0x100);
+ 
+    /** GC7000 needs the size of the BASELOD level */
+@@ -167,7 +167,7 @@ etna_create_sampler_view_desc(struct pipe_context *pctx, struct pipe_resource *p
+       DESC_SET(LOD_ADDR(lod), /* etna_bo_gpu_address(res->bo) + */ res->levels[lod].offset);
+ #undef SET_DESC
+ 
+-   etna_bo_cpu_fini(sv->bo);
++   etna_drm_bo_cpu_fini(sv->bo);
+ 
+    sv->DESC_ADDR.bo = sv->bo;
+    sv->DESC_ADDR.offset = 0;
+@@ -203,7 +203,7 @@ etna_sampler_view_desc_destroy(struct pipe_context *pctx,
+ {
+    struct etna_sampler_view_desc *view = etna_sampler_view_desc(view_);
+    pipe_resource_reference(&view->base.texture, NULL);
+-   etna_bo_del(view->bo);
++   etna_drm_bo_del(view->bo);
+    FREE(view);
+ }
+ 
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_transfer.c b/src/gallium/drivers/etnaviv/etnaviv_transfer.c
+index 30ae3bf..2a383eb 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_transfer.c
++++ b/src/gallium/drivers/etnaviv/etnaviv_transfer.c
+@@ -80,7 +80,7 @@ etna_transfer_unmap(struct pipe_context *pctx, struct pipe_transfer *ptrans)
+     * back into GPU domain before the RS execs the blit to the base resource.
+     */
+    if (trans->rsc)
+-      etna_bo_cpu_fini(etna_resource(trans->rsc)->bo);
++      etna_drm_bo_cpu_fini(etna_resource(trans->rsc)->bo);
+ 
+    if (ptrans->usage & PIPE_TRANSFER_WRITE) {
+       if (trans->rsc) {
+@@ -91,7 +91,7 @@ etna_transfer_unmap(struct pipe_context *pctx, struct pipe_transfer *ptrans)
+       } else if (trans->staging) {
+          /* map buffer object */
+          struct etna_resource_level *res_level = &rsc->levels[ptrans->level];
+-         void *mapped = etna_bo_map(rsc->bo) + res_level->offset;
++         void *mapped = etna_drm_bo_map(rsc->bo) + res_level->offset;
+ 
+          if (rsc->layout == ETNA_LAYOUT_TILED) {
+             etna_texture_tile(
+@@ -126,7 +126,7 @@ etna_transfer_unmap(struct pipe_context *pctx, struct pipe_transfer *ptrans)
+     * domain after CPU access is finished.
+     */
+    if (!trans->rsc && !(ptrans->usage & PIPE_TRANSFER_UNSYNCHRONIZED))
+-      etna_bo_cpu_fini(rsc->bo);
++      etna_drm_bo_cpu_fini(rsc->bo);
+ 
+    pipe_resource_reference(&trans->rsc, NULL);
+    pipe_resource_reference(&ptrans->resource, NULL);
+@@ -321,12 +321,12 @@ etna_transfer_map(struct pipe_context *pctx, struct pipe_resource *prsc,
+       if (usage & PIPE_TRANSFER_WRITE)
+          prep_flags |= DRM_ETNA_PREP_WRITE;
+ 
+-      if (etna_bo_cpu_prep(rsc->bo, prep_flags))
++      if (etna_drm_bo_cpu_prep(rsc->bo, prep_flags))
+          goto fail_prep;
+    }
+ 
+    /* map buffer object */
+-   void *mapped = etna_bo_map(rsc->bo);
++   void *mapped = etna_drm_bo_map(rsc->bo);
+    if (!mapped)
+       goto fail;
+ 
+@@ -382,7 +382,7 @@ etna_transfer_map(struct pipe_context *pctx, struct pipe_resource *prsc,
+    }
+ 
+ fail:
+-   etna_bo_cpu_fini(rsc->bo);
++   etna_drm_bo_cpu_fini(rsc->bo);
+ fail_prep:
+    etna_transfer_unmap(pctx, ptrans);
+    return NULL;
+diff --git a/src/gallium/winsys/etnaviv/drm/etnaviv_drm_bo.c b/src/gallium/winsys/etnaviv/drm/etnaviv_drm_bo.c
+index bd41e4d..db840a4 100644
+--- a/src/gallium/winsys/etnaviv/drm/etnaviv_drm_bo.c
++++ b/src/gallium/winsys/etnaviv/drm/etnaviv_drm_bo.c
+@@ -70,7 +70,7 @@ static struct etna_bo *lookup_bo(void *tbl, uint32_t handle)
+ 
+ 	if (!drmHashLookup(tbl, handle, (void **)&bo)) {
+ 		/* found, incr refcnt and return: */
+-		bo = etna_bo_ref(bo);
++		bo = etna_drm_bo_ref(bo);
+ 
+ 		/* don't break the bucket if this bo was found in one */
+ 		list_delinit(&bo->list);
+@@ -108,7 +108,7 @@ static struct etna_bo *bo_from_handle(struct etna_device *dev,
+ }
+ 
+ /* allocate a new (un-tiled) buffer object */
+-struct etna_bo *etna_bo_new(struct etna_device *dev, uint32_t size,
++struct etna_bo *etna_drm_bo_new(struct etna_device *dev, uint32_t size,
+ 		uint32_t flags)
+ {
+ 	struct etna_bo *bo;
+@@ -135,7 +135,7 @@ struct etna_bo *etna_bo_new(struct etna_device *dev, uint32_t size,
+ 	return bo;
+ }
+ 
+-struct etna_bo *etna_bo_ref(struct etna_bo *bo)
++struct etna_bo *etna_drm_bo_ref(struct etna_bo *bo)
+ {
+ 	p_atomic_inc(&bo->refcnt);
+ 
+@@ -163,7 +163,7 @@ static int get_buffer_info(struct etna_bo *bo)
+ }
+ 
+ /* import a buffer object from DRI2 name */
+-struct etna_bo *etna_bo_from_name(struct etna_device *dev,
++struct etna_bo *etna_drm_bo_from_name(struct etna_device *dev,
+ 		uint32_t name)
+ {
+ 	struct etna_bo *bo;
+@@ -201,7 +201,7 @@ out_unlock:
+  * fd so caller should close() the fd when it is otherwise done
+  * with it (even if it is still using the 'struct etna_bo *')
+  */
+-struct etna_bo *etna_bo_from_dmabuf(struct etna_device *dev, int fd)
++struct etna_bo *etna_drm_bo_from_dmabuf(struct etna_device *dev, int fd)
+ {
+ 	struct etna_bo *bo;
+ 	int ret, size;
+@@ -236,7 +236,7 @@ out_unlock:
+ }
+ 
+ /* destroy a buffer object */
+-void etna_bo_del(struct etna_bo *bo)
++void etna_drm_bo_del(struct etna_bo *bo)
+ {
+ 	struct etna_device *dev = bo->dev;
+ 
+@@ -258,7 +258,7 @@ out:
+ }
+ 
+ /* get the global flink/DRI2 buffer name */
+-int etna_bo_get_name(struct etna_bo *bo, uint32_t *name)
++int etna_drm_bo_get_name(struct etna_bo *bo, uint32_t *name)
+ {
+ 	if (!bo->name) {
+ 		struct drm_gem_flink req = {
+@@ -282,7 +282,7 @@ int etna_bo_get_name(struct etna_bo *bo, uint32_t *name)
+ 	return 0;
+ }
+ 
+-uint32_t etna_bo_handle(struct etna_bo *bo)
++uint32_t etna_drm_bo_handle(struct etna_bo *bo)
+ {
+ 	return bo->handle;
+ }
+@@ -290,7 +290,7 @@ uint32_t etna_bo_handle(struct etna_bo *bo)
+ /* caller owns the dmabuf fd that is returned and is responsible
+  * to close() it when done
+  */
+-int etna_bo_dmabuf(struct etna_bo *bo)
++int etna_drm_bo_dmabuf(struct etna_bo *bo)
+ {
+ 	int ret, prime_fd;
+ 
+@@ -306,12 +306,12 @@ int etna_bo_dmabuf(struct etna_bo *bo)
+ 	return prime_fd;
+ }
+ 
+-uint32_t etna_bo_size(struct etna_bo *bo)
++uint32_t etna_drm_bo_size(struct etna_bo *bo)
+ {
+ 	return bo->size;
+ }
+ 
+-void *etna_bo_map(struct etna_bo *bo)
++void *etna_drm_bo_map(struct etna_bo *bo)
+ {
+ 	if (!bo->map) {
+ 		if (!bo->offset) {
+@@ -329,7 +329,7 @@ void *etna_bo_map(struct etna_bo *bo)
+ 	return bo->map;
+ }
+ 
+-int etna_bo_cpu_prep(struct etna_bo *bo, uint32_t op)
++int etna_drm_bo_cpu_prep(struct etna_bo *bo, uint32_t op)
+ {
+ 	struct drm_etnaviv_gem_cpu_prep req = {
+ 		.handle = bo->handle,
+@@ -342,7 +342,7 @@ int etna_bo_cpu_prep(struct etna_bo *bo, uint32_t op)
+ 			&req, sizeof(req));
+ }
+ 
+-void etna_bo_cpu_fini(struct etna_bo *bo)
++void etna_drm_bo_cpu_fini(struct etna_bo *bo)
+ {
+ 	struct drm_etnaviv_gem_cpu_fini req = {
+ 		.handle = bo->handle,
+diff --git a/src/gallium/winsys/etnaviv/drm/etnaviv_drm_bo_cache.c b/src/gallium/winsys/etnaviv/drm/etnaviv_drm_bo_cache.c
+index e4479f5..f2775b4 100644
+--- a/src/gallium/winsys/etnaviv/drm/etnaviv_drm_bo_cache.c
++++ b/src/gallium/winsys/etnaviv/drm/etnaviv_drm_bo_cache.c
+@@ -112,7 +112,7 @@ static struct etna_bo_bucket *get_bucket(struct etna_bo_cache *cache, uint32_t s
+ 
+ static int is_idle(struct etna_bo *bo)
+ {
+-	return etna_bo_cpu_prep(bo,
++	return etna_drm_bo_cpu_prep(bo,
+ 			DRM_ETNA_PREP_READ |
+ 			DRM_ETNA_PREP_WRITE |
+ 			DRM_ETNA_PREP_NOSYNC) == 0;
+diff --git a/src/gallium/winsys/etnaviv/drm/etnaviv_drm_cmd_stream.c b/src/gallium/winsys/etnaviv/drm/etnaviv_drm_cmd_stream.c
+index 177527d..2b66b95 100644
+--- a/src/gallium/winsys/etnaviv/drm/etnaviv_drm_cmd_stream.c
++++ b/src/gallium/winsys/etnaviv/drm/etnaviv_drm_cmd_stream.c
+@@ -136,7 +136,7 @@ static uint32_t append_bo(struct etna_cmd_stream *stream, struct etna_bo *bo)
+ 	priv->submit.bos[idx].flags = 0;
+ 	priv->submit.bos[idx].handle = bo->handle;
+ 
+-	priv->bos[idx] = etna_bo_ref(bo);
++	priv->bos[idx] = etna_drm_bo_ref(bo);
+ 
+ 	return idx;
+ }
+@@ -216,7 +216,7 @@ static void flush(struct etna_cmd_stream *stream, int in_fence_fd,
+ 		struct etna_bo *bo = priv->bos[i];
+ 
+ 		bo->current_stream = NULL;
+-		etna_bo_del(bo);
++		etna_drm_bo_del(bo);
+ 	}
+ 
+ 	if (out_fence_fd)

@@ -1,0 +1,29 @@
+From: =?utf-8?q?Guido_G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Wed, 10 Oct 2018 11:27:56 +0200
+Subject: Drop nonexistent headers
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Guido Günther <guido.gunther@puri.sm>
+---
+ src/gallium/drivers/etnaviv/drm/etnaviv_priv.h | 6 +-----
+ 1 file changed, 1 insertion(+), 5 deletions(-)
+
+diff --git a/src/gallium/drivers/etnaviv/drm/etnaviv_priv.h b/src/gallium/drivers/etnaviv/drm/etnaviv_priv.h
+index e45d364..11ccd3a 100644
+--- a/src/gallium/drivers/etnaviv/drm/etnaviv_priv.h
++++ b/src/gallium/drivers/etnaviv/drm/etnaviv_priv.h
+@@ -38,11 +38,7 @@
+ #include <stdio.h>
+ #include <assert.h>
+ 
+-#include "libdrm_macros.h"
+-#include "xf86drm.h"
+-#include "xf86atomic.h"
+-
+-#include "util_double_list.h"
++#include <xf86drm.h>
+ 
+ #include "etnaviv_drmif.h"
+ #include "etnaviv_drm.h"

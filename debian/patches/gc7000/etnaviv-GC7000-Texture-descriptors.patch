@@ -1,0 +1,557 @@
+From: "Wladimir J. van der Laan" <laanwj@gmail.com>
+Date: Sun, 29 Oct 2017 14:59:43 +0000
+Subject: etnaviv: GC7000: Texture descriptors
+
+Create a separate implementation file with texture-descriptor-based
+sampler views and sampler states. Initialize the one or the other
+based on the GPU. There is so little in common that this seemed more
+appropriate that keeping them as one type of state object would
+only be confusing.
+
+Signed-off-by: Wladimir J. van der Laan <laanwj@gmail.com>
+---
+ src/gallium/drivers/etnaviv/Makefile.sources       |   2 +
+ src/gallium/drivers/etnaviv/etnaviv_context.c      |  25 ++
+ src/gallium/drivers/etnaviv/etnaviv_context.h      |   4 +
+ src/gallium/drivers/etnaviv/etnaviv_texture.c      |   9 +-
+ src/gallium/drivers/etnaviv/etnaviv_texture_desc.c | 269 +++++++++++++++++++++
+ src/gallium/drivers/etnaviv/etnaviv_texture_desc.h |  76 ++++++
+ src/gallium/drivers/etnaviv/etnaviv_translate.h    |  16 ++
+ src/gallium/drivers/etnaviv/etnaviv_util.h         |  20 ++
+ src/gallium/drivers/etnaviv/meson.build            |   2 +
+ 9 files changed, 422 insertions(+), 1 deletion(-)
+ create mode 100644 src/gallium/drivers/etnaviv/etnaviv_texture_desc.c
+ create mode 100644 src/gallium/drivers/etnaviv/etnaviv_texture_desc.h
+
+diff --git a/src/gallium/drivers/etnaviv/Makefile.sources b/src/gallium/drivers/etnaviv/Makefile.sources
+index 0b20812..22cedc9 100644
+--- a/src/gallium/drivers/etnaviv/Makefile.sources
++++ b/src/gallium/drivers/etnaviv/Makefile.sources
+@@ -54,6 +54,8 @@ C_SOURCES :=  \
+ 	etnaviv_surface.h \
+ 	etnaviv_texture.c \
+ 	etnaviv_texture.h \
++	etnaviv_texture_desc.c \
++	etnaviv_texture_desc.h \
+ 	etnaviv_texture_state.c \
+ 	etnaviv_texture_state.h \
+ 	etnaviv_tiling.c \
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_context.c b/src/gallium/drivers/etnaviv/etnaviv_context.c
+index 3038d21..1e5bbcc 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_context.c
++++ b/src/gallium/drivers/etnaviv/etnaviv_context.c
+@@ -381,6 +381,17 @@ etna_cmd_stream_reset_notify(struct etna_cmd_stream *stream, void *priv)
+       etna_set_state(stream, VIVS_RS_SINGLE_BUFFER, COND(ctx->specs.single_buffer, VIVS_RS_SINGLE_BUFFER_ENABLE));
+    }
+ 
++   if (ctx->specs.halti >= 5) {
++      /* TXDESC cache flush - do this once at the beginning, as texture
++       * descriptors are only written by the CPU once, then patched by the kernel
++       * before command stream submission. It does not need flushing if the
++       * referenced image data changes.
++       */
++      etna_set_state(stream, VIVS_GL_FLUSH_CACHE,
++            VIVS_GL_FLUSH_CACHE_DESCRIPTOR_UNK12 |
++            VIVS_GL_FLUSH_CACHE_DESCRIPTOR_UNK13);
++   }
++
+    ctx->dirty = ~0L;
+    ctx->dirty_sampler_views = ~0L;
+ 
+@@ -486,6 +497,20 @@ etna_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
+    slab_create_child(&ctx->transfer_pool, &screen->transfer_pool);
+    list_inithead(&ctx->active_hw_queries);
+ 
++   if (screen->specs.halti >= 5) {
++      /* Create an empty dummy texture descriptor */
++      ctx->dummy_desc_bo = etna_bo_new(ctx->screen->dev, 0x100, DRM_ETNA_GEM_CACHE_UNCACHED);
++      if (!ctx->dummy_desc_bo)
++         goto fail;
++      uint32_t *buf = etna_bo_map(ctx->dummy_desc_bo);
++      etna_bo_cpu_prep(ctx->dummy_desc_bo, DRM_ETNA_PREP_WRITE);
++      memset(buf, 0, 0x100);
++      etna_bo_cpu_fini(ctx->dummy_desc_bo);
++      ctx->DUMMY_DESC_ADDR.bo = ctx->dummy_desc_bo;
++      ctx->DUMMY_DESC_ADDR.offset = 0;
++      ctx->DUMMY_DESC_ADDR.flags = ETNA_RELOC_READ;
++   }
++
+    return pctx;
+ 
+ fail:
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_context.h b/src/gallium/drivers/etnaviv/etnaviv_context.h
+index 584caa7..f1c429b 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_context.h
++++ b/src/gallium/drivers/etnaviv/etnaviv_context.h
+@@ -190,6 +190,10 @@ struct etna_context {
+ 
+    /* list of active hardware queries */
+    struct list_head active_hw_queries;
++
++   /* Dummy texture descriptor (if needed) */
++   struct etna_bo *dummy_desc_bo;
++   struct etna_reloc DUMMY_DESC_ADDR;
+ };
+ 
+ static inline struct etna_context *
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_texture.c b/src/gallium/drivers/etnaviv/etnaviv_texture.c
+index 72ef00b..b7dda07 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_texture.c
++++ b/src/gallium/drivers/etnaviv/etnaviv_texture.c
+@@ -32,6 +32,7 @@
+ #include "etnaviv_context.h"
+ #include "etnaviv_emit.h"
+ #include "etnaviv_format.h"
++#include "etnaviv_texture_desc.h"
+ #include "etnaviv_texture_state.h"
+ #include "etnaviv_translate.h"
+ #include "util/u_inlines.h"
+@@ -306,8 +307,14 @@ active_samplers_bits(struct etna_context *ctx)
+ void
+ etna_texture_init(struct pipe_context *pctx)
+ {
++   struct etna_context *ctx = etna_context(pctx);
++
+    pctx->bind_sampler_states = etna_bind_sampler_states;
+    pctx->set_sampler_views = etna_set_sampler_views;
+    pctx->texture_barrier = etna_texture_barrier;
+-   etna_texture_state_init(pctx);
++
++   if (ctx->specs.halti >= 5)
++      etna_texture_desc_init(pctx);
++   else
++      etna_texture_state_init(pctx);
+ }
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c b/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c
+new file mode 100644
+index 0000000..b058c25
+--- /dev/null
++++ b/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c
+@@ -0,0 +1,269 @@
++/*
++ * Copyright (c) 2017 Etnaviv Project
++ * Copyright (C) 2017 Zodiac Inflight Innovations
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sub license,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the
++ * next paragraph) shall be included in all copies or substantial portions
++ * of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
++ * DEALINGS IN THE SOFTWARE.
++ *
++ * Authors:
++ *    Wladimir J. van der Laan <laanwj@gmail.com>
++ */
++
++#include "etnaviv_texture_desc.h"
++
++#include "hw/common.xml.h"
++#include "hw/texdesc_3d.xml.h"
++
++#include "etnaviv_clear_blit.h"
++#include "etnaviv_context.h"
++#include "etnaviv_emit.h"
++#include "etnaviv_format.h"
++#include "etnaviv_translate.h"
++#include "etnaviv_texture.h"
++#include "util/u_inlines.h"
++#include "util/u_memory.h"
++
++#include <drm_fourcc.h>
++
++static void *
++etna_create_sampler_state_desc(struct pipe_context *pipe,
++                          const struct pipe_sampler_state *ss)
++{
++   struct etna_sampler_state_desc *cs = CALLOC_STRUCT(etna_sampler_state_desc);
++
++   if (!cs)
++      return NULL;
++
++   cs->SAMP_CTRL0 =
++      VIVS_NTE_DESCRIPTOR_SAMP_CTRL0_UWRAP(translate_texture_wrapmode(ss->wrap_s)) |
++      VIVS_NTE_DESCRIPTOR_SAMP_CTRL0_VWRAP(translate_texture_wrapmode(ss->wrap_t)) |
++      VIVS_NTE_DESCRIPTOR_SAMP_CTRL0_WWRAP(translate_texture_wrapmode(ss->wrap_r)) |
++      VIVS_NTE_DESCRIPTOR_SAMP_CTRL0_MIN(translate_texture_filter(ss->min_img_filter)) |
++      VIVS_NTE_DESCRIPTOR_SAMP_CTRL0_MIP(translate_texture_mipfilter(ss->min_mip_filter)) |
++      VIVS_NTE_DESCRIPTOR_SAMP_CTRL0_MAG(translate_texture_filter(ss->mag_img_filter)) |
++      VIVS_NTE_DESCRIPTOR_SAMP_CTRL0_UNK21;
++      /* no ROUND_UV bit? */
++   cs->SAMP_CTRL1 = VIVS_NTE_DESCRIPTOR_SAMP_CTRL1_UNK1;
++   uint32_t min_lod_fp8 = MIN2(etna_float_to_fixp88(ss->min_lod), 0xfff);
++   uint32_t max_lod_fp8 = MIN2(etna_float_to_fixp88(ss->max_lod), 0xfff);
++   if (ss->min_mip_filter != PIPE_TEX_MIPFILTER_NONE) {
++      cs->SAMP_LOD_MINMAX =
++         VIVS_NTE_DESCRIPTOR_SAMP_LOD_MINMAX_MAX(max_lod_fp8) |
++         VIVS_NTE_DESCRIPTOR_SAMP_LOD_MINMAX_MIN(min_lod_fp8);
++   } else {
++      cs->SAMP_LOD_MINMAX =
++         VIVS_NTE_DESCRIPTOR_SAMP_LOD_MINMAX_MAX(min_lod_fp8) |
++         VIVS_NTE_DESCRIPTOR_SAMP_LOD_MINMAX_MIN(min_lod_fp8);
++   }
++   cs->SAMP_LOD_BIAS =
++      VIVS_NTE_DESCRIPTOR_SAMP_LOD_BIAS_BIAS(etna_float_to_fixp88(ss->lod_bias)) |
++      COND(ss->lod_bias != 0.0, VIVS_NTE_DESCRIPTOR_SAMP_LOD_BIAS_ENABLE);
++   cs->TX_CTRL = 0; /* TODO: texture TS */
++
++   return cs;
++}
++
++static void
++etna_delete_sampler_state_desc(struct pipe_context *pctx, void *ss)
++{
++   FREE(ss);
++}
++
++static struct pipe_sampler_view *
++etna_create_sampler_view_desc(struct pipe_context *pctx, struct pipe_resource *prsc,
++                         const struct pipe_sampler_view *so)
++{
++   struct etna_sampler_view_desc *sv = CALLOC_STRUCT(etna_sampler_view_desc);
++   struct etna_context *ctx = etna_context(pctx);
++   const uint32_t format = translate_texture_format(so->format);
++   const bool ext = !!(format & EXT_FORMAT);
++   const bool astc = !!(format & ASTC_FORMAT);
++   const uint32_t swiz = get_texture_swiz(so->format, so->swizzle_r,
++                                          so->swizzle_g, so->swizzle_b,
++                                          so->swizzle_a);
++
++   if (!sv)
++      return NULL;
++
++   struct etna_resource *res = etna_texture_handle_incompatible(pctx, prsc);
++   if (!res) {
++      free(sv);
++      return NULL;
++   }
++
++   sv->base = *so;
++   pipe_reference_init(&sv->base.reference, 1);
++   sv->base.texture = NULL;
++   pipe_resource_reference(&sv->base.texture, prsc);
++   sv->base.context = pctx;
++
++   /* Determine whether target supported */
++   uint32_t target_hw = translate_texture_target(sv->base.target);
++   if (target_hw == ETNA_NO_MATCH) {
++      BUG("Unhandled texture target");
++      free(sv);
++      return NULL;
++   }
++
++   /* Texture descriptor sampler bits */
++   if (util_format_is_srgb(so->format)) {
++      sv->SAMP_CTRL1 |= VIVS_NTE_DESCRIPTOR_SAMP_CTRL1_SRGB;
++   } else {
++      sv->SAMP_CTRL0 |= VIVS_NTE_DESCRIPTOR_SAMP_CTRL0_RGB;
++   }
++
++   /* Create texture descriptor */
++   sv->bo = etna_bo_new(ctx->screen->dev, 0x100, DRM_ETNA_GEM_CACHE_UNCACHED);
++   if (!sv->bo)
++      goto error;
++
++   uint32_t *buf = etna_bo_map(sv->bo);
++   etna_bo_cpu_prep(sv->bo, DRM_ETNA_PREP_WRITE);
++   memset(buf, 0, 0x100);
++
++   /** GC7000 needs the size of the BASELOD level */
++   uint32_t base_width = u_minify(res->base.width0, sv->base.u.tex.first_level);
++   uint32_t base_height = u_minify(res->base.height0, sv->base.u.tex.first_level);
++
++#define DESC_SET(x, y) buf[(TEXDESC_##x)>>2] = (y)
++   DESC_SET(CONFIG0, COND(!ext && !astc, VIVS_TE_SAMPLER_CONFIG0_FORMAT(format))
++                   | VIVS_TE_SAMPLER_CONFIG0_TYPE(target_hw));
++   DESC_SET(CONFIG1, COND(ext, VIVS_TE_SAMPLER_CONFIG1_FORMAT_EXT(format)) |
++                     COND(astc, VIVS_TE_SAMPLER_CONFIG1_FORMAT_EXT(TEXTURE_FORMAT_EXT_ASTC)) |
++                            VIVS_TE_SAMPLER_CONFIG1_HALIGN(res->halign) | swiz |
++                            VIVS_TE_SAMPLER_CONFIG1_UNK25);
++   DESC_SET(CONFIG2, 0x00030000);
++   DESC_SET(LINEAR_STRIDE, res->levels[0].stride);
++   DESC_SET(SLICE, res->levels[0].layer_stride);
++   DESC_SET(3D_CONFIG, 0x00000001);
++   DESC_SET(ASTC0, COND(astc, VIVS_NTE_SAMPLER_ASTC0_ASTC_FORMAT(format)) |
++                   VIVS_NTE_SAMPLER_ASTC0_UNK8(0xc) |
++                   VIVS_NTE_SAMPLER_ASTC0_UNK16(0xc) |
++                   VIVS_NTE_SAMPLER_ASTC0_UNK24(0xc));
++   DESC_SET(BASELOD, TEXDESC_BASELOD_BASELOD(sv->base.u.tex.first_level) |
++                     TEXDESC_BASELOD_MAXLOD(MIN2(sv->base.u.tex.last_level, res->base.last_level)));
++   DESC_SET(LOG_SIZE_EXT, TEXDESC_LOG_SIZE_EXT_WIDTH(etna_log2_fixp88(base_width)) |
++                          TEXDESC_LOG_SIZE_EXT_HEIGHT(etna_log2_fixp88(base_height)));
++   DESC_SET(SIZE, VIVS_TE_SAMPLER_SIZE_WIDTH(base_width) |
++                  VIVS_TE_SAMPLER_SIZE_HEIGHT(base_height));
++   for (int lod = 0; lod <= res->base.last_level; ++lod)
++      DESC_SET(LOD_ADDR(lod), etna_bo_gpu_address(res->bo) + res->levels[lod].offset);
++#undef SET_DESC
++
++   etna_bo_cpu_fini(sv->bo);
++
++   sv->DESC_ADDR.bo = sv->bo;
++   sv->DESC_ADDR.offset = 0;
++   sv->DESC_ADDR.flags = ETNA_RELOC_READ;
++
++   return &sv->base;
++error:
++   free(sv);
++   return NULL;
++}
++
++static void
++etna_sampler_view_update_descriptor(struct etna_context *ctx,
++                                    struct etna_cmd_stream *stream,
++                                    struct etna_sampler_view_desc *sv)
++{
++   /* TODO: this should instruct the kernel to update the descriptor when the
++    * bo is submitted. For now, just prevent the bo from being freed
++    * while it is in use indirectly.
++    */
++   struct etna_resource *res = etna_resource(sv->base.texture);
++   if (res->texture) {
++      res = etna_resource(res->texture);
++   }
++   /* No need to ref LOD levels individually as they'll always come from the same bo */
++   etna_cmd_stream_ref(stream, res->bo);
++}
++
++static void
++etna_sampler_view_desc_destroy(struct pipe_context *pctx,
++                          struct pipe_sampler_view *view_)
++{
++   struct etna_sampler_view_desc *view = etna_sampler_view_desc(view_);
++   pipe_resource_reference(&view->base.texture, NULL);
++   etna_bo_del(view->bo);
++   FREE(view);
++}
++
++static void
++etna_emit_texture_desc(struct etna_context *ctx)
++{
++   struct etna_cmd_stream *stream = ctx->stream;
++   uint32_t active_samplers = active_samplers_bits(ctx);
++   uint32_t dirty = ctx->dirty;
++
++   if (unlikely(dirty & (ETNA_DIRTY_SAMPLERS | ETNA_DIRTY_SAMPLER_VIEWS))) {
++      for (int x = 0; x < PIPE_MAX_SAMPLERS; ++x) {
++         if ((1 << x) & active_samplers) {
++            struct etna_sampler_state_desc *ss = etna_sampler_state_desc(ctx->sampler[x]);
++            struct etna_sampler_view_desc *sv = etna_sampler_view_desc(ctx->sampler_view[x]);
++            etna_set_state(stream, VIVS_NTE_DESCRIPTOR_TX_CTRL(x), ss->TX_CTRL);
++            etna_set_state(stream, VIVS_NTE_DESCRIPTOR_SAMP_CTRL0(x), ss->SAMP_CTRL0 | sv->SAMP_CTRL0);
++            etna_set_state(stream, VIVS_NTE_DESCRIPTOR_SAMP_CTRL1(x), ss->SAMP_CTRL1 | sv->SAMP_CTRL1);
++            etna_set_state(stream, VIVS_NTE_DESCRIPTOR_SAMP_LOD_MINMAX(x), ss->SAMP_LOD_MINMAX);
++            etna_set_state(stream, VIVS_NTE_DESCRIPTOR_SAMP_LOD_BIAS(x), ss->SAMP_LOD_BIAS);
++         }
++      }
++   }
++
++   if (unlikely(dirty & ETNA_DIRTY_SAMPLER_VIEWS)) {
++      /* Set texture descriptors */
++      for (int x = 0; x < PIPE_MAX_SAMPLERS; ++x) {
++         if ((1 << x) & ctx->dirty_sampler_views) {
++            if ((1 << x) & active_samplers) {
++               struct etna_sampler_view_desc *sv = etna_sampler_view_desc(ctx->sampler_view[x]);
++               etna_sampler_view_update_descriptor(ctx, stream, sv);
++               etna_set_state_reloc(stream, VIVS_NTE_DESCRIPTOR_ADDR(x), &sv->DESC_ADDR);
++            } else {
++               /* dummy texture descriptors for unused samplers */
++               etna_set_state_reloc(stream, VIVS_NTE_DESCRIPTOR_ADDR(x), &ctx->DUMMY_DESC_ADDR);
++            }
++         }
++      }
++   }
++
++   if (unlikely(dirty & ETNA_DIRTY_SAMPLER_VIEWS)) {
++      /* Invalidate all dirty sampler views.
++       */
++      for (int x = 0; x < PIPE_MAX_SAMPLERS; ++x) {
++         if ((1 << x) & ctx->dirty_sampler_views) {
++            etna_set_state(stream, VIVS_NTE_DESCRIPTOR_INVALIDATE,
++                  VIVS_NTE_DESCRIPTOR_INVALIDATE_UNK29 |
++                  VIVS_NTE_DESCRIPTOR_INVALIDATE_IDX(x));
++         }
++      }
++   }
++}
++
++void
++etna_texture_desc_init(struct pipe_context *pctx)
++{
++   struct etna_context *ctx = etna_context(pctx);
++   DBG("etnaviv: Using descriptor-based texturing\n");
++   ctx->base.create_sampler_state = etna_create_sampler_state_desc;
++   ctx->base.delete_sampler_state = etna_delete_sampler_state_desc;
++   ctx->base.create_sampler_view = etna_create_sampler_view_desc;
++   ctx->base.sampler_view_destroy = etna_sampler_view_desc_destroy;
++   ctx->emit_texture_state = etna_emit_texture_desc;
++}
++
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_texture_desc.h b/src/gallium/drivers/etnaviv/etnaviv_texture_desc.h
+new file mode 100644
+index 0000000..200b398
+--- /dev/null
++++ b/src/gallium/drivers/etnaviv/etnaviv_texture_desc.h
+@@ -0,0 +1,76 @@
++/*
++ * Copyright (c) 2017 Etnaviv Project
++ * Copyright (C) 2017 Zodiac Inflight Innovations
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sub license,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the
++ * next paragraph) shall be included in all copies or substantial portions
++ * of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
++ * DEALINGS IN THE SOFTWARE.
++ *
++ * Authors:
++ *    Wladimir J. van der Laan <laanwj@gmail.com>
++ */
++
++#ifndef H_ETNAVIV_TEXTURE_DESC
++#define H_ETNAVIV_TEXTURE_DESC
++
++#include <etnaviv_drmif.h>
++
++#include "pipe/p_context.h"
++#include "pipe/p_state.h"
++
++#include "hw/state_3d.xml.h"
++
++struct etna_context;
++
++struct etna_sampler_state_desc {
++   struct pipe_sampler_state base;
++   uint32_t SAMP_CTRL0;
++   uint32_t SAMP_CTRL1;
++   uint32_t SAMP_LOD_MINMAX;
++   uint32_t SAMP_LOD_BIAS;
++   uint32_t TX_CTRL;
++};
++
++static inline struct etna_sampler_state_desc *
++etna_sampler_state_desc(struct pipe_sampler_state *samp)
++{
++   return (struct etna_sampler_state_desc *)samp;
++}
++
++struct etna_sampler_view_desc {
++   struct pipe_sampler_view base;
++   /* format-dependent merged with sampler state */
++   uint32_t SAMP_CTRL0;
++   uint32_t SAMP_CTRL1;
++
++   struct etna_bo *bo;
++   struct etna_reloc DESC_ADDR;
++};
++
++static inline struct etna_sampler_view_desc *
++etna_sampler_view_desc(struct pipe_sampler_view *view)
++{
++   return (struct etna_sampler_view_desc *)view;
++}
++
++/* Initialize context for descriptor-based texture views and descriptors */
++void
++etna_texture_desc_init(struct pipe_context *pctx);
++
++#endif
++
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_translate.h b/src/gallium/drivers/etnaviv/etnaviv_translate.h
+index 88ce107..4506a13 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_translate.h
++++ b/src/gallium/drivers/etnaviv/etnaviv_translate.h
+@@ -479,4 +479,20 @@ translate_samples_to_xyscale(int num_samples, int *xscale_out, int *yscale_out,
+    return true;
+ }
+ 
++static inline uint32_t
++translate_texture_target(unsigned target)
++{
++   switch (target) {
++   case PIPE_TEXTURE_1D:
++      return TEXTURE_TYPE_1D;
++   case PIPE_TEXTURE_2D:
++   case PIPE_TEXTURE_RECT:
++      return TEXTURE_TYPE_2D;
++   case PIPE_TEXTURE_CUBE:
++      return TEXTURE_TYPE_CUBE_MAP;
++   default:
++      return ETNA_NO_MATCH;
++   }
++}
++
+ #endif
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_util.h b/src/gallium/drivers/etnaviv/etnaviv_util.h
+index 62f6254..e8433ad 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_util.h
++++ b/src/gallium/drivers/etnaviv/etnaviv_util.h
+@@ -85,6 +85,19 @@ etna_float_to_fixp55(float f)
+    return (int32_t)(f * 32.0f + 0.5f);
+ }
+ 
++/* float to fixp 8.8 */
++static inline uint32_t
++etna_float_to_fixp88(float f)
++{
++   if (f >= (32767.0 - 1.0f) / 256.0f)
++      return 32767;
++
++   if (f < -16.0f)
++      return 32768;
++
++   return (int32_t)(f * 256.0f + 0.5f);
++}
++
+ /* texture size to log2 in fixp 5.5 format */
+ static inline uint32_t
+ etna_log2_fixp55(unsigned width)
+@@ -92,6 +105,13 @@ etna_log2_fixp55(unsigned width)
+    return etna_float_to_fixp55(logf((float)width) * RCPLOG2);
+ }
+ 
++/* texture size to log2 in fixp 8.8 format */
++static inline uint32_t
++etna_log2_fixp88(unsigned width)
++{
++   return etna_float_to_fixp88(logf((float)width) * RCPLOG2);
++}
++
+ /* float to fixp 16.16 */
+ static inline uint32_t
+ etna_f32_to_fixp16(float f)
+diff --git a/src/gallium/drivers/etnaviv/meson.build b/src/gallium/drivers/etnaviv/meson.build
+index 1733024..33d9626 100644
+--- a/src/gallium/drivers/etnaviv/meson.build
++++ b/src/gallium/drivers/etnaviv/meson.build
+@@ -73,6 +73,8 @@ files_etnaviv = files(
+   'etnaviv_surface.h',
+   'etnaviv_texture.c',
+   'etnaviv_texture.h',
++  'etnaviv_texture_desc.c',
++  'etnaviv_texture_desc.h',
+   'etnaviv_texture_state.c',
+   'etnaviv_texture_state.h',
+   'etnaviv_tiling.c',

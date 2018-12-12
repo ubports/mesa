@@ -1,0 +1,457 @@
+From: =?utf-8?q?Guido_G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Wed, 10 Oct 2018 11:27:56 +0200
+Subject: Drop drm_{public,private}
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Guido Günther <guido.gunther@puri.sm>
+---
+ src/gallium/drivers/etnaviv/drm/etnaviv_bo.c       | 30 +++++++++++-----------
+ src/gallium/drivers/etnaviv/drm/etnaviv_bo_cache.c | 12 ++++-----
+ .../drivers/etnaviv/drm/etnaviv_cmd_stream.c       | 16 ++++++------
+ src/gallium/drivers/etnaviv/drm/etnaviv_device.c   | 12 ++++-----
+ src/gallium/drivers/etnaviv/drm/etnaviv_gpu.c      |  6 ++---
+ src/gallium/drivers/etnaviv/drm/etnaviv_perfmon.c  |  8 +++---
+ src/gallium/drivers/etnaviv/drm/etnaviv_pipe.c     |  8 +++---
+ src/gallium/drivers/etnaviv/drm/etnaviv_priv.h     | 10 ++++----
+ 8 files changed, 51 insertions(+), 51 deletions(-)
+
+diff --git a/src/gallium/drivers/etnaviv/drm/etnaviv_bo.c b/src/gallium/drivers/etnaviv/drm/etnaviv_bo.c
+index 43ce6b4..be88241 100644
+--- a/src/gallium/drivers/etnaviv/drm/etnaviv_bo.c
++++ b/src/gallium/drivers/etnaviv/drm/etnaviv_bo.c
+@@ -27,8 +27,8 @@
+ #include "etnaviv_priv.h"
+ #include "etnaviv_drmif.h"
+ 
+-drm_private pthread_mutex_t table_lock = PTHREAD_MUTEX_INITIALIZER;
+-drm_private void bo_del(struct etna_bo *bo);
++pthread_mutex_t table_lock = PTHREAD_MUTEX_INITIALIZER;
++void bo_del(struct etna_bo *bo);
+ 
+ /* set buffer name, and add to table, call w/ table_lock held: */
+ static void set_name(struct etna_bo *bo, uint32_t name)
+@@ -39,7 +39,7 @@ static void set_name(struct etna_bo *bo, uint32_t name)
+ }
+ 
+ /* Called under table_lock */
+-drm_private void bo_del(struct etna_bo *bo)
++void bo_del(struct etna_bo *bo)
+ {
+ 	if (bo->map)
+ 		drm_munmap(bo->map, bo->size);
+@@ -104,7 +104,7 @@ static struct etna_bo *bo_from_handle(struct etna_device *dev,
+ }
+ 
+ /* allocate a new (un-tiled) buffer object */
+-drm_public struct etna_bo *etna_bo_new(struct etna_device *dev, uint32_t size,
++struct etna_bo *etna_bo_new(struct etna_device *dev, uint32_t size,
+ 		uint32_t flags)
+ {
+ 	struct etna_bo *bo;
+@@ -131,7 +131,7 @@ drm_public struct etna_bo *etna_bo_new(struct etna_device *dev, uint32_t size,
+ 	return bo;
+ }
+ 
+-drm_public struct etna_bo *etna_bo_ref(struct etna_bo *bo)
++struct etna_bo *etna_bo_ref(struct etna_bo *bo)
+ {
+ 	atomic_inc(&bo->refcnt);
+ 
+@@ -159,7 +159,7 @@ static int get_buffer_info(struct etna_bo *bo)
+ }
+ 
+ /* import a buffer object from DRI2 name */
+-drm_public struct etna_bo *etna_bo_from_name(struct etna_device *dev,
++struct etna_bo *etna_bo_from_name(struct etna_device *dev,
+ 		uint32_t name)
+ {
+ 	struct etna_bo *bo;
+@@ -197,7 +197,7 @@ out_unlock:
+  * fd so caller should close() the fd when it is otherwise done
+  * with it (even if it is still using the 'struct etna_bo *')
+  */
+-drm_public struct etna_bo *etna_bo_from_dmabuf(struct etna_device *dev, int fd)
++struct etna_bo *etna_bo_from_dmabuf(struct etna_device *dev, int fd)
+ {
+ 	struct etna_bo *bo;
+ 	int ret, size;
+@@ -232,7 +232,7 @@ out_unlock:
+ }
+ 
+ /* destroy a buffer object */
+-drm_public void etna_bo_del(struct etna_bo *bo)
++void etna_bo_del(struct etna_bo *bo)
+ {
+ 	struct etna_device *dev = bo->dev;
+ 
+@@ -254,7 +254,7 @@ out:
+ }
+ 
+ /* get the global flink/DRI2 buffer name */
+-drm_public int etna_bo_get_name(struct etna_bo *bo, uint32_t *name)
++int etna_bo_get_name(struct etna_bo *bo, uint32_t *name)
+ {
+ 	if (!bo->name) {
+ 		struct drm_gem_flink req = {
+@@ -278,7 +278,7 @@ drm_public int etna_bo_get_name(struct etna_bo *bo, uint32_t *name)
+ 	return 0;
+ }
+ 
+-drm_public uint32_t etna_bo_handle(struct etna_bo *bo)
++uint32_t etna_bo_handle(struct etna_bo *bo)
+ {
+ 	return bo->handle;
+ }
+@@ -286,7 +286,7 @@ drm_public uint32_t etna_bo_handle(struct etna_bo *bo)
+ /* caller owns the dmabuf fd that is returned and is responsible
+  * to close() it when done
+  */
+-drm_public int etna_bo_dmabuf(struct etna_bo *bo)
++int etna_bo_dmabuf(struct etna_bo *bo)
+ {
+ 	int ret, prime_fd;
+ 
+@@ -302,12 +302,12 @@ drm_public int etna_bo_dmabuf(struct etna_bo *bo)
+ 	return prime_fd;
+ }
+ 
+-drm_public uint32_t etna_bo_size(struct etna_bo *bo)
++uint32_t etna_bo_size(struct etna_bo *bo)
+ {
+ 	return bo->size;
+ }
+ 
+-drm_public void *etna_bo_map(struct etna_bo *bo)
++void *etna_bo_map(struct etna_bo *bo)
+ {
+ 	if (!bo->map) {
+ 		if (!bo->offset) {
+@@ -325,7 +325,7 @@ drm_public void *etna_bo_map(struct etna_bo *bo)
+ 	return bo->map;
+ }
+ 
+-drm_public int etna_bo_cpu_prep(struct etna_bo *bo, uint32_t op)
++int etna_bo_cpu_prep(struct etna_bo *bo, uint32_t op)
+ {
+ 	struct drm_etnaviv_gem_cpu_prep req = {
+ 		.handle = bo->handle,
+@@ -338,7 +338,7 @@ drm_public int etna_bo_cpu_prep(struct etna_bo *bo, uint32_t op)
+ 			&req, sizeof(req));
+ }
+ 
+-drm_public void etna_bo_cpu_fini(struct etna_bo *bo)
++void etna_bo_cpu_fini(struct etna_bo *bo)
+ {
+ 	struct drm_etnaviv_gem_cpu_fini req = {
+ 		.handle = bo->handle,
+diff --git a/src/gallium/drivers/etnaviv/drm/etnaviv_bo_cache.c b/src/gallium/drivers/etnaviv/drm/etnaviv_bo_cache.c
+index c81de26..6da847c 100644
+--- a/src/gallium/drivers/etnaviv/drm/etnaviv_bo_cache.c
++++ b/src/gallium/drivers/etnaviv/drm/etnaviv_bo_cache.c
+@@ -27,8 +27,8 @@
+ #include "etnaviv_priv.h"
+ #include "etnaviv_drmif.h"
+ 
+-drm_private void bo_del(struct etna_bo *bo);
+-drm_private extern pthread_mutex_t table_lock;
++void bo_del(struct etna_bo *bo);
++extern pthread_mutex_t table_lock;
+ 
+ static void add_bucket(struct etna_bo_cache *cache, int size)
+ {
+@@ -41,7 +41,7 @@ static void add_bucket(struct etna_bo_cache *cache, int size)
+ 	cache->num_buckets++;
+ }
+ 
+-drm_private void etna_bo_cache_init(struct etna_bo_cache *cache)
++void etna_bo_cache_init(struct etna_bo_cache *cache)
+ {
+ 	unsigned long size, cache_max_size = 64 * 1024 * 1024;
+ 
+@@ -67,7 +67,7 @@ drm_private void etna_bo_cache_init(struct etna_bo_cache *cache)
+ }
+ 
+ /* Frees older cached buffers.  Called under table_lock */
+-drm_private void etna_bo_cache_cleanup(struct etna_bo_cache *cache, time_t time)
++void etna_bo_cache_cleanup(struct etna_bo_cache *cache, time_t time)
+ {
+ 	unsigned i;
+ 
+@@ -155,7 +155,7 @@ out_unlock:
+  *
+  * NOTE: size is potentially rounded up to bucket size
+  */
+-drm_private struct etna_bo *etna_bo_cache_alloc(struct etna_bo_cache *cache, uint32_t *size,
++struct etna_bo *etna_bo_cache_alloc(struct etna_bo_cache *cache, uint32_t *size,
+     uint32_t flags)
+ {
+ 	struct etna_bo *bo;
+@@ -178,7 +178,7 @@ drm_private struct etna_bo *etna_bo_cache_alloc(struct etna_bo_cache *cache, uin
+ 	return NULL;
+ }
+ 
+-drm_private int etna_bo_cache_free(struct etna_bo_cache *cache, struct etna_bo *bo)
++int etna_bo_cache_free(struct etna_bo_cache *cache, struct etna_bo *bo)
+ {
+ 	struct etna_bo_bucket *bucket = get_bucket(cache, bo->size);
+ 
+diff --git a/src/gallium/drivers/etnaviv/drm/etnaviv_cmd_stream.c b/src/gallium/drivers/etnaviv/drm/etnaviv_cmd_stream.c
+index 7139c32..4135029 100644
+--- a/src/gallium/drivers/etnaviv/drm/etnaviv_cmd_stream.c
++++ b/src/gallium/drivers/etnaviv/drm/etnaviv_cmd_stream.c
+@@ -55,7 +55,7 @@ etna_cmd_stream_priv(struct etna_cmd_stream *stream)
+     return (struct etna_cmd_stream_priv *)stream;
+ }
+ 
+-drm_public struct etna_cmd_stream *etna_cmd_stream_new(struct etna_pipe *pipe,
++struct etna_cmd_stream *etna_cmd_stream_new(struct etna_pipe *pipe,
+         uint32_t size,
+ 		void (*reset_notify)(struct etna_cmd_stream *stream, void *priv),
+ 		void *priv)
+@@ -96,7 +96,7 @@ fail:
+ 	return NULL;
+ }
+ 
+-drm_public void etna_cmd_stream_del(struct etna_cmd_stream *stream)
++void etna_cmd_stream_del(struct etna_cmd_stream *stream)
+ {
+ 	struct etna_cmd_stream_priv *priv = etna_cmd_stream_priv(stream);
+ 
+@@ -120,7 +120,7 @@ static void reset_buffer(struct etna_cmd_stream *stream)
+ 		priv->reset_notify(stream, priv->reset_notify_priv);
+ }
+ 
+-drm_public uint32_t etna_cmd_stream_timestamp(struct etna_cmd_stream *stream)
++uint32_t etna_cmd_stream_timestamp(struct etna_cmd_stream *stream)
+ {
+ 	return etna_cmd_stream_priv(stream)->last_timestamp;
+ }
+@@ -223,13 +223,13 @@ static void flush(struct etna_cmd_stream *stream, int in_fence_fd,
+ 		*out_fence_fd = req.fence_fd;
+ }
+ 
+-drm_public void etna_cmd_stream_flush(struct etna_cmd_stream *stream)
++void etna_cmd_stream_flush(struct etna_cmd_stream *stream)
+ {
+ 	flush(stream, -1, NULL);
+ 	reset_buffer(stream);
+ }
+ 
+-drm_public void etna_cmd_stream_flush2(struct etna_cmd_stream *stream,
++void etna_cmd_stream_flush2(struct etna_cmd_stream *stream,
+ 									   int in_fence_fd,
+ 									   int *out_fence_fd)
+ {
+@@ -237,7 +237,7 @@ drm_public void etna_cmd_stream_flush2(struct etna_cmd_stream *stream,
+ 	reset_buffer(stream);
+ }
+ 
+-drm_public void etna_cmd_stream_finish(struct etna_cmd_stream *stream)
++void etna_cmd_stream_finish(struct etna_cmd_stream *stream)
+ {
+ 	struct etna_cmd_stream_priv *priv = etna_cmd_stream_priv(stream);
+ 
+@@ -246,7 +246,7 @@ drm_public void etna_cmd_stream_finish(struct etna_cmd_stream *stream)
+ 	reset_buffer(stream);
+ }
+ 
+-drm_public void etna_cmd_stream_reloc(struct etna_cmd_stream *stream,
++void etna_cmd_stream_reloc(struct etna_cmd_stream *stream,
+ 									  const struct etna_reloc *r)
+ {
+ 	struct etna_cmd_stream_priv *priv = etna_cmd_stream_priv(stream);
+@@ -264,7 +264,7 @@ drm_public void etna_cmd_stream_reloc(struct etna_cmd_stream *stream,
+ 	etna_cmd_stream_emit(stream, addr);
+ }
+ 
+-drm_public void etna_cmd_stream_perf(struct etna_cmd_stream *stream, const struct etna_perf *p)
++void etna_cmd_stream_perf(struct etna_cmd_stream *stream, const struct etna_perf *p)
+ {
+ 	struct etna_cmd_stream_priv *priv = etna_cmd_stream_priv(stream);
+ 	struct drm_etnaviv_gem_submit_pmr *pmr;
+diff --git a/src/gallium/drivers/etnaviv/drm/etnaviv_device.c b/src/gallium/drivers/etnaviv/drm/etnaviv_device.c
+index 699df25..c1833da 100644
+--- a/src/gallium/drivers/etnaviv/drm/etnaviv_device.c
++++ b/src/gallium/drivers/etnaviv/drm/etnaviv_device.c
+@@ -41,7 +41,7 @@
+ 
+ static pthread_mutex_t table_lock = PTHREAD_MUTEX_INITIALIZER;
+ 
+-drm_public struct etna_device *etna_device_new(int fd)
++struct etna_device *etna_device_new(int fd)
+ {
+ 	struct etna_device *dev = calloc(sizeof(*dev), 1);
+ 
+@@ -59,7 +59,7 @@ drm_public struct etna_device *etna_device_new(int fd)
+ 
+ /* like etna_device_new() but creates it's own private dup() of the fd
+  * which is close()d when the device is finalized. */
+-drm_public struct etna_device *etna_device_new_dup(int fd)
++struct etna_device *etna_device_new_dup(int fd)
+ {
+ 	int dup_fd = dup(fd);
+ 	struct etna_device *dev = etna_device_new(dup_fd);
+@@ -72,7 +72,7 @@ drm_public struct etna_device *etna_device_new_dup(int fd)
+ 	return dev;
+ }
+ 
+-drm_public struct etna_device *etna_device_ref(struct etna_device *dev)
++struct etna_device *etna_device_ref(struct etna_device *dev)
+ {
+ 	atomic_inc(&dev->refcnt);
+ 
+@@ -91,7 +91,7 @@ static void etna_device_del_impl(struct etna_device *dev)
+ 	free(dev);
+ }
+ 
+-drm_private void etna_device_del_locked(struct etna_device *dev)
++void etna_device_del_locked(struct etna_device *dev)
+ {
+ 	if (!atomic_dec_and_test(&dev->refcnt))
+ 		return;
+@@ -99,7 +99,7 @@ drm_private void etna_device_del_locked(struct etna_device *dev)
+ 	etna_device_del_impl(dev);
+ }
+ 
+-drm_public void etna_device_del(struct etna_device *dev)
++void etna_device_del(struct etna_device *dev)
+ {
+ 	if (!atomic_dec_and_test(&dev->refcnt))
+ 		return;
+@@ -109,7 +109,7 @@ drm_public void etna_device_del(struct etna_device *dev)
+ 	pthread_mutex_unlock(&table_lock);
+ }
+ 
+-drm_public int etna_device_fd(struct etna_device *dev)
++int etna_device_fd(struct etna_device *dev)
+ {
+    return dev->fd;
+ }
+diff --git a/src/gallium/drivers/etnaviv/drm/etnaviv_gpu.c b/src/gallium/drivers/etnaviv/drm/etnaviv_gpu.c
+index dc4c126..f7efa02 100644
+--- a/src/gallium/drivers/etnaviv/drm/etnaviv_gpu.c
++++ b/src/gallium/drivers/etnaviv/drm/etnaviv_gpu.c
+@@ -44,7 +44,7 @@ static uint64_t get_param(struct etna_device *dev, uint32_t core, uint32_t param
+ 	return req.value;
+ }
+ 
+-drm_public struct etna_gpu *etna_gpu_new(struct etna_device *dev, unsigned int core)
++struct etna_gpu *etna_gpu_new(struct etna_device *dev, unsigned int core)
+ {
+ 	struct etna_gpu *gpu;
+ 
+@@ -73,12 +73,12 @@ fail:
+ 	return NULL;
+ }
+ 
+-drm_public void etna_gpu_del(struct etna_gpu *gpu)
++void etna_gpu_del(struct etna_gpu *gpu)
+ {
+ 	free(gpu);
+ }
+ 
+-drm_public int etna_gpu_get_param(struct etna_gpu *gpu, enum etna_param_id param,
++int etna_gpu_get_param(struct etna_gpu *gpu, enum etna_param_id param,
+ 		uint64_t *value)
+ {
+ 	struct etna_device *dev = gpu->dev;
+diff --git a/src/gallium/drivers/etnaviv/drm/etnaviv_perfmon.c b/src/gallium/drivers/etnaviv/drm/etnaviv_perfmon.c
+index f6576b8..5f408a7 100644
+--- a/src/gallium/drivers/etnaviv/drm/etnaviv_perfmon.c
++++ b/src/gallium/drivers/etnaviv/drm/etnaviv_perfmon.c
+@@ -121,7 +121,7 @@ static void etna_perfmon_free_domains(struct etna_perfmon *pm)
+ 	}
+ }
+ 
+-drm_public struct etna_perfmon *etna_perfmon_create(struct etna_pipe *pipe)
++struct etna_perfmon *etna_perfmon_create(struct etna_pipe *pipe)
+ {
+ 	struct etna_perfmon *pm;
+ 	int ret;
+@@ -147,7 +147,7 @@ fail:
+ 	return NULL;
+ }
+ 
+-drm_public void etna_perfmon_del(struct etna_perfmon *pm)
++void etna_perfmon_del(struct etna_perfmon *pm)
+ {
+ 	if (!pm)
+ 		return;
+@@ -156,7 +156,7 @@ drm_public void etna_perfmon_del(struct etna_perfmon *pm)
+ 	free(pm);
+ }
+ 
+-drm_public struct etna_perfmon_domain *etna_perfmon_get_dom_by_name(struct etna_perfmon *pm, const char *name)
++struct etna_perfmon_domain *etna_perfmon_get_dom_by_name(struct etna_perfmon *pm, const char *name)
+ {
+ 	struct etna_perfmon_domain *dom;
+ 
+@@ -170,7 +170,7 @@ drm_public struct etna_perfmon_domain *etna_perfmon_get_dom_by_name(struct etna_
+ 	return NULL;
+ }
+ 
+-drm_public struct etna_perfmon_signal *etna_perfmon_get_sig_by_name(struct etna_perfmon_domain *dom, const char *name)
++struct etna_perfmon_signal *etna_perfmon_get_sig_by_name(struct etna_perfmon_domain *dom, const char *name)
+ {
+ 	struct etna_perfmon_signal *signal;
+ 
+diff --git a/src/gallium/drivers/etnaviv/drm/etnaviv_pipe.c b/src/gallium/drivers/etnaviv/drm/etnaviv_pipe.c
+index 4120a36..53954aa 100644
+--- a/src/gallium/drivers/etnaviv/drm/etnaviv_pipe.c
++++ b/src/gallium/drivers/etnaviv/drm/etnaviv_pipe.c
+@@ -26,12 +26,12 @@
+ 
+ #include "etnaviv_priv.h"
+ 
+-drm_public int etna_pipe_wait(struct etna_pipe *pipe, uint32_t timestamp, uint32_t ms)
++int etna_pipe_wait(struct etna_pipe *pipe, uint32_t timestamp, uint32_t ms)
+ {
+ 	return etna_pipe_wait_ns(pipe, timestamp, ms * 1000000);
+ }
+ 
+-drm_public int etna_pipe_wait_ns(struct etna_pipe *pipe, uint32_t timestamp, uint64_t ns)
++int etna_pipe_wait_ns(struct etna_pipe *pipe, uint32_t timestamp, uint64_t ns)
+ {
+ 	struct etna_device *dev = pipe->gpu->dev;
+ 	int ret;
+@@ -55,12 +55,12 @@ drm_public int etna_pipe_wait_ns(struct etna_pipe *pipe, uint32_t timestamp, uin
+ 	return 0;
+ }
+ 
+-drm_public void etna_pipe_del(struct etna_pipe *pipe)
++void etna_pipe_del(struct etna_pipe *pipe)
+ {
+ 	free(pipe);
+ }
+ 
+-drm_public struct etna_pipe *etna_pipe_new(struct etna_gpu *gpu, enum etna_pipe_id id)
++struct etna_pipe *etna_pipe_new(struct etna_gpu *gpu, enum etna_pipe_id id)
+ {
+ 	struct etna_pipe *pipe;
+ 
+diff --git a/src/gallium/drivers/etnaviv/drm/etnaviv_priv.h b/src/gallium/drivers/etnaviv/drm/etnaviv_priv.h
+index 11ccd3a..97ac714 100644
+--- a/src/gallium/drivers/etnaviv/drm/etnaviv_priv.h
++++ b/src/gallium/drivers/etnaviv/drm/etnaviv_priv.h
+@@ -74,14 +74,14 @@ struct etna_device {
+ 	int closefd;        /* call close(fd) upon destruction */
+ };
+ 
+-drm_private void etna_bo_cache_init(struct etna_bo_cache *cache);
+-drm_private void etna_bo_cache_cleanup(struct etna_bo_cache *cache, time_t time);
+-drm_private struct etna_bo *etna_bo_cache_alloc(struct etna_bo_cache *cache,
++void etna_bo_cache_init(struct etna_bo_cache *cache);
++void etna_bo_cache_cleanup(struct etna_bo_cache *cache, time_t time);
++struct etna_bo *etna_bo_cache_alloc(struct etna_bo_cache *cache,
+ 		uint32_t *size, uint32_t flags);
+-drm_private int etna_bo_cache_free(struct etna_bo_cache *cache, struct etna_bo *bo);
++int etna_bo_cache_free(struct etna_bo_cache *cache, struct etna_bo *bo);
+ 
+ /* for where @table_lock is already held: */
+-drm_private void etna_device_del_locked(struct etna_device *dev);
++void etna_device_del_locked(struct etna_device *dev);
+ 
+ /* a GEM buffer object allocated from the DRM device */
+ struct etna_bo {

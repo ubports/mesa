@@ -1,0 +1,197 @@
+From: =?utf-8?q?Guido_G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Wed, 10 Oct 2018 16:29:29 +0200
+Subject: Revert "Use mesa's logging functions"
+
+This reverts commit e76dc122ba918ebf139bfb0258443c5a47c1c41e.
+---
+ src/gallium/drivers/etnaviv/drm/etnaviv_bo.c         |  6 +++---
+ src/gallium/drivers/etnaviv/drm/etnaviv_cmd_stream.c |  2 +-
+ src/gallium/drivers/etnaviv/drm/etnaviv_gpu.c        |  8 ++++----
+ src/gallium/drivers/etnaviv/drm/etnaviv_perfmon.c    | 16 ++++++++--------
+ src/gallium/drivers/etnaviv/drm/etnaviv_pipe.c       |  4 ++--
+ src/gallium/drivers/etnaviv/drm/etnaviv_priv.h       | 18 ++++++++++++++++--
+ 6 files changed, 34 insertions(+), 20 deletions(-)
+
+diff --git a/src/gallium/drivers/etnaviv/drm/etnaviv_bo.c b/src/gallium/drivers/etnaviv/drm/etnaviv_bo.c
+index 8e5cfbb..d370d9e 100644
+--- a/src/gallium/drivers/etnaviv/drm/etnaviv_bo.c
++++ b/src/gallium/drivers/etnaviv/drm/etnaviv_bo.c
+@@ -179,7 +179,7 @@ struct etna_bo *etna_bo_from_name(struct etna_device *dev,
+ 		goto out_unlock;
+ 
+ 	if (drmIoctl(dev->fd, DRM_IOCTL_GEM_OPEN, &req)) {
+-		BUG("gem-open failed: %s", strerror(errno));
++		ERROR_MSG("gem-open failed: %s", strerror(errno));
+ 		goto out_unlock;
+ 	}
+ 
+@@ -297,7 +297,7 @@ int etna_bo_dmabuf(struct etna_bo *bo)
+ 	ret = drmPrimeHandleToFD(bo->dev->fd, bo->handle, DRM_CLOEXEC,
+ 				&prime_fd);
+ 	if (ret) {
+-		BUG("failed to get dmabuf fd: %d", ret);
++		ERROR_MSG("failed to get dmabuf fd: %d", ret);
+ 		return ret;
+ 	}
+ 
+@@ -321,7 +321,7 @@ void *etna_bo_map(struct etna_bo *bo)
+ 		bo->map = os_mmap(0, bo->size, PROT_READ | PROT_WRITE,
+ 				  MAP_SHARED, bo->dev->fd, bo->offset);
+ 		if (bo->map == MAP_FAILED) {
+-			BUG("mmap failed: %s", strerror(errno));
++			ERROR_MSG("mmap failed: %s", strerror(errno));
+ 			bo->map = NULL;
+ 		}
+ 	}
+diff --git a/src/gallium/drivers/etnaviv/drm/etnaviv_cmd_stream.c b/src/gallium/drivers/etnaviv/drm/etnaviv_cmd_stream.c
+index c9c7a85..4135029 100644
+--- a/src/gallium/drivers/etnaviv/drm/etnaviv_cmd_stream.c
++++ b/src/gallium/drivers/etnaviv/drm/etnaviv_cmd_stream.c
+@@ -63,7 +63,7 @@ struct etna_cmd_stream *etna_cmd_stream_new(struct etna_pipe *pipe,
+ 	struct etna_cmd_stream_priv *stream = NULL;
+ 
+ 	if (size == 0) {
+-		BUG("invalid size of 0");
++		ERROR_MSG("invalid size of 0");
+ 		goto fail;
+ 	}
+ 
+diff --git a/src/gallium/drivers/etnaviv/drm/etnaviv_gpu.c b/src/gallium/drivers/etnaviv/drm/etnaviv_gpu.c
+index 77e8fe7..f7efa02 100644
+--- a/src/gallium/drivers/etnaviv/drm/etnaviv_gpu.c
++++ b/src/gallium/drivers/etnaviv/drm/etnaviv_gpu.c
+@@ -37,7 +37,7 @@ static uint64_t get_param(struct etna_device *dev, uint32_t core, uint32_t param
+ 
+ 	ret = drmCommandWriteRead(dev->fd, DRM_ETNAVIV_GET_PARAM, &req, sizeof(req));
+ 	if (ret) {
+-		BUG("get-param (%x) failed! %d (%s)", param, ret, strerror(errno));
++		ERROR_MSG("get-param (%x) failed! %d (%s)", param, ret, strerror(errno));
+ 		return 0;
+ 	}
+ 
+@@ -50,7 +50,7 @@ struct etna_gpu *etna_gpu_new(struct etna_device *dev, unsigned int core)
+ 
+ 	gpu = calloc(1, sizeof(*gpu));
+ 	if (!gpu) {
+-		BUG("allocation failed");
++		ERROR_MSG("allocation failed");
+ 		goto fail;
+ 	}
+ 
+@@ -63,7 +63,7 @@ struct etna_gpu *etna_gpu_new(struct etna_device *dev, unsigned int core)
+ 	if (!gpu->model)
+ 		goto fail;
+ 
+-	DBG(" GPU model:          0x%x (rev %x)", gpu->model, gpu->revision);
++	INFO_MSG(" GPU model:          0x%x (rev %x)", gpu->model, gpu->revision);
+ 
+ 	return gpu;
+ fail:
+@@ -147,7 +147,7 @@ int etna_gpu_get_param(struct etna_gpu *gpu, enum etna_param_id param,
+ 		return 0;
+ 
+ 	default:
+-		BUG("invalid param id: %d", param);
++		ERROR_MSG("invalid param id: %d", param);
+ 		return -1;
+ 	}
+ 
+diff --git a/src/gallium/drivers/etnaviv/drm/etnaviv_perfmon.c b/src/gallium/drivers/etnaviv/drm/etnaviv_perfmon.c
+index dd03a97..5f408a7 100644
+--- a/src/gallium/drivers/etnaviv/drm/etnaviv_perfmon.c
++++ b/src/gallium/drivers/etnaviv/drm/etnaviv_perfmon.c
+@@ -47,9 +47,9 @@ static int etna_perfmon_query_signals(struct etna_perfmon *pm, struct etna_perfm
+ 		if (!sig)
+ 			return -ENOMEM;
+ 
+-		DBG("perfmon signal:");
+-		DBG("id         = %d", req.id);
+-		DBG("name       = %s", req.name);
++		INFO_MSG("perfmon signal:");
++		INFO_MSG("id         = %d", req.id);
++		INFO_MSG("name       = %s", req.name);
+ 
+ 		sig->domain = dom;
+ 		sig->signal = req.id;
+@@ -84,10 +84,10 @@ static int etna_perfmon_query_domains(struct etna_perfmon *pm)
+ 		strncpy(dom->name, req.name, sizeof(dom->name));
+ 		list_addtail(&dom->head, &pm->domains);
+ 
+-		DBG("perfmon domain:");
+-		DBG("id         = %d", req.id);
+-		DBG("name       = %s", req.name);
+-		DBG("nr_signals = %d", req.nr_signals);
++		INFO_MSG("perfmon domain:");
++		INFO_MSG("id         = %d", req.id);
++		INFO_MSG("name       = %s", req.name);
++		INFO_MSG("nr_signals = %d", req.nr_signals);
+ 
+ 		/* Query all available signals for this domain. */
+ 		if (req.nr_signals > 0) {
+@@ -128,7 +128,7 @@ struct etna_perfmon *etna_perfmon_create(struct etna_pipe *pipe)
+ 
+ 	pm = calloc(1, sizeof(*pm));
+ 	if (!pm) {
+-		BUG("allocation failed");
++		ERROR_MSG("allocation failed");
+ 		return NULL;
+ 	}
+ 
+diff --git a/src/gallium/drivers/etnaviv/drm/etnaviv_pipe.c b/src/gallium/drivers/etnaviv/drm/etnaviv_pipe.c
+index 6a10647..53954aa 100644
+--- a/src/gallium/drivers/etnaviv/drm/etnaviv_pipe.c
++++ b/src/gallium/drivers/etnaviv/drm/etnaviv_pipe.c
+@@ -48,7 +48,7 @@ int etna_pipe_wait_ns(struct etna_pipe *pipe, uint32_t timestamp, uint64_t ns)
+ 
+ 	ret = drmCommandWrite(dev->fd, DRM_ETNAVIV_WAIT_FENCE, &req, sizeof(req));
+ 	if (ret) {
+-		BUG("wait-fence failed! %d (%s)", ret, strerror(errno));
++		ERROR_MSG("wait-fence failed! %d (%s)", ret, strerror(errno));
+ 		return ret;
+ 	}
+ 
+@@ -66,7 +66,7 @@ struct etna_pipe *etna_pipe_new(struct etna_gpu *gpu, enum etna_pipe_id id)
+ 
+ 	pipe = calloc(1, sizeof(*pipe));
+ 	if (!pipe) {
+-		BUG("allocation failed");
++		ERROR_MSG("allocation failed");
+ 		goto fail;
+ 	}
+ 
+diff --git a/src/gallium/drivers/etnaviv/drm/etnaviv_priv.h b/src/gallium/drivers/etnaviv/drm/etnaviv_priv.h
+index edac829..37f211e 100644
+--- a/src/gallium/drivers/etnaviv/drm/etnaviv_priv.h
++++ b/src/gallium/drivers/etnaviv/drm/etnaviv_priv.h
+@@ -46,8 +46,6 @@
+ 
+ #include "etnaviv_drmif.h"
+ #include "etnaviv_drm.h"
+-/* ...until we move everything out of drm/ */
+-#include "../etnaviv_debug.h"
+ 
+ struct etna_bo_bucket {
+ 	uint32_t size;
+@@ -179,6 +177,22 @@ struct etna_perfmon_signal
+ };
+ 
+ #define ALIGN(v,a) (((v) + (a) - 1) & ~((a) - 1))
++
++#define enable_debug 1  /* TODO make dynamic */
++
++#define INFO_MSG(fmt, ...) \
++		do { drmMsg("[I] "fmt " (%s:%d)\n", \
++				##__VA_ARGS__, __FUNCTION__, __LINE__); } while (0)
++#define DEBUG_MSG(fmt, ...) \
++		do if (enable_debug) { drmMsg("[D] "fmt " (%s:%d)\n", \
++				##__VA_ARGS__, __FUNCTION__, __LINE__); } while (0)
++#define WARN_MSG(fmt, ...) \
++		do { drmMsg("[W] "fmt " (%s:%d)\n", \
++				##__VA_ARGS__, __FUNCTION__, __LINE__); } while (0)
++#define ERROR_MSG(fmt, ...) \
++		do { drmMsg("[E] " fmt " (%s:%d)\n", \
++				##__VA_ARGS__, __FUNCTION__, __LINE__); } while (0)
++
+ #define VOID2U64(x) ((uint64_t)(unsigned long)(x))
+ 
+ static inline void get_abs_timeout(struct drm_etnaviv_timespec *tv, uint64_t ns)

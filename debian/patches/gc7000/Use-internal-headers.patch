@@ -1,0 +1,67 @@
+From: =?utf-8?q?Guido_G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Wed, 10 Oct 2018 11:27:56 +0200
+Subject: Use internal headers
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Guido Günther <guido.gunther@puri.sm>
+---
+ src/gallium/drivers/etnaviv/etnaviv_blt.h           | 2 +-
+ src/gallium/drivers/etnaviv/etnaviv_texture.h       | 2 +-
+ src/gallium/drivers/etnaviv/etnaviv_texture_desc.h  | 2 +-
+ src/gallium/drivers/etnaviv/etnaviv_texture_state.h | 2 +-
+ 4 files changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_blt.h b/src/gallium/drivers/etnaviv/etnaviv_blt.h
+index 6f1a3c4..8684408 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_blt.h
++++ b/src/gallium/drivers/etnaviv/etnaviv_blt.h
+@@ -30,7 +30,7 @@
+ #include "etnaviv_tiling.h"
+ 
+ #include <stdbool.h>
+-#include <etnaviv_drmif.h>
++#include "drm/etnaviv_drmif.h"
+ 
+ struct pipe_context;
+ 
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_texture.h b/src/gallium/drivers/etnaviv/etnaviv_texture.h
+index b3e099b..4d66a9f 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_texture.h
++++ b/src/gallium/drivers/etnaviv/etnaviv_texture.h
+@@ -27,7 +27,7 @@
+ #ifndef H_ETNAVIV_TEXTURE
+ #define H_ETNAVIV_TEXTURE
+ 
+-#include <etnaviv_drmif.h>
++#include "drm/etnaviv_drmif.h"
+ 
+ #include "pipe/p_context.h"
+ #include "pipe/p_state.h"
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_texture_desc.h b/src/gallium/drivers/etnaviv/etnaviv_texture_desc.h
+index 200b398..6fd3403 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_texture_desc.h
++++ b/src/gallium/drivers/etnaviv/etnaviv_texture_desc.h
+@@ -28,7 +28,7 @@
+ #ifndef H_ETNAVIV_TEXTURE_DESC
+ #define H_ETNAVIV_TEXTURE_DESC
+ 
+-#include <etnaviv_drmif.h>
++#include "drm/etnaviv_drmif.h"
+ 
+ #include "pipe/p_context.h"
+ #include "pipe/p_state.h"
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_texture_state.h b/src/gallium/drivers/etnaviv/etnaviv_texture_state.h
+index 86bbcb3..ef8b533 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_texture_state.h
++++ b/src/gallium/drivers/etnaviv/etnaviv_texture_state.h
+@@ -27,7 +27,7 @@
+ #ifndef H_ETNAVIV_TEXTURE_PLAIN
+ #define H_ETNAVIV_TEXTURE_PLAIN
+ 
+-#include <etnaviv_drmif.h>
++#include "drm/etnaviv_drmif.h"
+ 
+ #include "etnaviv_texture.h"
+ 

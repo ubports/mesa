@@ -1,0 +1,30 @@
+From: "Wladimir J. van der Laan" <laanwj@gmail.com>
+Date: Mon, 23 Oct 2017 09:03:34 +0000
+Subject: etnaviv: When supertiling disabled,
+ disable all supertile-related features
+
+There are various checks for super-tile-related features in the driver,
+be sure to cover them all.
+---
+ src/gallium/drivers/etnaviv/etnaviv_screen.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_screen.c b/src/gallium/drivers/etnaviv/etnaviv_screen.c
+index fb51aa5..afcc466 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_screen.c
++++ b/src/gallium/drivers/etnaviv/etnaviv_screen.c
+@@ -997,10 +997,13 @@ etna_screen_create(struct etna_device *dev, struct etna_gpu *gpu,
+          screen->features[viv_chipFeatures] &= ~chipFeatures_FAST_CLEAR;
+    if (DBG_ENABLED(ETNA_DBG_NO_AUTODISABLE))
+       screen->features[viv_chipMinorFeatures1] &= ~chipMinorFeatures1_AUTO_DISABLE;
+-   if (DBG_ENABLED(ETNA_DBG_NO_SUPERTILE))
++   if (DBG_ENABLED(ETNA_DBG_NO_SUPERTILE)) {
+       screen->specs.can_supertile = 0;
++      screen->features[viv_chipMinorFeatures0] &= ~chipMinorFeatures0_SUPER_TILED;
++      screen->features[viv_chipMinorFeatures2] &= ~chipMinorFeatures2_SUPERTILED_TEXTURE;
+    if (DBG_ENABLED(ETNA_DBG_NO_SINGLEBUF))
+       screen->specs.single_buffer = 0;
++   }
+ 
+    pscreen->destroy = etna_screen_destroy;
+    pscreen->get_param = etna_screen_get_param;

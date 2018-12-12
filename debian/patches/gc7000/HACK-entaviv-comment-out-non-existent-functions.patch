@@ -1,0 +1,35 @@
+From: =?utf-8?q?Guido_G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Wed, 22 Aug 2018 16:58:47 +0000
+Subject: HACK: entaviv comment out non-existent functions
+
+This series uses functions not in libdrm, simply drop them for the
+moment.
+---
+ src/gallium/drivers/etnaviv/etnaviv_texture_desc.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c b/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c
+index b058c25..a98e40a 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c
++++ b/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c
+@@ -162,8 +162,9 @@ etna_create_sampler_view_desc(struct pipe_context *pctx, struct pipe_resource *p
+                           TEXDESC_LOG_SIZE_EXT_HEIGHT(etna_log2_fixp88(base_height)));
+    DESC_SET(SIZE, VIVS_TE_SAMPLER_SIZE_WIDTH(base_width) |
+                   VIVS_TE_SAMPLER_SIZE_HEIGHT(base_height));
++   /* FIXME: etna_bo_gpu_address does not exist in libdrm */
+    for (int lod = 0; lod <= res->base.last_level; ++lod)
+-      DESC_SET(LOD_ADDR(lod), etna_bo_gpu_address(res->bo) + res->levels[lod].offset);
++      DESC_SET(LOD_ADDR(lod), /* etna_bo_gpu_address(res->bo) + */ res->levels[lod].offset);
+ #undef SET_DESC
+ 
+    etna_bo_cpu_fini(sv->bo);
+@@ -192,7 +193,8 @@ etna_sampler_view_update_descriptor(struct etna_context *ctx,
+       res = etna_resource(res->texture);
+    }
+    /* No need to ref LOD levels individually as they'll always come from the same bo */
+-   etna_cmd_stream_ref(stream, res->bo);
++   /* FIXME: etna_cmd_stream_ref does not exist in libdrm */
++   // etna_cmd_stream_ref(stream, res->bo);
+ }
+ 
+ static void

@@ -1,0 +1,231 @@
+From: =?utf-8?q?Guido_G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Wed, 10 Oct 2018 20:36:00 +0200
+Subject: s/etna_gpu_/etna_drm_gpu_/
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Guido Günther <guido.gunther@puri.sm>
+---
+ src/gallium/drivers/etnaviv/etnaviv_drmif.h        |  8 ++---
+ src/gallium/drivers/etnaviv/etnaviv_screen.c       | 36 +++++++++++-----------
+ src/gallium/winsys/etnaviv/drm/etnaviv_drm_gpu.c   |  8 ++---
+ .../winsys/etnaviv/drm/etnaviv_drm_winsys.c        |  6 ++--
+ 4 files changed, 29 insertions(+), 29 deletions(-)
+
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_drmif.h b/src/gallium/drivers/etnaviv/etnaviv_drmif.h
+index 6cc4c2a..e270f63 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_drmif.h
++++ b/src/gallium/drivers/etnaviv/etnaviv_drmif.h
+@@ -95,10 +95,10 @@ int etna_drm_device_fd(struct etna_device *dev);
+ /* gpu functions:
+  */
+ 
+-struct etna_gpu *etna_gpu_new(struct etna_device *dev, unsigned int core);
+-void etna_gpu_del(struct etna_gpu *gpu);
+-int etna_gpu_get_param(struct etna_gpu *gpu, enum etna_param_id param,
+-		uint64_t *value);
++struct etna_gpu *etna_drm_gpu_new(struct etna_device *dev, unsigned int core);
++void etna_drm_gpu_del(struct etna_gpu *gpu);
++int etna_drm_gpu_get_param(struct etna_gpu *gpu, enum etna_param_id param,
++			   uint64_t *value);
+ 
+ 
+ /* pipe functions:
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_screen.c b/src/gallium/drivers/etnaviv/etnaviv_screen.c
+index 0ecf308..5ebcfd0 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_screen.c
++++ b/src/gallium/drivers/etnaviv/etnaviv_screen.c
+@@ -89,7 +89,7 @@ etna_screen_destroy(struct pipe_screen *pscreen)
+       etna_pipe_del(screen->pipe);
+ 
+    if (screen->gpu)
+-      etna_gpu_del(screen->gpu);
++      etna_drm_gpu_del(screen->gpu);
+ 
+    if (screen->ro)
+       FREE(screen->ro);
+@@ -668,50 +668,50 @@ etna_get_specs(struct etna_screen *screen)
+    uint64_t val;
+    uint32_t instruction_count;
+ 
+-   if (etna_gpu_get_param(screen->gpu, ETNA_GPU_INSTRUCTION_COUNT, &val)) {
++   if (etna_drm_gpu_get_param(screen->gpu, ETNA_GPU_INSTRUCTION_COUNT, &val)) {
+       DBG("could not get ETNA_GPU_INSTRUCTION_COUNT");
+       goto fail;
+    }
+    instruction_count = val;
+ 
+-   if (etna_gpu_get_param(screen->gpu, ETNA_GPU_VERTEX_OUTPUT_BUFFER_SIZE,
++   if (etna_drm_gpu_get_param(screen->gpu, ETNA_GPU_VERTEX_OUTPUT_BUFFER_SIZE,
+                           &val)) {
+       DBG("could not get ETNA_GPU_VERTEX_OUTPUT_BUFFER_SIZE");
+       goto fail;
+    }
+    screen->specs.vertex_output_buffer_size = val;
+ 
+-   if (etna_gpu_get_param(screen->gpu, ETNA_GPU_VERTEX_CACHE_SIZE, &val)) {
++   if (etna_drm_gpu_get_param(screen->gpu, ETNA_GPU_VERTEX_CACHE_SIZE, &val)) {
+       DBG("could not get ETNA_GPU_VERTEX_CACHE_SIZE");
+       goto fail;
+    }
+    screen->specs.vertex_cache_size = val;
+ 
+-   if (etna_gpu_get_param(screen->gpu, ETNA_GPU_SHADER_CORE_COUNT, &val)) {
++   if (etna_drm_gpu_get_param(screen->gpu, ETNA_GPU_SHADER_CORE_COUNT, &val)) {
+       DBG("could not get ETNA_GPU_SHADER_CORE_COUNT");
+       goto fail;
+    }
+    screen->specs.shader_core_count = val;
+ 
+-   if (etna_gpu_get_param(screen->gpu, ETNA_GPU_STREAM_COUNT, &val)) {
++   if (etna_drm_gpu_get_param(screen->gpu, ETNA_GPU_STREAM_COUNT, &val)) {
+       DBG("could not get ETNA_GPU_STREAM_COUNT");
+       goto fail;
+    }
+    screen->specs.stream_count = val;
+ 
+-   if (etna_gpu_get_param(screen->gpu, ETNA_GPU_REGISTER_MAX, &val)) {
++   if (etna_drm_gpu_get_param(screen->gpu, ETNA_GPU_REGISTER_MAX, &val)) {
+       DBG("could not get ETNA_GPU_REGISTER_MAX");
+       goto fail;
+    }
+    screen->specs.max_registers = val;
+ 
+-   if (etna_gpu_get_param(screen->gpu, ETNA_GPU_PIXEL_PIPES, &val)) {
++   if (etna_drm_gpu_get_param(screen->gpu, ETNA_GPU_PIXEL_PIPES, &val)) {
+       DBG("could not get ETNA_GPU_PIXEL_PIPES");
+       goto fail;
+    }
+    screen->specs.pixel_pipes = val;
+ 
+-   if (etna_gpu_get_param(screen->gpu, ETNA_GPU_NUM_CONSTANTS, &val)) {
++   if (etna_drm_gpu_get_param(screen->gpu, ETNA_GPU_NUM_CONSTANTS, &val)) {
+       DBG("could not get %s", "ETNA_GPU_NUM_CONSTANTS");
+       goto fail;
+    }
+@@ -933,55 +933,55 @@ etna_screen_create(struct etna_device *dev, struct etna_gpu *gpu,
+       goto fail;
+    }
+ 
+-   if (etna_gpu_get_param(screen->gpu, ETNA_GPU_MODEL, &val)) {
++   if (etna_drm_gpu_get_param(screen->gpu, ETNA_GPU_MODEL, &val)) {
+       DBG("could not get ETNA_GPU_MODEL");
+       goto fail;
+    }
+    screen->model = val;
+ 
+-   if (etna_gpu_get_param(screen->gpu, ETNA_GPU_REVISION, &val)) {
++   if (etna_drm_gpu_get_param(screen->gpu, ETNA_GPU_REVISION, &val)) {
+       DBG("could not get ETNA_GPU_REVISION");
+       goto fail;
+    }
+    screen->revision = val;
+ 
+-   if (etna_gpu_get_param(screen->gpu, ETNA_GPU_FEATURES_0, &val)) {
++   if (etna_drm_gpu_get_param(screen->gpu, ETNA_GPU_FEATURES_0, &val)) {
+       DBG("could not get ETNA_GPU_FEATURES_0");
+       goto fail;
+    }
+    screen->features[0] = val;
+ 
+-   if (etna_gpu_get_param(screen->gpu, ETNA_GPU_FEATURES_1, &val)) {
++   if (etna_drm_gpu_get_param(screen->gpu, ETNA_GPU_FEATURES_1, &val)) {
+       DBG("could not get ETNA_GPU_FEATURES_1");
+       goto fail;
+    }
+    screen->features[1] = val;
+ 
+-   if (etna_gpu_get_param(screen->gpu, ETNA_GPU_FEATURES_2, &val)) {
++   if (etna_drm_gpu_get_param(screen->gpu, ETNA_GPU_FEATURES_2, &val)) {
+       DBG("could not get ETNA_GPU_FEATURES_2");
+       goto fail;
+    }
+    screen->features[2] = val;
+ 
+-   if (etna_gpu_get_param(screen->gpu, ETNA_GPU_FEATURES_3, &val)) {
++   if (etna_drm_gpu_get_param(screen->gpu, ETNA_GPU_FEATURES_3, &val)) {
+       DBG("could not get ETNA_GPU_FEATURES_3");
+       goto fail;
+    }
+    screen->features[3] = val;
+ 
+-   if (etna_gpu_get_param(screen->gpu, ETNA_GPU_FEATURES_4, &val)) {
++   if (etna_drm_gpu_get_param(screen->gpu, ETNA_GPU_FEATURES_4, &val)) {
+       DBG("could not get ETNA_GPU_FEATURES_4");
+       goto fail;
+    }
+    screen->features[4] = val;
+ 
+-   if (etna_gpu_get_param(screen->gpu, ETNA_GPU_FEATURES_5, &val)) {
++   if (etna_drm_gpu_get_param(screen->gpu, ETNA_GPU_FEATURES_5, &val)) {
+       DBG("could not get ETNA_GPU_FEATURES_5");
+       goto fail;
+    }
+    screen->features[5] = val;
+ 
+-   if (etna_gpu_get_param(screen->gpu, ETNA_GPU_FEATURES_6, &val)) {
++   if (etna_drm_gpu_get_param(screen->gpu, ETNA_GPU_FEATURES_6, &val)) {
+       DBG("could not get ETNA_GPU_FEATURES_6");
+       goto fail;
+    }
+diff --git a/src/gallium/winsys/etnaviv/drm/etnaviv_drm_gpu.c b/src/gallium/winsys/etnaviv/drm/etnaviv_drm_gpu.c
+index d95985f..5eccf30 100644
+--- a/src/gallium/winsys/etnaviv/drm/etnaviv_drm_gpu.c
++++ b/src/gallium/winsys/etnaviv/drm/etnaviv_drm_gpu.c
+@@ -44,7 +44,7 @@ static uint64_t get_param(struct etna_device *dev, uint32_t core, uint32_t param
+ 	return req.value;
+ }
+ 
+-struct etna_gpu *etna_gpu_new(struct etna_device *dev, unsigned int core)
++struct etna_gpu *etna_drm_gpu_new(struct etna_device *dev, unsigned int core)
+ {
+ 	struct etna_gpu *gpu;
+ 
+@@ -68,17 +68,17 @@ struct etna_gpu *etna_gpu_new(struct etna_device *dev, unsigned int core)
+ 	return gpu;
+ fail:
+ 	if (gpu)
+-		etna_gpu_del(gpu);
++		etna_drm_gpu_del(gpu);
+ 
+ 	return NULL;
+ }
+ 
+-void etna_gpu_del(struct etna_gpu *gpu)
++void etna_drm_gpu_del(struct etna_gpu *gpu)
+ {
+ 	free(gpu);
+ }
+ 
+-int etna_gpu_get_param(struct etna_gpu *gpu, enum etna_param_id param,
++int etna_drm_gpu_get_param(struct etna_gpu *gpu, enum etna_param_id param,
+ 		uint64_t *value)
+ {
+ 	struct etna_device *dev = gpu->dev;
+diff --git a/src/gallium/winsys/etnaviv/drm/etnaviv_drm_winsys.c b/src/gallium/winsys/etnaviv/drm/etnaviv_drm_winsys.c
+index 4e2a878..9010c69 100644
+--- a/src/gallium/winsys/etnaviv/drm/etnaviv_drm_winsys.c
++++ b/src/gallium/winsys/etnaviv/drm/etnaviv_drm_winsys.c
+@@ -50,18 +50,18 @@ screen_create(struct renderonly *ro)
+    }
+ 
+    for (i = 0;; i++) {
+-      gpu = etna_gpu_new(dev, i);
++      gpu = etna_drm_gpu_new(dev, i);
+       if (!gpu) {
+          fprintf(stderr, "Error creating gpu\n");
+          return NULL;
+       }
+ 
+       /* Look for a 3D capable GPU */
+-      int ret = etna_gpu_get_param(gpu, ETNA_GPU_FEATURES_0, &val);
++      int ret = etna_drm_gpu_get_param(gpu, ETNA_GPU_FEATURES_0, &val);
+       if (ret == 0 && (val & chipFeatures_PIPE_3D))
+          break;
+ 
+-      etna_gpu_del(gpu);
++      etna_drm_gpu_del(gpu);
+    }
+ 
+    return etna_screen_create(dev, gpu, ro);

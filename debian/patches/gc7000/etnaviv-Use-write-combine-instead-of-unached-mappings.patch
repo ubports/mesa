@@ -1,0 +1,38 @@
+From: =?utf-8?q?Guido_G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Mon, 1 Oct 2018 16:22:34 +0000
+Subject: etnaviv: Use write combine instead of unached mappings
+
+The later are sensitive to unalligned accesses
+
+    https://lists.freedesktop.org/archives/etnaviv/2018-September/001956.html
+---
+ src/gallium/drivers/etnaviv/etnaviv_context.c      | 2 +-
+ src/gallium/drivers/etnaviv/etnaviv_texture_desc.c | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_context.c b/src/gallium/drivers/etnaviv/etnaviv_context.c
+index 1e5bbcc..0be7cc3 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_context.c
++++ b/src/gallium/drivers/etnaviv/etnaviv_context.c
+@@ -499,7 +499,7 @@ etna_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
+ 
+    if (screen->specs.halti >= 5) {
+       /* Create an empty dummy texture descriptor */
+-      ctx->dummy_desc_bo = etna_bo_new(ctx->screen->dev, 0x100, DRM_ETNA_GEM_CACHE_UNCACHED);
++      ctx->dummy_desc_bo = etna_bo_new(ctx->screen->dev, 0x100, DRM_ETNA_GEM_CACHE_WC);
+       if (!ctx->dummy_desc_bo)
+          goto fail;
+       uint32_t *buf = etna_bo_map(ctx->dummy_desc_bo);
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c b/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c
+index a98e40a..311c41b 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c
++++ b/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c
+@@ -129,7 +129,7 @@ etna_create_sampler_view_desc(struct pipe_context *pctx, struct pipe_resource *p
+    }
+ 
+    /* Create texture descriptor */
+-   sv->bo = etna_bo_new(ctx->screen->dev, 0x100, DRM_ETNA_GEM_CACHE_UNCACHED);
++   sv->bo = etna_bo_new(ctx->screen->dev, 0x100, DRM_ETNA_GEM_CACHE_WC);
+    if (!sv->bo)
+       goto error;
+ 

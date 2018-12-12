@@ -1,0 +1,27 @@
+From: =?utf-8?q?Guido_G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Tue, 2 Oct 2018 14:03:54 +0200
+Subject: etnaviv: undef the right thing
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+DESC_SET was defined several lines above not SET_DESC
+
+Signed-off-by: Guido Günther <guido.gunther@puri.sm>
+---
+ src/gallium/drivers/etnaviv/etnaviv_texture_desc.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c b/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c
+index 522967b..d857dc9 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c
++++ b/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c
+@@ -165,7 +165,7 @@ etna_create_sampler_view_desc(struct pipe_context *pctx, struct pipe_resource *p
+    /* FIXME: etna_bo_gpu_address does not exist in libdrm */
+    for (int lod = 0; lod <= res->base.last_level; ++lod)
+       DESC_SET(LOD_ADDR(lod), /* etna_bo_gpu_address(res->bo) + */ res->levels[lod].offset);
+-#undef SET_DESC
++#undef DESC_SET
+ 
+    etna_drm_bo_cpu_fini(sv->bo);
+ 

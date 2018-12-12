@@ -1,0 +1,92 @@
+From: =?utf-8?q?Guido_G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Wed, 10 Oct 2018 11:27:56 +0200
+Subject: meson: Only require libdrm
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+Etnaviv specific libdrm code moved to src/gallium/drivers/etnaviv/drm
+
+This will allow us to adjust APIs without taking the libdrm indirection.
+
+TODO: Andriod.mk
+
+Signed-off-by: Guido Günther <guido.gunther@puri.sm>
+---
+ meson.build                                | 8 ++++++++
+ src/gallium/drivers/etnaviv/meson.build    | 4 ++--
+ src/gallium/winsys/etnaviv/drm/meson.build | 2 +-
+ 3 files changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/meson.build b/meson.build
+index 3d38c20..55d76e4 100644
+--- a/meson.build
++++ b/meson.build
+@@ -1111,12 +1111,14 @@ dep_libdrm_amdgpu = null_dep
+ dep_libdrm_radeon = null_dep
+ dep_libdrm_nouveau = null_dep
+ dep_libdrm_etnaviv = null_dep
++dep_libdrm_freedreno = null_dep
+ dep_libdrm_intel = null_dep
+ 
+ _drm_amdgpu_ver = '2.4.95'
+ _drm_radeon_ver = '2.4.71'
+ _drm_nouveau_ver = '2.4.66'
+ _drm_etnaviv_ver = '2.4.89'
++_drm_freedreno_ver = '2.4.93'
+ _drm_intel_ver = '2.4.75'
+ _drm_ver = '2.4.75'
+ 
+@@ -1127,6 +1129,7 @@ _libdrm_checks = [
+               with_gallium_r300 or with_gallium_r600)],
+   ['nouveau', (with_gallium_nouveau or with_dri_nouveau)],
+   ['etnaviv', with_gallium_etnaviv],
++  ['freedreno', with_gallium_freedreno],
+ ]
+ 
+ # VC4 only needs core libdrm support of this version, not a libdrm_vc4
+@@ -1135,6 +1138,11 @@ if with_gallium_vc4
+   _drm_ver = '2.4.89'
+ endif
+ 
++# etnaviv only needs core libdrm
++if with_gallium_etnaviv
++  _drm_ver = '2.4.89'
++endif
++
+ # Loop over the enables versions and get the highest libdrm requirement for all
+ # active drivers.
+ _drm_blame = ''
+diff --git a/src/gallium/drivers/etnaviv/meson.build b/src/gallium/drivers/etnaviv/meson.build
+index 33d9626..fecacb1 100644
+--- a/src/gallium/drivers/etnaviv/meson.build
++++ b/src/gallium/drivers/etnaviv/meson.build
+@@ -94,7 +94,7 @@ libetnaviv = static_library(
+   files_etnaviv,
+   c_args : [c_vis_args],
+   include_directories : [inc_include, inc_src, inc_gallium, inc_gallium_aux],
+-  dependencies : dep_libdrm_etnaviv,
++  dependencies : dep_libdrm,
+ )
+ 
+ etnaviv_compiler = executable(
+@@ -102,7 +102,7 @@ etnaviv_compiler = executable(
+   'etnaviv_compiler_cmdline.c',
+   include_directories : [inc_include, inc_src, inc_gallium, inc_gallium_aux],
+   link_with : [libmesa_util, libgallium, libetnaviv],
+-  dependencies : [dep_libdrm_etnaviv],
++  dependencies : [dep_libdrm],
+   build_by_default : false,
+ )
+ 
+diff --git a/src/gallium/winsys/etnaviv/drm/meson.build b/src/gallium/winsys/etnaviv/drm/meson.build
+index 21bb6f6..4ba1756 100644
+--- a/src/gallium/winsys/etnaviv/drm/meson.build
++++ b/src/gallium/winsys/etnaviv/drm/meson.build
+@@ -24,5 +24,5 @@ libetnavivdrm = static_library(
+   include_directories : [
+     inc_include, inc_src, inc_gallium, inc_gallium_aux, inc_gallium_drivers
+   ],
+-  dependencies : dep_libdrm_etnaviv
++  dependencies : dep_libdrm
+ )

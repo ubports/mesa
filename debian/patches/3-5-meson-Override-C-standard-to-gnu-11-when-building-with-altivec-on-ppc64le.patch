@@ -1,15 +1,16 @@
+From: Dylan Baker <dylan@pnwbakers.com>
+Date: Tue, 4 Dec 2018 13:52:19 -0800
+Subject: [3/5] meson: Override C++ standard to gnu++11 when building with
+ altivec on ppc64le
+
 From patchwork Tue Dec  4 21:52:19 2018
 Content-Type: text/plain; charset="utf-8"
 MIME-Version: 1.0
 Content-Transfer-Encoding: 7bit
-Subject: [3/5] meson: Override C++ standard to gnu++11 when building with
- altivec on ppc64le
-From: Dylan Baker <dylan@pnwbakers.com>
 X-Patchwork-Id: 265803
 Message-Id: <20181204215221.18155-4-dylan@pnwbakers.com>
 To: mesa-dev@lists.freedesktop.org
 Cc: ignatenko.brain@gmail.com, cefiar@gmail.com
-Date: Tue,  4 Dec 2018 13:52:19 -0800
 
 Otherwise there will be symbol collisions for the vector name.
 
@@ -23,10 +24,10 @@ Reviewed-by: Eric Engestrom <eric.engestrom@intel.com>
  2 files changed, 15 insertions(+)
 
 diff --git a/meson.build b/meson.build
-index 3d07c88364a..0785609c4b0 100644
+index fd76d3c..61ec81d 100644
 --- a/meson.build
 +++ b/meson.build
-@@ -624,6 +624,7 @@ if with_gallium_st_nine
+@@ -625,6 +625,7 @@ if with_gallium_st_nine
    endif
  endif
  
@@ -34,7 +35,7 @@ index 3d07c88364a..0785609c4b0 100644
  if get_option('power8') != 'false'
    # on old versions of meson the cpu family would return as ppc64le on little
    # endian power8, this was changed in 0.48 such that the family would always
-@@ -631,6 +632,7 @@ if get_option('power8') != 'false'
+@@ -632,6 +633,7 @@ if get_option('power8') != 'false'
    # should be checked. Since we support versions < 0.48 we need to use
    # startswith.
    if host_machine.cpu_family().startswith('ppc64') and host_machine.endian() == 'little'
@@ -42,7 +43,7 @@ index 3d07c88364a..0785609c4b0 100644
      if cc.get_id() == 'gcc' and cc.version().version_compare('< 4.8')
        error('Altivec is not supported with gcc version < 4.8.')
      endif
-@@ -645,9 +647,19 @@ if get_option('power8') != 'false'
+@@ -646,9 +648,19 @@ if get_option('power8') != 'false'
          args : '-mpower8-vector',
          name : 'POWER8 intrinsics')
        pre_args += ['-D_ARCH_PWR8', '-mpower8-vector']
@@ -63,7 +64,7 @@ index 3d07c88364a..0785609c4b0 100644
  endif
  
 diff --git a/src/gallium/state_trackers/clover/meson.build b/src/gallium/state_trackers/clover/meson.build
-index 1a09d8f2ca9..a6729af2fb8 100644
+index 1a09d8f..a6729af 100644
 --- a/src/gallium/state_trackers/clover/meson.build
 +++ b/src/gallium/state_trackers/clover/meson.build
 @@ -30,6 +30,7 @@ libcltgsi = static_library(

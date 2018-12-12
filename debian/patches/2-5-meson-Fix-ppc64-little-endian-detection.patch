@@ -1,14 +1,15 @@
+From: Dylan Baker <dylan@pnwbakers.com>
+Date: Tue, 4 Dec 2018 13:52:18 -0800
+Subject: [2/5] meson: Fix ppc64 little endian detection
+
 From patchwork Tue Dec  4 21:52:18 2018
 Content-Type: text/plain; charset="utf-8"
 MIME-Version: 1.0
 Content-Transfer-Encoding: 7bit
-Subject: [2/5] meson: Fix ppc64 little endian detection
-From: Dylan Baker <dylan@pnwbakers.com>
 X-Patchwork-Id: 265802
 Message-Id: <20181204215221.18155-3-dylan@pnwbakers.com>
 To: mesa-dev@lists.freedesktop.org
 Cc: ignatenko.brain@gmail.com, cefiar@gmail.com
-Date: Tue,  4 Dec 2018 13:52:18 -0800
 
 Old versions of meson returned ppc64le as the cpu_family for little
 endian power8 cpus, versions >=0.48 don't do this, so the check wouldn't
@@ -22,10 +23,10 @@ Fixes: 34bbb24ce7702658cdc4e9d34a650e169716c39e
  1 file changed, 7 insertions(+), 2 deletions(-)
 
 diff --git a/meson.build b/meson.build
-index 48ba8127f95..3d07c88364a 100644
+index 5d6fce8..fd76d3c 100644
 --- a/meson.build
 +++ b/meson.build
-@@ -625,7 +625,12 @@ if with_gallium_st_nine
+@@ -626,7 +626,12 @@ if with_gallium_st_nine
  endif
  
  if get_option('power8') != 'false'
@@ -39,7 +40,7 @@ index 48ba8127f95..3d07c88364a 100644
      if cc.get_id() == 'gcc' and cc.version().version_compare('< 4.8')
        error('Altivec is not supported with gcc version < 4.8.')
      endif
-@@ -966,7 +971,7 @@ if with_asm
+@@ -967,7 +972,7 @@ if with_asm
        with_asm_arch = 'sparc'
        pre_args += ['-DUSE_SPARC_ASM']
      endif

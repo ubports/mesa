@@ -1,24 +1,24 @@
+From: Dylan Baker <dylan@pnwbakers.com>
+Date: Tue, 4 Dec 2018 13:52:20 -0800
+Subject: [4/5] meson: Add support for gnu hurd
+
 From patchwork Tue Dec  4 21:52:20 2018
 Content-Type: text/plain; charset="utf-8"
 MIME-Version: 1.0
 Content-Transfer-Encoding: 7bit
-Subject: [4/5] meson: Add support for gnu hurd
-From: Dylan Baker <dylan@pnwbakers.com>
 X-Patchwork-Id: 265801
 Message-Id: <20181204215221.18155-5-dylan@pnwbakers.com>
 To: mesa-dev@lists.freedesktop.org
 Cc: ignatenko.brain@gmail.com, cefiar@gmail.com
-Date: Tue,  4 Dec 2018 13:52:20 -0800
-
 ---
  meson.build | 6 ++----
  1 file changed, 2 insertions(+), 4 deletions(-)
 
 diff --git a/meson.build b/meson.build
-index 0785609c4b0..3f835e2b952 100644
+index 61ec81d..27d15f6 100644
 --- a/meson.build
 +++ b/meson.build
-@@ -220,8 +220,6 @@ elif system_has_kms_drm
+@@ -221,8 +221,6 @@ elif system_has_kms_drm
  else
    # FIXME: haiku doesn't use dri, and xlib doesn't use dri, probably should
    # assert here that one of those cases has been met.
@@ -27,7 +27,7 @@ index 0785609c4b0..3f835e2b952 100644
    # FIXME: illumos ends up here as well
    with_dri_platform = 'none'
  endif
-@@ -795,7 +793,7 @@ if cc.compiles('int foo(void) __attribute__((__noreturn__));',
+@@ -796,7 +794,7 @@ if cc.compiles('int foo(void) __attribute__((__noreturn__));',
  endif
  
  # TODO: this is very incomplete
@@ -36,7 +36,7 @@ index 0785609c4b0..3f835e2b952 100644
    pre_args += '-D_GNU_SOURCE'
  endif
  
-@@ -954,7 +952,7 @@ endif
+@@ -955,7 +953,7 @@ endif
  with_asm_arch = ''
  if with_asm
    if host_machine.cpu_family() == 'x86'
