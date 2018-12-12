@@ -1,3 +1,12 @@
+mesa (18.3.0-1+librem5.1) purple; urgency=medium
+
+  * Add etnaviv gc7000 support.
+  * gbp: Configure upstream version pattern
+  * Disable freedreno for the moment.
+    Some of it's symbols conflict with our imported libdrm.
+
+ -- Guido Günther <agx@sigxcpu.org>  Wed, 12 Dec 2018 20:52:13 +0100
+
 mesa (18.3.0-1) experimental; urgency=medium
 
   [ Timo Aaltonen ]
