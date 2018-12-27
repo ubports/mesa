@@ -1,3 +1,11 @@
+mesa (18.3.0-2~pureos+librem5.2) purple; urgency=medium
+
+  * Trigger rebuild due to libsensors4 -> libsensors5 transition
+    We use 2~pureos+librem5.1 instead of 1pureos+librem5.1 since there's a
+    mesa with incorrrect versioning in our ci archive (2~...).
+
+ -- Guido Günther <agx@sigxcpu.org>  Thu, 27 Dec 2018 13:31:46 +0100
+
 mesa (18.3.0-1+librem5.1) purple; urgency=medium
 
   * Add etnaviv gc7000 support.
