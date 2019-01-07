@@ -35,3 +35,4 @@ gc7000/s-etna_perfmon_-etna_drm_perfmon_.patch
 gc7000/drm-uapi-Update-uapi-etnaviv.patch
 gc7000/etnaviv-undef-the-right-thing.patch
 gc7000/HACK-Handle-texture-descriptors-with-bo-relocs.patch
+HACK-gc7000-Ref-texture-descriptor-BOs.patch

@@ -1,0 +1,24 @@
+From: =?utf-8?q?Guido_G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Mon, 7 Jan 2019 15:04:07 +0100
+Subject: HACK: gc7000: Ref texture descriptor BOs
+
+This makes sure they don't get cleaned up althogh we still want them
+around. Labelled as HACK since it extends on the bo reloc code.
+---
+ src/gallium/drivers/etnaviv/etnaviv_texture_desc.c | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c b/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c
+index 95c2905..5b0cefc 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c
++++ b/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c
+@@ -198,8 +198,7 @@ etna_sampler_view_update_descriptor(struct etna_context *ctx,
+       res = etna_resource(res->texture);
+    }
+    /* No need to ref LOD levels individually as they'll always come from the same bo */
+-   /* FIXME: etna_cmd_stream_ref does not exist in libdrm */
+-   // etna_cmd_stream_ref(stream, res->bo);
++   etna_drm_bo_ref(res->bo);
+ }
+ 
+ static void
