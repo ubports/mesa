@@ -1,3 +1,9 @@
+mesa (18.3.2-1purple+librem5.1) purple; urgency=medium
+
+  * Bring in newer mesa from Debian Buster
+
+ -- Guido Günther <agx@sigxcpu.org>  Mon, 04 Feb 2019 12:24:05 +0100
+
 mesa (18.3.2-1) unstable; urgency=medium
 
   * New upstream release.
