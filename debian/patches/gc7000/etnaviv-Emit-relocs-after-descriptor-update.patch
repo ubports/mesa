@@ -1,0 +1,32 @@
+From: =?utf-8?q?Guido_G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Tue, 29 Jan 2019 14:12:37 +0100
+Subject: etnaviv: Emit relocs after descriptor update
+
+---
+ src/gallium/drivers/etnaviv/etnaviv_texture_desc.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c b/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c
+index 5b0cefc..7849b55 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c
++++ b/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c
+@@ -228,9 +228,6 @@ etna_emit_texture_desc(struct etna_context *ctx)
+             etna_set_state(stream, VIVS_NTE_DESCRIPTOR_SAMP_CTRL1(x), ss->SAMP_CTRL1 | sv->SAMP_CTRL1);
+             etna_set_state(stream, VIVS_NTE_DESCRIPTOR_SAMP_LOD_MINMAX(x), ss->SAMP_LOD_MINMAX);
+             etna_set_state(stream, VIVS_NTE_DESCRIPTOR_SAMP_LOD_BIAS(x), ss->SAMP_LOD_BIAS);
+-
+-            for (int y = 0; y <= sv->maxlod; y++)
+-               etna_drm_bo_reloc(stream, &sv->TEXDESC_LOD_ADDR[y]);
+          }
+       }
+    }
+@@ -243,6 +240,9 @@ etna_emit_texture_desc(struct etna_context *ctx)
+                struct etna_sampler_view_desc *sv = etna_sampler_view_desc(ctx->sampler_view[x]);
+                etna_sampler_view_update_descriptor(ctx, stream, sv);
+                etna_set_state_reloc(stream, VIVS_NTE_DESCRIPTOR_ADDR(x), &sv->DESC_ADDR);
++
++               for (int y = 0; y <= sv->maxlod; y++)
++                  etna_drm_bo_reloc(stream, &sv->TEXDESC_LOD_ADDR[y]);
+             } else {
+                /* dummy texture descriptors for unused samplers */
+                etna_set_state_reloc(stream, VIVS_NTE_DESCRIPTOR_ADDR(x), &ctx->DUMMY_DESC_ADDR);
