@@ -1,9 +1,6 @@
 07_gallium-fix-build-failure-on-powerpcspe.diff
 1-5-meson-remove-duplicate-definition.patch
-2-5-meson-Fix-ppc64-little-endian-detection.patch
-3-5-meson-Override-C-standard-to-gnu-11-when-building-with-altivec-on-ppc64le.patch
-4-5-meson-Add-support-for-gnu-hurd.patch
-5-5-meson-Add-toggle-for-glx-direct.patch
+fix-hurd-ftbfs.diff
 gc7000/etnaviv-When-supertiling-disabled-disable-all-supertile-r.patch
 gc7000/etnaviv-GC7000-Texture-descriptors.patch
 gc7000/LOCAL-enable-CAP_MIXED_FRAMEBUFFER_SIZES.patch
