@@ -1,3 +1,9 @@
+mesa (18.3.4-2purple+librem5.1) purple; urgency=medium
+
+  * Update to 18.3.4 from Debian Buster
+
+ -- Guido Günther <agx@sigxcpu.org>  Sun, 03 Mar 2019 14:13:51 +0100
+
 mesa (18.3.4-2) unstable; urgency=medium
 
   * Cherry-pick f6556ec7d12 (dri: meson: do not prefix user provided dri-
