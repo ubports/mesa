@@ -1,3 +1,33 @@
+mesa (18.3.4-2) unstable; urgency=medium
+
+  * Cherry-pick f6556ec7d12 (dri: meson: do not prefix user provided dri-
+    drivers-path) from upstream master branch. Fixes a regression since
+    switching to meson (Closes: #922807).
+  * rules: Add meson option -Db_ndebug=true to disable assertions
+    (Related bugs: #920462, #922162, #922346).
+  * source/local-options: Remove meson build files from extend-diff-
+    ignore.
+
+ -- Andreas Boll <aboll@debian.org>  Sat, 02 Mar 2019 13:21:59 +0100
+
+mesa (18.3.4-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Tue, 19 Feb 2019 11:02:44 +0200
+
+mesa (18.3.3-1) unstable; urgency=medium
+
+  [ James Clarke ]
+  * Add pkg.mesa.nolibva build profile; this breaks the mesa -> libva-dev ->
+    libva-glx1 -> libgl1-mesa-glx dependency loop when bootstrapping.
+    (Closes: #870434)
+
+  [ Timo Aaltonen ]
+  * New upstream release.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Wed, 06 Feb 2019 11:36:46 +0200
+
 mesa (18.3.2-1purple+librem5.1) purple; urgency=medium
 
   * Bring in newer mesa from Debian Buster
