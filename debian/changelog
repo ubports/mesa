@@ -1,3 +1,25 @@
+mesa (18.3.6-2) unstable; urgency=medium
+
+  * Cherry-pick c77acc3ceba (meson: remove meson-created megadrivers
+    symlinks) from upstream master branch. Removes a broken symlink
+    (Closes: #926857).
+
+ -- Andreas Boll <aboll@debian.org>  Sat, 11 May 2019 15:43:07 +0200
+
+mesa (18.3.6-1) unstable; urgency=medium
+
+  [ Timo Aaltonen ]
+  * libgl1-mesa-dri: Remove /etc/drirc which isn't installed anymore.
+    (Closes: #920241)
+
+  [ Andreas Boll ]
+  * New upstream release.
+    - wayland/egl: Ensure EGL surface is resized on DRI
+      update_buffers(). Fixes a crash with xwayland (Closes: #922346).
+  * Rebase patches/fix-hurd-ftbfs.diff.
+
+ -- Andreas Boll <aboll@debian.org>  Sat, 06 Apr 2019 20:58:43 +0200
+
 mesa (18.3.4-2purple+librem5.1) purple; urgency=medium
 
   * Update to 18.3.4 from Debian Buster
