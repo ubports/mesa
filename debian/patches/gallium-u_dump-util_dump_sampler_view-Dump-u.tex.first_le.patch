@@ -1,0 +1,27 @@
+From: =?utf-8?q?Guido_G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Wed, 3 Apr 2019 13:48:52 +0200
+Subject: gallium/u_dump: util_dump_sampler_view: Dump u.tex.first_level
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+Dump u.tex.first_level instead of dumping u.tex.last_level twice.
+
+Signed-off-by: Guido Günther <agx@sigxcpu.org>
+---
+ src/gallium/auxiliary/util/u_dump_state.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/gallium/auxiliary/util/u_dump_state.c b/src/gallium/auxiliary/util/u_dump_state.c
+index 638dac7..6b11f10 100644
+--- a/src/gallium/auxiliary/util/u_dump_state.c
++++ b/src/gallium/auxiliary/util/u_dump_state.c
+@@ -789,7 +789,7 @@ util_dump_sampler_view(FILE *stream, const struct pipe_sampler_view *state)
+    else {
+       util_dump_member(stream, uint, state, u.tex.first_layer);
+       util_dump_member(stream, uint, state, u.tex.last_layer);
+-      util_dump_member(stream, uint, state, u.tex.last_level);
++      util_dump_member(stream, uint, state, u.tex.first_level);
+       util_dump_member(stream, uint, state, u.tex.last_level);
+    }
+ 

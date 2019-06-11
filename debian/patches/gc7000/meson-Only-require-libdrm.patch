@@ -19,10 +19,10 @@ Signed-off-by: Guido Günther <guido.gunther@puri.sm>
  3 files changed, 11 insertions(+), 3 deletions(-)
 
 diff --git a/meson.build b/meson.build
-index 3d38c20..55d76e4 100644
+index c9c1760..7930872 100644
 --- a/meson.build
 +++ b/meson.build
-@@ -1111,12 +1111,14 @@ dep_libdrm_amdgpu = null_dep
+@@ -1116,12 +1116,14 @@ dep_libdrm_amdgpu = null_dep
  dep_libdrm_radeon = null_dep
  dep_libdrm_nouveau = null_dep
  dep_libdrm_etnaviv = null_dep
@@ -37,7 +37,7 @@ index 3d38c20..55d76e4 100644
  _drm_intel_ver = '2.4.75'
  _drm_ver = '2.4.75'
  
-@@ -1127,6 +1129,7 @@ _libdrm_checks = [
+@@ -1132,6 +1134,7 @@ _libdrm_checks = [
                with_gallium_r300 or with_gallium_r600)],
    ['nouveau', (with_gallium_nouveau or with_dri_nouveau)],
    ['etnaviv', with_gallium_etnaviv],
@@ -45,7 +45,7 @@ index 3d38c20..55d76e4 100644
  ]
  
  # VC4 only needs core libdrm support of this version, not a libdrm_vc4
-@@ -1135,6 +1138,11 @@ if with_gallium_vc4
+@@ -1140,6 +1143,11 @@ if with_gallium_vc4
    _drm_ver = '2.4.89'
  endif
  

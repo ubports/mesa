@@ -11,10 +11,10 @@ The later are sensitive to unalligned accesses
  2 files changed, 2 insertions(+), 2 deletions(-)
 
 diff --git a/src/gallium/drivers/etnaviv/etnaviv_context.c b/src/gallium/drivers/etnaviv/etnaviv_context.c
-index 1e5bbcc..0be7cc3 100644
+index 71bfea7..b45e8db 100644
 --- a/src/gallium/drivers/etnaviv/etnaviv_context.c
 +++ b/src/gallium/drivers/etnaviv/etnaviv_context.c
-@@ -499,7 +499,7 @@ etna_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
+@@ -501,7 +501,7 @@ etna_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
  
     if (screen->specs.halti >= 5) {
        /* Create an empty dummy texture descriptor */

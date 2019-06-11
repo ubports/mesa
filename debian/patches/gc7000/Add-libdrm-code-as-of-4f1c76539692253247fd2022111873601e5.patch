@@ -2172,7 +2172,7 @@ index 0000000..e45d364
 +
 +#endif /* ETNAVIV_PRIV_H_ */
 diff --git a/src/gallium/drivers/etnaviv/etnaviv_internal.h b/src/gallium/drivers/etnaviv/etnaviv_internal.h
-index 3424d8a..491d2e3 100644
+index 77214d9..88c4983 100644
 --- a/src/gallium/drivers/etnaviv/etnaviv_internal.h
 +++ b/src/gallium/drivers/etnaviv/etnaviv_internal.h
 @@ -31,7 +31,7 @@

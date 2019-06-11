@@ -34,3 +34,8 @@ gc7000/etnaviv-undef-the-right-thing.patch
 gc7000/HACK-Handle-texture-descriptors-with-bo-relocs.patch
 gc7000/HACK-gc7000-Ref-texture-descriptor-BOs.patch
 gc7000/etnaviv-Emit-relocs-after-descriptor-update.patch
+etnaviv-fill-missing-offset-in-etna_resource_get_handle.patch
+gallium-u_dump-util_dump_sampler_view-Dump-u.tex.first_le.patch
+etnaviv-Unref-texture-bo-as-well.patch
+etnaviv-Name-etna_sampler_view_desc-sv-as-everywhere-else.patch
+etnaviv-Don-t-delete-descriptor-BOs.patch

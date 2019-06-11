@@ -1,0 +1,32 @@
+From: =?utf-8?q?Guido_G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Fri, 29 Mar 2019 10:36:44 +0100
+Subject: etnaviv: Unref texture bo as well
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+We took a ref in etna_sampler_view_update_descriptor
+
+Signed-off-by: Guido Günther <guido.gunther@puri.sm>
+---
+ src/gallium/drivers/etnaviv/etnaviv_texture_desc.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c b/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c
+index 7849b55..865af27 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c
++++ b/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c
+@@ -206,6 +206,13 @@ etna_sampler_view_desc_destroy(struct pipe_context *pctx,
+                           struct pipe_sampler_view *view_)
+ {
+    struct etna_sampler_view_desc *view = etna_sampler_view_desc(view_);
++   struct etna_resource *res = etna_resource(view->base.texture);
++
++   if (res->texture) {
++      res = etna_resource(res->texture);
++   }
++   etna_drm_bo_del(res->bo);
++
+    pipe_resource_reference(&view->base.texture, NULL);
+    etna_drm_bo_del(view->bo);
+    FREE(view);

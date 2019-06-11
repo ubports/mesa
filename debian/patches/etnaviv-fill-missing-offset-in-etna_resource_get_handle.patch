@@ -1,0 +1,21 @@
+From: Philipp Zabel <p.zabel@pengutronix.de>
+Date: Fri, 3 May 2019 12:05:24 +0200
+Subject: etnaviv: fill missing offset in etna_resource_get_handle
+
+Without this gbm_bo_get_offset() can return 0 where it shouldn't.
+---
+ src/gallium/drivers/etnaviv/etnaviv_resource.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_resource.c b/src/gallium/drivers/etnaviv/etnaviv_resource.c
+index 98f96e4..9cd77e8 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_resource.c
++++ b/src/gallium/drivers/etnaviv/etnaviv_resource.c
+@@ -605,6 +605,7 @@ etna_resource_get_handle(struct pipe_screen *pscreen,
+       rsc = etna_resource(rsc->external);
+ 
+    handle->stride = rsc->levels[0].stride;
++   handle->offset = rsc->levels[0].offset;
+    handle->modifier = layout_to_modifier(rsc->layout);
+ 
+    if (handle->type == WINSYS_HANDLE_TYPE_SHARED) {

@@ -37,10 +37,10 @@ index 0b20812..22cedc9 100644
  	etnaviv_texture_state.h \
  	etnaviv_tiling.c \
 diff --git a/src/gallium/drivers/etnaviv/etnaviv_context.c b/src/gallium/drivers/etnaviv/etnaviv_context.c
-index 3038d21..1e5bbcc 100644
+index 303dff5..71bfea7 100644
 --- a/src/gallium/drivers/etnaviv/etnaviv_context.c
 +++ b/src/gallium/drivers/etnaviv/etnaviv_context.c
-@@ -381,6 +381,17 @@ etna_cmd_stream_reset_notify(struct etna_cmd_stream *stream, void *priv)
+@@ -383,6 +383,17 @@ etna_cmd_stream_reset_notify(struct etna_cmd_stream *stream, void *priv)
        etna_set_state(stream, VIVS_RS_SINGLE_BUFFER, COND(ctx->specs.single_buffer, VIVS_RS_SINGLE_BUFFER_ENABLE));
     }
  
@@ -58,7 +58,7 @@ index 3038d21..1e5bbcc 100644
     ctx->dirty = ~0L;
     ctx->dirty_sampler_views = ~0L;
  
-@@ -486,6 +497,20 @@ etna_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
+@@ -488,6 +499,20 @@ etna_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
     slab_create_child(&ctx->transfer_pool, &screen->transfer_pool);
     list_inithead(&ctx->active_hw_queries);
  

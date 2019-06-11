@@ -23,10 +23,10 @@ Signed-off-by: Guido Günther <guido.gunther@puri.sm>
  13 files changed, 82 insertions(+), 82 deletions(-)
 
 diff --git a/src/gallium/drivers/etnaviv/etnaviv_context.c b/src/gallium/drivers/etnaviv/etnaviv_context.c
-index 0be7cc3..81c8596 100644
+index b45e8db..a942af0 100644
 --- a/src/gallium/drivers/etnaviv/etnaviv_context.c
 +++ b/src/gallium/drivers/etnaviv/etnaviv_context.c
-@@ -499,13 +499,13 @@ etna_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
+@@ -501,13 +501,13 @@ etna_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
  
     if (screen->specs.halti >= 5) {
        /* Create an empty dummy texture descriptor */

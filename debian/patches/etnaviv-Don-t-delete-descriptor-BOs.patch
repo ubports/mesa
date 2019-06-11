@@ -1,0 +1,25 @@
+From: =?utf-8?q?Guido_G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Mon, 1 Apr 2019 17:26:08 +0200
+Subject: etnaviv: Don't delete descriptor BOs
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Guido Günther <guido.gunther@puri.sm>
+---
+ src/gallium/drivers/etnaviv/etnaviv_texture_desc.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c b/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c
+index 5b918f3..9ed063f 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c
++++ b/src/gallium/drivers/etnaviv/etnaviv_texture_desc.c
+@@ -214,7 +214,7 @@ etna_sampler_view_desc_destroy(struct pipe_context *pctx,
+    etna_drm_bo_del(res->bo);
+ 
+    pipe_resource_reference(&sv->base.texture, NULL);
+-   etna_drm_bo_del(sv->bo);
++
+    FREE(sv);
+ }
+ 

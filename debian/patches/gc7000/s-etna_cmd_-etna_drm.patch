@@ -50,10 +50,10 @@ index 52731a9..4d7982a 100644
     etna_set_state(stream, VIVS_BLT_CONFIG,
           VIVS_BLT_CONFIG_INPLACE_CACHE_MODE(op->cache_mode) |
 diff --git a/src/gallium/drivers/etnaviv/etnaviv_context.c b/src/gallium/drivers/etnaviv/etnaviv_context.c
-index 81c8596..8e9c40d 100644
+index a942af0..303afb1 100644
 --- a/src/gallium/drivers/etnaviv/etnaviv_context.c
 +++ b/src/gallium/drivers/etnaviv/etnaviv_context.c
-@@ -70,7 +70,7 @@ etna_context_destroy(struct pipe_context *pctx)
+@@ -72,7 +72,7 @@ etna_context_destroy(struct pipe_context *pctx)
        u_upload_destroy(pctx->stream_uploader);
  
     if (ctx->stream)
@@ -62,7 +62,7 @@ index 81c8596..8e9c40d 100644
  
     slab_destroy_child(&ctx->transfer_pool);
  
-@@ -314,9 +314,9 @@ etna_flush(struct pipe_context *pctx, struct pipe_fence_handle **fence,
+@@ -316,9 +316,9 @@ etna_flush(struct pipe_context *pctx, struct pipe_fence_handle **fence,
     list_for_each_entry(struct etna_hw_query, hq, &ctx->active_hw_queries, node)
        etna_hw_query_suspend(hq, ctx);
  
@@ -75,7 +75,7 @@ index 81c8596..8e9c40d 100644
  
     list_for_each_entry(struct etna_hw_query, hq, &ctx->active_hw_queries, node)
        etna_hw_query_resume(hq, ctx);
-@@ -438,7 +438,7 @@ etna_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
+@@ -440,7 +440,7 @@ etna_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
     pctx->const_uploader = pctx->stream_uploader;
  
     screen = etna_screen(pscreen);
