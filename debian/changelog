@@ -1,3 +1,9 @@
+mesa (18.3.6-2ubports+librem5.2) xenial; urgency=medium
+
+  * Import to UBPorts and adapt for debhelper 9
+
+ -- Marius Gripsgard <marius@ubports.com>  Sun, 01 Sep 2019 00:41:02 +0200
+
 mesa (18.3.6-2pureos+librem5.2) unstable; urgency=medium
 
   * Pull in more changes from our GC7000 branch.
