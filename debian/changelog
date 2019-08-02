@@ -1,3 +1,9 @@
+mesa (19.1.1-1ubports1) xenial; urgency=medium
+
+  * Import to UBPorts and adapt for debhelper 9
+
+ -- TheKit <nekit1000@gmail.com>  Fri, 02 Aug 2019 21:43:32 +0200
+
 mesa (19.1.1-1) experimental; urgency=medium
 
   * New upstream bugfix release.
