@@ -44,7 +44,6 @@ Build-Depends:
  libclc-dev (>= 0.2.0+git20180917-1~) [amd64 arm64 armel armhf i386 kfreebsd-amd64 kfreebsd-i386 mips mips64el mipsel powerpc ppc64 ppc64el s390x sparc64],
  wayland-protocols (>= 1.9),
  zlib1g-dev,
- libglvnd-core-dev,
 Vcs-Git: https://salsa.debian.org/xorg-team/lib/mesa.git
 Vcs-Browser: https://salsa.debian.org/xorg-team/lib/mesa
 Homepage: https://mesa3d.org/
@@ -139,14 +138,16 @@ Description: generic buffer management API -- development files
  This package provides the development environment for compiling programs
  against the GBM library.
 
-Package: libegl-mesa0
+Package: libegl1-mesa
 Section: libs
 Architecture: any
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},
  libgbm1 (= ${binary:Version}) [!hurd-any],
-Provides: libegl-vendor
+Provides: libegl1-x11, libegl-vendor
+Conflicts: libegl1-x11
+Replaces: libegl1-x11
 Pre-Depends: ${misc:Pre-Depends}
 Multi-Arch: same
 Description: free implementation of the EGL API -- Mesa vendor library
@@ -156,22 +157,11 @@ Description: free implementation of the EGL API -- Mesa vendor library
  .
  This package contains the Mesa vendor library for EGL.
 
-Package: libegl1-mesa
-Section: oldlibs
-Architecture: any
-Depends:
- libegl1,
- ${misc:Depends},
-Multi-Arch: same
-Description: transitional dummy package
- This is a transitional dummy package, it can be safely removed.
-
 Package: libegl1-mesa-dev
 Section: libdevel
 Architecture: any
 Depends:
  mesa-common-dev (= ${binary:Version}),
- libglvnd-dev,
  libdrm-dev (>= 2.4.95) [!hurd-any],
  libx11-dev,
  libxext-dev,
@@ -188,6 +178,7 @@ Depends:
  libwayland-dev (>= 1.15.0) [linux-any],
  x11proto-dev,
  ${misc:Depends},
+ libegl1-mesa (= ${binary:Version})
 Multi-Arch: same
 Description: free implementation of the EGL API -- development files
  This package contains the development environment required for compiling
@@ -203,7 +194,7 @@ Section: oldlibs
 Architecture: linux-any
 Depends:
  ${misc:Depends},
- libegl1,
+ libegl1-mesa,
  libwayland-egl1,
 Pre-Depends: ${misc:Pre-Depends}
 Multi-Arch: same
@@ -211,19 +202,31 @@ Description: transitional dummy package
  This is a transitional dummy package, it can be safely removed.
 
 Package: libgles2-mesa
-Section: oldlibs
+Section: libs
 Architecture: any
 Depends:
- libgles2,
+ libglapi-mesa (= ${binary:Version}),
+ ${shlibs:Depends},
  ${misc:Depends},
+Provides: libgles2
+Conflicts: libgles2
+Replaces: libgles2
+Pre-Depends: ${misc:Pre-Depends}
 Multi-Arch: same
-Description: transitional dummy package
- This is a transitional dummy package, it can be safely removed.
+Description: free implementation of the OpenGL|ES 2.x API -- runtime
+ OpenGL|ES is a cross-platform API for full-function 2D and 3D graphics on
+ embedded systems - including consoles, phones, appliances and vehicles.
+ It contains a subset of OpenGL plus a number of extensions for the
+ special needs of embedded systems.
+ .
+ OpenGL|ES 2.x provides an API for programmable hardware including vertex
+ and fragment shaders.
 
 Package: libgles2-mesa-dev
 Section: libdevel
 Architecture: any
 Depends:
+ libgles2-mesa (= ${binary:Version}),
  libegl1-mesa-dev,
  libglvnd-dev,
  ${misc:Depends},
@@ -253,7 +256,7 @@ Description: free implementation of the GL API -- shared library
  functions. It is intended to be mainly used by both the libgles1-mesa
  and libgles2-mesa packages.
 
-Package: libglx-mesa0
+Package: libgl1-mesa-glx
 Section: libs
 Architecture: any
 Depends:
@@ -261,7 +264,9 @@ Depends:
  ${misc:Depends},
  libglapi-mesa (= ${binary:Version}),
  libgl1-mesa-dri,
-Provides: libglx-vendor
+Provides: libgl1, libglx-vendor
+Conflicts: libgl1
+Replaces: libgl1
 Breaks:
  libopengl-perl (<< 0.6704+dfsg-2),
  glx-diversions (<< 0.8.4~),
@@ -282,17 +287,6 @@ Description: free implementation of the OpenGL API -- GLX vendor library
  This package does not include the modules themselves: these can be found
  in the libgl1-mesa-dri package.
 
-Package: libgl1-mesa-glx
-Section: oldlibs
-Architecture: any
-Depends:
- libgl1,
- libglx-mesa0,
- ${misc:Depends},
-Multi-Arch: same
-Description: transitional dummy package
- This is a transitional dummy package, it can be safely removed.
-
 Package: libgl1-mesa-dri
 Section: libs
 Architecture: any
@@ -310,14 +304,14 @@ Description: free implementation of the OpenGL API -- DRI modules
  modules for accelerating direct rendering.
  .
  For a complete description of Mesa, please look at the
- libglx-mesa0 package.
+ libgl1-mesa-glx package.
 
 Package: libgl1-mesa-dev
 Section: libdevel
 Architecture: any
 Depends:
  mesa-common-dev (= ${binary:Version}),
- libglvnd-dev,
+ libgl1-mesa-glx (= ${binary:Version}),
  libdrm-dev (>= 2.4.95) [!hurd-any],
  libx11-dev,
  libx11-xcb-dev,
