@@ -83,7 +83,8 @@ else
 
   # LLVM is required for building r300g, radeonsi and llvmpipe drivers.
   # It's also required for building OpenCL support.
-  ifneq (,$(filter $(DEB_HOST_ARCH), amd64 arm64 armel armhf i386 kfreebsd-amd64 kfreebsd-i386 mips mips64el mipsel powerpc ppc64 ppc64el s390x sparc64))
+  # Don't use LLVM for now as UBPorts version is too old
+  ifneq (,$(filter $(DEB_HOST_ARCH), kfreebsd-amd64 kfreebsd-i386 mips mips64el mipsel powerpc ppc64 ppc64el s390x sparc64))
 	GALLIUM_DRIVERS += radeonsi, swrast,
 	confflags_GALLIUM += -Dllvm=true
 	confflags_GALLIUM += -Dgallium-opencl=icd
@@ -101,7 +102,7 @@ else
 
   # radv needs LLVM and the Vulkan loader, so only build on the subset of
   # arches where we have LLVM enabled and where the Vulkan loader is built.
-  ifneq (,$(filter $(DEB_HOST_ARCH), amd64 arm64 armel armhf i386 mips mips64el mipsel powerpc ppc64 ppc64el s390x sparc64))
+  ifneq (,$(filter $(DEB_HOST_ARCH), mips mips64el mipsel powerpc ppc64 ppc64el s390x sparc64))
 	VULKAN_DRIVERS += amd,
   endif
 
@@ -109,7 +110,7 @@ else
 	confflags_GBM = -Dgbm=true
 	confflags_GALLIUM += -Dgallium-extra-hud=true
 	confflags_GALLIUM += -Dgallium-vdpau=true
-	confflags_GALLIUM += -Dlmsensors=true
+	#confflags_GALLIUM += -Dlmsensors=true
 
   ifeq (,$(filter pkg.mesa.nolibva,$(DEB_BUILD_PROFILES)))
 	confflags_GALLIUM += -Dgallium-va=true

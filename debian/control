@@ -78,36 +78,6 @@ Description: X acceleration library -- development files
  This package provides the development environment for compiling programs
  against the xatracker library.
 
-Package: libd3dadapter9-mesa
-Section: libs
-Architecture: amd64 arm64 armel armhf i386 kfreebsd-i386 powerpc
-Depends:
- ${shlibs:Depends},
- ${misc:Depends},
- libudev1 [linux-any],
-Pre-Depends: ${misc:Pre-Depends}
-Multi-Arch: same
-Description: state-tracker for Direct3D9
- This package contains a Gallium3D state tracker that implements the Direct3D9
- API.  Combined with the gallium-nine branch of Wine, programs using D3D9 can
- achieve native (or better) graphics performance.
-
-Package: libd3dadapter9-mesa-dev
-Section: libdevel
-Architecture: amd64 arm64 armel armhf i386 kfreebsd-i386 powerpc
-Depends:
- libd3dadapter9-mesa (= ${binary:Version}),
- libudev1 [linux-any],
- ${misc:Depends},
-Pre-Depends: ${misc:Pre-Depends}
-Multi-Arch: same
-Description: state-tracker for Direct3D9 -- development files
- This package contains a Gallium3D state tracker that implements the Direct3D9
- API.  Combined with the gallium-nine branch of Wine, programs using D3D9 can
- achieve native (or better) graphics performance.
- .
- Development files
-
 Package: libgbm1
 Section: libs
 Architecture: linux-any kfreebsd-any
@@ -435,7 +405,7 @@ Description: Mesa VDPAU video acceleration drivers
 
 Package: mesa-vulkan-drivers
 Section: libs
-Architecture: amd64 arm64 armel armhf i386 mips mips64el mipsel powerpc ppc64 ppc64el s390x sparc64 x32
+Architecture: amd64 i386 x32
 Pre-Depends: ${misc:Pre-Depends}
 Depends:
  libvulkan1,
@@ -445,23 +415,5 @@ Multi-Arch: same
 Description: Mesa Vulkan graphics drivers
  Vulkan is a low-overhead 3D graphics and compute API. This package
  includes Vulkan drivers provided by the Mesa project.
-
-Package: mesa-opencl-icd
-Section: libs
-Architecture: amd64 arm64 armel armhf i386 kfreebsd-amd64 kfreebsd-i386 mips mips64el mipsel powerpc ppc64 ppc64el s390x sparc64
-Pre-Depends: ${misc:Pre-Depends}
-Depends:
- libclc-r600 (>= 0.2.0+git20180312-1~),
- libclc-amdgcn (>= 0.2.0+git20180312-1~),
- ocl-icd-libopencl1 | libopencl1,
- ${shlibs:Depends},
- ${misc:Depends},
-Provides: opencl-icd
-Multi-Arch: same
-Description: free implementation of the OpenCL API -- ICD runtime
- This package contains the mesa implementation of the OpenCL (Open Compute
- Language) library, which is intended for use with an ICD loader. OpenCL
- provides a standardized interface for computational analysis on graphical
- processing units.
 
 # vim: tw=0
