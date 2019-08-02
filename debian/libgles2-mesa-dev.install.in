@@ -1,0 +1,4 @@
+usr/include/GLES2
+usr/include/GLES3
+usr/lib/*/pkgconfig/glesv2.pc
+usr/lib/${DEB_HOST_MULTIARCH}/libGLESv2.so usr/lib/${DEB_HOST_MULTIARCH}/mesa-egl
