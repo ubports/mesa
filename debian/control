@@ -6,7 +6,7 @@ Uploaders: Andreas Boll <aboll@debian.org>
 Standards-Version: 4.1.4
 Build-Depends:
  debhelper,
- meson (>= 0.45),
+ meson (>= 0.46),
  quilt (>= 0.40),
  pkg-config,
  libdrm-dev (>= 2.4.97) [!hurd-any],
@@ -147,7 +147,10 @@ Depends:
  libxshmfence-dev,
  libx11-xcb-dev,
  libwayland-dev (>= 1.15.0) [linux-any],
- x11proto-dev,
+ x11proto-gl-dev (>= 1.4.14),
+ x11proto-dri2-dev (>= 2.6),
+ x11proto-dri3-dev (>= 1.0),
+ x11proto-present-dev (>= 1.0),
  ${misc:Depends},
  libegl1-mesa (= ${binary:Version})
 Multi-Arch: same
@@ -199,7 +202,6 @@ Architecture: any
 Depends:
  libgles2-mesa (= ${binary:Version}),
  libegl1-mesa-dev,
- libglvnd-dev,
  ${misc:Depends},
 Multi-Arch: same
 Description: free implementation of the OpenGL|ES 2.x API -- development files
@@ -296,7 +298,10 @@ Depends:
  libxext-dev,
  libxfixes-dev,
  libxxf86vm-dev,
- x11proto-dev,
+ x11proto-gl-dev (>= 1.4.14),
+ x11proto-dri2-dev (>= 2.6),
+ x11proto-dri3-dev (>= 1.0),
+ x11proto-present-dev (>= 1.0),
  ${misc:Depends},
 Conflicts: libgl-dev
 Replaces: libgl-dev

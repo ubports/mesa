@@ -1,2 +1,0 @@
-07_gallium-fix-build-failure-on-powerpcspe.diff
-Revert-meson-don-t-build-libGLES-.so-with-GLVND.patch

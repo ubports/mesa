@@ -1,3 +1,9 @@
+mesa (19.2.0~git20190803-1ubports1) xenial; urgency=medium
+
+  * Import upstream git master
+
+ -- TheKit <nekit1000@gmail.com>  Fri, 03 Aug 2019 13:28:13 +0200
+
 mesa (19.1.1-1ubports1) xenial; urgency=medium
 
   * Import to UBPorts and adapt for debhelper 9
