@@ -68,6 +68,9 @@ struct iris_resource {
    /** Backing storage for the resource */
    struct iris_bo *bo;
 
+   /** offset at which data starts in the BO */
+   uint64_t offset;
+
    /**
     * A bitfield of PIPE_BIND_* indicating how this resource was bound
     * in the past.  Only meaningful for PIPE_BUFFER; used for flushing.
@@ -264,7 +267,9 @@ uint32_t iris_flush_bits_for_history(struct iris_resource *res);
 
 void iris_flush_and_dirty_for_history(struct iris_context *ice,
                                       struct iris_batch *batch,
-                                      struct iris_resource *res);
+                                      struct iris_resource *res,
+                                      uint32_t extra_flags,
+                                      const char *reason);
 
 unsigned iris_get_num_logical_layers(const struct iris_resource *res,
                                      unsigned level);
@@ -401,6 +406,10 @@ void iris_resource_prepare_texture(struct iris_context *ice,
 void iris_resource_prepare_image(struct iris_context *ice,
                                  struct iris_batch *batch,
                                  struct iris_resource *res);
+
+bool iris_has_color_unresolved(const struct iris_resource *res,
+                               unsigned start_level, unsigned num_levels,
+                               unsigned start_layer, unsigned num_layers);
 
 void iris_resource_check_level_layer(const struct iris_resource *res,
                                      uint32_t level, uint32_t layer);

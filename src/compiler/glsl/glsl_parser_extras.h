@@ -605,6 +605,10 @@ struct _mesa_glsl_parse_state {
    /** Have we found a return statement in this function? */
    bool found_return;
 
+   /** Have we found the interlock builtins in this function? */
+   bool found_begin_interlock;
+   bool found_end_interlock;
+
    /** Was there an error during compilation? */
    bool error;
 
@@ -852,6 +856,8 @@ struct _mesa_glsl_parse_state {
    bool EXT_texture_cube_map_array_warn;
    bool EXT_texture_query_lod_enable;
    bool EXT_texture_query_lod_warn;
+   bool EXT_texture_shadow_lod_enable;
+   bool EXT_texture_shadow_lod_warn;
    bool INTEL_conservative_rasterization_enable;
    bool INTEL_conservative_rasterization_warn;
    bool INTEL_shader_atomic_float_minmax_enable;

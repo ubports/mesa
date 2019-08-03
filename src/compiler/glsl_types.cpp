@@ -557,7 +557,7 @@ glsl_type::glsl_type(const glsl_type *array, unsigned length,
    char *const n = (char *) ralloc_size(this->mem_ctx, name_length);
 
    if (length == 0)
-      util_snprintf(n, name_length, "%s[]", array->name);
+      snprintf(n, name_length, "%s[]", array->name);
    else {
       /* insert outermost dimensions in the correct spot
        * otherwise the dimension order will be backwards
@@ -565,11 +565,11 @@ glsl_type::glsl_type(const glsl_type *array, unsigned length,
       const char *pos = strchr(array->name, '[');
       if (pos) {
          int idx = pos - array->name;
-         util_snprintf(n, idx+1, "%s", array->name);
-         util_snprintf(n + idx, name_length - idx, "[%u]%s",
+         snprintf(n, idx+1, "%s", array->name);
+         snprintf(n + idx, name_length - idx, "[%u]%s",
                        length, array->name + idx);
       } else {
-         util_snprintf(n, name_length, "%s[%u]", array->name, length);
+         snprintf(n, name_length, "%s[%u]", array->name, length);
       }
    }
 
@@ -635,8 +635,8 @@ glsl_type::get_instance(unsigned base_type, unsigned rows, unsigned columns,
       assert(columns > 1 || !row_major);
 
       char name[128];
-      util_snprintf(name, sizeof(name), "%sx%uB%s", bare_type->name,
-                    explicit_stride, row_major ? "RM" : "");
+      snprintf(name, sizeof(name), "%sx%uB%s", bare_type->name,
+               explicit_stride, row_major ? "RM" : "");
 
       mtx_lock(&glsl_type::hash_mutex);
 
@@ -1000,8 +1000,8 @@ glsl_type::get_array_instance(const glsl_type *base,
     * named 'foo'.
     */
    char key[128];
-   util_snprintf(key, sizeof(key), "%p[%u]x%uB", (void *) base, array_size,
-                 explicit_stride);
+   snprintf(key, sizeof(key), "%p[%u]x%uB", (void *) base, array_size,
+            explicit_stride);
 
    mtx_lock(&glsl_type::hash_mutex);
 
@@ -1028,10 +1028,40 @@ glsl_type::get_array_instance(const glsl_type *base,
    return (glsl_type *) entry->data;
 }
 
+bool
+glsl_type::compare_no_precision(const glsl_type *b) const
+{
+   if (this == b)
+      return true;
+
+   if (this->is_array()) {
+      if (!b->is_array() || this->length != b->length)
+         return false;
+
+      const glsl_type *b_no_array = b->fields.array;
+
+      return this->fields.array->compare_no_precision(b_no_array);
+   }
+
+   if (this->is_struct()) {
+      if (!b->is_struct())
+         return false;
+   } else if (this->is_interface()) {
+      if (!b->is_interface())
+         return false;
+   } else {
+      return false;
+   }
+
+   return record_compare(b,
+                         true, /* match_name */
+                         true, /* match_locations */
+                         false /* match_precision */);
+}
 
 bool
 glsl_type::record_compare(const glsl_type *b, bool match_name,
-                          bool match_locations) const
+                          bool match_locations, bool match_precision) const
 {
    if (this->length != b->length)
       return false;
@@ -1060,8 +1090,15 @@ glsl_type::record_compare(const glsl_type *b, bool match_name,
          return false;
 
    for (unsigned i = 0; i < this->length; i++) {
-      if (this->fields.structure[i].type != b->fields.structure[i].type)
-         return false;
+      if (match_precision) {
+         if (this->fields.structure[i].type != b->fields.structure[i].type)
+            return false;
+      } else {
+         const glsl_type *ta = this->fields.structure[i].type;
+         const glsl_type *tb = b->fields.structure[i].type;
+         if (!ta->compare_no_precision(tb))
+            return false;
+      }
       if (strcmp(this->fields.structure[i].name,
                  b->fields.structure[i].name) != 0)
          return false;
@@ -1104,7 +1141,8 @@ glsl_type::record_compare(const glsl_type *b, bool match_name,
       if (this->fields.structure[i].image_format
           != b->fields.structure[i].image_format)
          return false;
-      if (this->fields.structure[i].precision
+      if (match_precision &&
+          this->fields.structure[i].precision
           != b->fields.structure[i].precision)
          return false;
       if (this->fields.structure[i].explicit_xfb_buffer
@@ -1595,7 +1633,7 @@ glsl_type::can_implicitly_convert_to(const glsl_type *desired,
       return false;
 
    /* int and uint can be converted to float. */
-   if (desired->is_float() && this->is_integer())
+   if (desired->is_float() && this->is_integer_32())
       return true;
 
    /* With GLSL 4.0, ARB_gpu_shader5, or MESA_shader_integer_functions, int
@@ -1616,7 +1654,7 @@ glsl_type::can_implicitly_convert_to(const glsl_type *desired,
    if ((!state || state->has_double()) && desired->is_double()) {
       if (this->is_float())
          return true;
-      if (this->is_integer())
+      if (this->is_integer_32())
          return true;
    }
 
@@ -2084,6 +2122,74 @@ glsl_type::std430_array_stride(bool row_major) const
    unsigned stride = this->std430_size(row_major);
    assert(this->explicit_stride == 0 || this->explicit_stride == stride);
    return stride;
+}
+
+/* Note that the value returned by this method is only correct if the
+ * explit offset, and stride values are set, so only with SPIR-V shaders.
+ * Should not be used with GLSL shaders.
+ */
+
+unsigned
+glsl_type::explicit_size(bool align_to_stride) const
+{
+   if (this->is_struct() || this->is_interface()) {
+      if (this->length > 0) {
+         unsigned size = 0;
+
+         for (unsigned i = 0; i < this->length; i++) {
+            assert(this->fields.structure[i].offset >= 0);
+            unsigned last_byte = this->fields.structure[i].offset +
+               this->fields.structure[i].type->explicit_size();
+            size = MAX2(size, last_byte);
+         }
+
+         return size;
+      } else {
+         return 0;
+      }
+   } else if (this->is_array()) {
+      /* From ARB_program_interface_query spec:
+       *
+       *   "For the property of BUFFER_DATA_SIZE, then the implementation-dependent
+       *   minimum total buffer object size, in basic machine units, required to
+       *   hold all active variables associated with an active uniform block, shader
+       *   storage block, or atomic counter buffer is written to <params>.  If the
+       *   final member of an active shader storage block is array with no declared
+       *   size, the minimum buffer size is computed assuming the array was declared
+       *   as an array with one element."
+       *
+       */
+      if (this->is_unsized_array())
+         return this->explicit_stride;
+
+      assert(this->length > 0);
+      unsigned elem_size = align_to_stride ? this->explicit_stride : this->fields.array->explicit_size();
+      assert(this->explicit_stride >= elem_size);
+
+      return this->explicit_stride * (this->length - 1) + elem_size;
+   } else if (this->is_matrix()) {
+      const struct glsl_type *elem_type;
+      unsigned length;
+
+      if (this->interface_row_major) {
+         elem_type = get_instance(this->base_type,
+                                  this->matrix_columns, 1);
+         length = this->vector_elements;
+      } else {
+         elem_type = get_instance(this->base_type,
+                                  this->vector_elements, 1);
+         length = this->matrix_columns;
+      }
+
+      unsigned elem_size = align_to_stride ? this->explicit_stride : elem_type->explicit_size();
+
+      assert(this->explicit_stride);
+      return this->explicit_stride * (length - 1) + elem_size;
+   }
+
+   unsigned N = this->bit_size() / 8;
+
+   return this->vector_elements * N;
 }
 
 unsigned

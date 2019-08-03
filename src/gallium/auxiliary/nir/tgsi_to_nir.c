@@ -74,6 +74,7 @@ struct ttn_compile {
 
    nir_variable *input_var_face;
    nir_variable *input_var_position;
+   nir_variable *input_var_point;
 
    /**
     * Stack of nir_cursors where instructions should be pushed as we pop
@@ -102,14 +103,15 @@ struct ttn_compile {
    bool cap_scalar;
    bool cap_face_is_sysval;
    bool cap_position_is_sysval;
+   bool cap_point_is_sysval;
    bool cap_packed_uniforms;
    bool cap_samplers_as_deref;
 };
 
 #define ttn_swizzle(b, src, x, y, z, w) \
-   nir_swizzle(b, src, SWIZ(x, y, z, w), 4, false)
+   nir_swizzle(b, src, SWIZ(x, y, z, w), 4)
 #define ttn_channel(b, src, swiz) \
-   nir_swizzle(b, src, SWIZ(swiz, swiz, swiz, swiz), 1, false)
+   nir_channel(b, src, TGSI_SWIZZLE_##swiz)
 
 static gl_varying_slot
 tgsi_varying_semantic_to_slot(unsigned semantic, unsigned index)
@@ -177,7 +179,7 @@ ttn_src_for_dest(nir_builder *b, nir_alu_dest *dest)
    for (int i = 0; i < 4; i++)
       src.swizzle[i] = i;
 
-   return nir_fmov_alu(b, src, 4);
+   return nir_mov_alu(b, src, 4);
 }
 
 static enum glsl_interp_mode
@@ -321,6 +323,14 @@ ttn_emit_declaration(struct ttn_compile *c)
                      var->data.location = VARYING_SLOT_POS;
                   }
                   c->input_var_position = var;
+               } else if (decl->Semantic.Name == TGSI_SEMANTIC_PCOORD) {
+                  if (c->cap_point_is_sysval) {
+                     var->data.mode = nir_var_system_value;
+                     var->data.location = SYSTEM_VALUE_POINT_COORD;
+                  } else {
+                     var->data.location = VARYING_SLOT_PNTC;
+                  }
+                  c->input_var_point = var;
                } else {
                   var->data.location =
                      tgsi_varying_semantic_to_slot(decl->Semantic.Name,
@@ -579,6 +589,11 @@ ttn_src_for_file_and_index(struct ttn_compile *c, unsigned file, unsigned index,
          op = nir_intrinsic_load_frag_coord;
          load = nir_load_frag_coord(b);
          break;
+      case TGSI_SEMANTIC_PCOORD:
+         assert(c->cap_point_is_sysval);
+         op = nir_intrinsic_load_point_coord;
+         load = nir_load_point_coord(b);
+         break;
       default:
          unreachable("bad system value");
       }
@@ -599,6 +614,10 @@ ttn_src_for_file_and_index(struct ttn_compile *c, unsigned file, unsigned index,
           c->scan->input_semantic_name[index] == TGSI_SEMANTIC_POSITION) {
          assert(!c->cap_position_is_sysval && c->input_var_position);
          return nir_src_for_ssa(nir_load_var(&c->build, c->input_var_position));
+      } else if (c->scan->processor == PIPE_SHADER_FRAGMENT &&
+          c->scan->input_semantic_name[index] == TGSI_SEMANTIC_PCOORD) {
+         assert(!c->cap_point_is_sysval && c->input_var_point);
+         return nir_src_for_ssa(nir_load_var(&c->build, c->input_var_point));
       } else {
          /* Indirection on input arrays isn't supported by TTN. */
          assert(!dim);
@@ -681,7 +700,7 @@ ttn_src_for_indirect(struct ttn_compile *c, struct tgsi_ind_register *indirect)
                                         indirect->File,
                                         indirect->Index,
                                         NULL, NULL, NULL);
-   return nir_imov_alu(b, src, 1);
+   return nir_mov_alu(b, src, 1);
 }
 
 static nir_alu_dest
@@ -793,7 +812,7 @@ ttn_get_src(struct ttn_compile *c, struct tgsi_full_src_register *tgsi_fsrc,
    src.swizzle[2] = tgsi_src->SwizzleZ;
    src.swizzle[3] = tgsi_src->SwizzleW;
 
-   nir_ssa_def *def = nir_fmov_alu(b, src, 4);
+   nir_ssa_def *def = nir_mov_alu(b, src, 4);
 
    if (tgsi_src->Absolute) {
       if (src_is_float)
@@ -833,7 +852,7 @@ ttn_move_dest_masked(nir_builder *b, nir_alu_dest dest,
    if (!(dest.write_mask & write_mask))
       return;
 
-   nir_alu_instr *mov = nir_alu_instr_create(b->shader, nir_op_imov);
+   nir_alu_instr *mov = nir_alu_instr_create(b->shader, nir_op_mov);
    mov->dest = dest;
    mov->dest.write_mask &= write_mask;
    mov->src[0].src = nir_src_for_ssa(def);
@@ -904,8 +923,8 @@ ttn_dst(nir_builder *b, nir_op op, nir_alu_dest dest, nir_ssa_def **src)
 {
    ttn_move_dest_masked(b, dest, nir_imm_float(b, 1.0), TGSI_WRITEMASK_X);
    ttn_move_dest_masked(b, dest, nir_fmul(b, src[0], src[1]), TGSI_WRITEMASK_Y);
-   ttn_move_dest_masked(b, dest, nir_fmov(b, src[0]), TGSI_WRITEMASK_Z);
-   ttn_move_dest_masked(b, dest, nir_fmov(b, src[1]), TGSI_WRITEMASK_W);
+   ttn_move_dest_masked(b, dest, nir_mov(b, src[0]), TGSI_WRITEMASK_Z);
+   ttn_move_dest_masked(b, dest, nir_mov(b, src[1]), TGSI_WRITEMASK_W);
 }
 
 /* LIT - Light Coefficients
@@ -1357,7 +1376,7 @@ ttn_tex(struct ttn_compile *c, nir_alu_dest dest, nir_ssa_def **src)
 
    instr->src[src_number].src =
       nir_src_for_ssa(nir_swizzle(b, src[0], SWIZ(X, Y, Z, W),
-                                  instr->coord_components, false));
+                                  instr->coord_components));
    instr->src[src_number].src_type = nir_tex_src_coord;
    src_number++;
 
@@ -1404,14 +1423,12 @@ ttn_tex(struct ttn_compile *c, nir_alu_dest dest, nir_ssa_def **src)
       instr->src[src_number].src_type = nir_tex_src_ddx;
       instr->src[src_number].src =
          nir_src_for_ssa(nir_swizzle(b, src[1], SWIZ(X, Y, Z, W),
-				     nir_tex_instr_src_size(instr, src_number),
-				     false));
+				     nir_tex_instr_src_size(instr, src_number)));
       src_number++;
       instr->src[src_number].src_type = nir_tex_src_ddy;
       instr->src[src_number].src =
          nir_src_for_ssa(nir_swizzle(b, src[2], SWIZ(X, Y, Z, W),
-				     nir_tex_instr_src_size(instr, src_number),
-				     false));
+				     nir_tex_instr_src_size(instr, src_number)));
       src_number++;
    }
 
@@ -1448,7 +1465,7 @@ ttn_tex(struct ttn_compile *c, nir_alu_dest dest, nir_ssa_def **src)
 
       instr->src[src_number].src_type = nir_tex_src_offset;
       instr->src[src_number].src = nir_src_for_ssa(
-         nir_fmov_alu(b, src, nir_tex_instr_src_size(instr, src_number)));
+         nir_mov_alu(b, src, nir_tex_instr_src_size(instr, src_number)));
       src_number++;
    }
 
@@ -1522,7 +1539,7 @@ ttn_txq(struct ttn_compile *c, nir_alu_dest dest, nir_ssa_def **src)
 
 static const nir_op op_trans[TGSI_OPCODE_LAST] = {
    [TGSI_OPCODE_ARL] = 0,
-   [TGSI_OPCODE_MOV] = nir_op_fmov,
+   [TGSI_OPCODE_MOV] = nir_op_mov,
    [TGSI_OPCODE_LIT] = 0,
    [TGSI_OPCODE_RCP] = nir_op_frcp,
    [TGSI_OPCODE_RSQ] = nir_op_frsq,
@@ -1650,7 +1667,7 @@ static const nir_op op_trans[TGSI_OPCODE_LAST] = {
 
    /* XXX: SAMPLE opcodes */
 
-   [TGSI_OPCODE_UARL] = nir_op_imov,
+   [TGSI_OPCODE_UARL] = nir_op_mov,
    [TGSI_OPCODE_UCMP] = 0,
    [TGSI_OPCODE_IABS] = nir_op_iabs,
    [TGSI_OPCODE_ISSG] = nir_op_isign,
@@ -1964,6 +1981,7 @@ ttn_read_pipe_caps(struct ttn_compile *c,
    c->cap_samplers_as_deref = screen->get_param(screen, PIPE_CAP_NIR_SAMPLERS_AS_DEREF);
    c->cap_face_is_sysval = screen->get_param(screen, PIPE_CAP_TGSI_FS_FACE_IS_INTEGER_SYSVAL);
    c->cap_position_is_sysval = screen->get_param(screen, PIPE_CAP_TGSI_FS_POSITION_IS_SYSVAL);
+   c->cap_point_is_sysval = screen->get_param(screen, PIPE_CAP_TGSI_FS_POINT_IS_SYSVAL);
 }
 
 /**
@@ -2050,7 +2068,7 @@ ttn_optimize_nir(nir_shader *nir, bool scalar)
       NIR_PASS_V(nir, nir_lower_vars_to_ssa);
 
       if (scalar) {
-         NIR_PASS_V(nir, nir_lower_alu_to_scalar);
+         NIR_PASS_V(nir, nir_lower_alu_to_scalar, NULL);
          NIR_PASS_V(nir, nir_lower_phis_to_scalar);
       }
 

@@ -365,6 +365,13 @@ v130_or_gpu_shader4(const _mesa_glsl_parse_state *state)
 }
 
 static bool
+v130_or_gpu_shader4_and_tex_shadow_lod(const _mesa_glsl_parse_state *state)
+{
+   return v130_or_gpu_shader4(state) &&
+          state->EXT_texture_shadow_lod_enable;
+}
+
+static bool
 gpu_shader5(const _mesa_glsl_parse_state *state)
 {
    return state->is_version(400, 0) || state->ARB_gpu_shader5_enable;
@@ -489,6 +496,14 @@ static bool
 texture_cube_map_array(const _mesa_glsl_parse_state *state)
 {
    return state->has_texture_cube_map_array();
+}
+
+static bool
+v130_or_gpu_shader4_and_tex_cube_map_array(const _mesa_glsl_parse_state *state)
+{
+   return texture_cube_map_array(state) &&
+          v130_or_gpu_shader4(state) &&
+          state->EXT_texture_shadow_lod_enable;
 }
 
 static bool
@@ -1031,7 +1046,9 @@ private:
                                    const glsl_type *sampler_type,
                                    const glsl_type *coord_type,
                                    int flags = 0);
-   BA1(textureCubeArrayShadow);
+   ir_function_signature *_textureCubeArrayShadow(ir_texture_opcode opcode,
+                                                  builtin_available_predicate avail,
+                                                  const glsl_type *x);
    ir_function_signature *_texelFetch(builtin_available_predicate avail,
                                       const glsl_type *return_type,
                                       const glsl_type *sampler_type,
@@ -2166,7 +2183,7 @@ builtin_builder::create_builtins()
                 /* samplerCubeArrayShadow is special; it has an extra parameter
                  * for the shadow comparator since there is no vec5 type.
                  */
-                _textureCubeArrayShadow(texture_cube_map_array, glsl_type::samplerCubeArrayShadow_type),
+                _textureCubeArrayShadow(ir_tex, texture_cube_map_array, glsl_type::samplerCubeArrayShadow_type),
 
                 _texture(ir_tex, v130, glsl_type::vec4_type,  glsl_type::sampler2DRect_type,  glsl_type::vec2_type),
                 _texture(ir_tex, v130, glsl_type::ivec4_type, glsl_type::isampler2DRect_type, glsl_type::vec2_type),
@@ -2209,6 +2226,11 @@ builtin_builder::create_builtins()
                 _texture(ir_txb, derivatives_texture_cube_map_array, glsl_type::uvec4_type, glsl_type::usamplerCubeArray_type, glsl_type::vec4_type),
 
                 _texture(ir_txb, v130_derivatives_only, glsl_type::float_type, glsl_type::sampler1DArrayShadow_type, glsl_type::vec3_type),
+                _texture(ir_tex, v130_or_gpu_shader4_and_tex_shadow_lod, glsl_type::float_type, glsl_type::sampler2DArrayShadow_type, glsl_type::vec4_type),
+                _texture(ir_txb, v130_or_gpu_shader4_and_tex_shadow_lod, glsl_type::float_type, glsl_type::sampler2DArrayShadow_type, glsl_type::vec4_type),
+
+                _textureCubeArrayShadow(ir_tex, v130_or_gpu_shader4_and_tex_cube_map_array, glsl_type::samplerCubeArrayShadow_type),
+                _textureCubeArrayShadow(ir_txb, v130_or_gpu_shader4_and_tex_cube_map_array, glsl_type::samplerCubeArrayShadow_type),
                 NULL);
 
    add_function("textureLod",
@@ -2244,6 +2266,9 @@ builtin_builder::create_builtins()
                 _texture(ir_txl, texture_cube_map_array, glsl_type::uvec4_type, glsl_type::usamplerCubeArray_type, glsl_type::vec4_type),
 
                 _texture(ir_txl, v130, glsl_type::float_type, glsl_type::sampler1DArrayShadow_type, glsl_type::vec3_type),
+                _texture(ir_txl, v130_or_gpu_shader4_and_tex_shadow_lod, glsl_type::float_type, glsl_type::sampler2DArrayShadow_type, glsl_type::vec4_type),
+                _texture(ir_txl, v130_or_gpu_shader4_and_tex_shadow_lod, glsl_type::float_type, glsl_type::samplerCubeShadow_type, glsl_type::vec4_type),
+                _textureCubeArrayShadow(ir_txl, v130_or_gpu_shader4_and_tex_cube_map_array, glsl_type::samplerCubeArrayShadow_type),
                 NULL);
 
    add_function("textureOffset",
@@ -2309,6 +2334,8 @@ builtin_builder::create_builtins()
                 _texture(ir_txb, v130_derivatives_only, glsl_type::uvec4_type, glsl_type::usampler2DArray_type, glsl_type::vec3_type, TEX_OFFSET),
 
                 _texture(ir_txb, v130_derivatives_only, glsl_type::float_type, glsl_type::sampler1DArrayShadow_type, glsl_type::vec3_type, TEX_OFFSET),
+                _texture(ir_tex, v130_or_gpu_shader4_and_tex_shadow_lod, glsl_type::float_type, glsl_type::sampler2DArrayShadow_type, glsl_type::vec4_type, TEX_OFFSET),
+                _texture(ir_txb, v130_or_gpu_shader4_and_tex_shadow_lod, glsl_type::float_type, glsl_type::sampler2DArrayShadow_type, glsl_type::vec4_type, TEX_OFFSET),
                 NULL);
 
    add_function("texture1DOffset",
@@ -2727,6 +2754,7 @@ builtin_builder::create_builtins()
                 _texture(ir_txl, v130, glsl_type::uvec4_type, glsl_type::usampler2DArray_type, glsl_type::vec3_type, TEX_OFFSET),
 
                 _texture(ir_txl, v130, glsl_type::float_type, glsl_type::sampler1DArrayShadow_type, glsl_type::vec3_type, TEX_OFFSET),
+                _texture(ir_txl, v130_or_gpu_shader4_and_tex_shadow_lod, glsl_type::float_type, glsl_type::sampler2DArrayShadow_type, glsl_type::vec4_type, TEX_OFFSET),
                 NULL);
 
    add_function("texture1DLodOffset",
@@ -6093,7 +6121,8 @@ builtin_builder::_texture(ir_texture_opcode opcode,
 }
 
 ir_function_signature *
-builtin_builder::_textureCubeArrayShadow(builtin_available_predicate avail,
+builtin_builder::_textureCubeArrayShadow(ir_texture_opcode opcode,
+                                         builtin_available_predicate avail,
                                          const glsl_type *sampler_type)
 {
    ir_variable *s = in_var(sampler_type, "sampler");
@@ -6101,11 +6130,23 @@ builtin_builder::_textureCubeArrayShadow(builtin_available_predicate avail,
    ir_variable *compare = in_var(glsl_type::float_type, "compare");
    MAKE_SIG(glsl_type::float_type, avail, 3, s, P, compare);
 
-   ir_texture *tex = new(mem_ctx) ir_texture(ir_tex);
+   ir_texture *tex = new(mem_ctx) ir_texture(opcode);
    tex->set_sampler(var_ref(s), glsl_type::float_type);
 
    tex->coordinate = var_ref(P);
    tex->shadow_comparator = var_ref(compare);
+
+   if (opcode == ir_txb) {
+      ir_variable *bias = in_var(glsl_type::float_type, "bias");
+      sig->parameters.push_tail(bias);
+      tex->lod_info.bias = var_ref(bias);
+   }
+
+   if (opcode == ir_txl) {
+      ir_variable *lod = in_var(glsl_type::float_type, "lod");
+      sig->parameters.push_tail(lod);
+      tex->lod_info.lod = var_ref(lod);
+   }
 
    body.emit(ret(tex));
 

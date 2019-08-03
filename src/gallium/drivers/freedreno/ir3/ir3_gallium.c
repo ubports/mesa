@@ -44,35 +44,25 @@
 #include "ir3/ir3_nir.h"
 
 static void
-dump_shader_info(struct ir3_shader_variant *v, struct pipe_debug_callback *debug)
+dump_shader_info(struct ir3_shader_variant *v, bool binning_pass,
+		struct pipe_debug_callback *debug)
 {
 	if (!unlikely(fd_mesa_debug & FD_DBG_SHADERDB))
 		return;
 
-	pipe_debug_message(debug, SHADER_INFO, "\n"
-			"SHADER-DB: %s prog %d/%d: %u instructions, %u dwords\n"
-			"SHADER-DB: %s prog %d/%d: %u half, %u full\n"
-			"SHADER-DB: %s prog %d/%d: %u const, %u constlen\n"
-			"SHADER-DB: %s prog %d/%d: %u (ss), %u (sy)\n"
-			"SHADER-DB: %s prog %d/%d: max_sun=%u\n",
+	pipe_debug_message(debug, SHADER_INFO,
+			"%s%s shader: %u inst, %u dwords, "
+			"%u half, %u full, %u constlen, "
+			"%u (ss), %u (sy), %d max_sun, %d loops\n",
+			binning_pass ? "B" : "",
 			ir3_shader_stage(v->shader),
-			v->shader->id, v->id,
 			v->info.instrs_count,
 			v->info.sizedwords,
-			ir3_shader_stage(v->shader),
-			v->shader->id, v->id,
 			v->info.max_half_reg + 1,
 			v->info.max_reg + 1,
-			ir3_shader_stage(v->shader),
-			v->shader->id, v->id,
-			v->info.max_const + 1,
 			v->constlen,
-			ir3_shader_stage(v->shader),
-			v->shader->id, v->id,
 			v->info.ss, v->info.sy,
-			ir3_shader_stage(v->shader),
-			v->shader->id, v->id,
-			v->max_sun);
+			v->max_sun, v->loops);
 }
 
 struct ir3_shader_variant *
@@ -91,7 +81,7 @@ ir3_shader_variant(struct ir3_shader *shader, struct ir3_shader_key key,
 	v = ir3_shader_get_variant(shader, &key, binning_pass, &created);
 
 	if (created) {
-		dump_shader_info(v, debug);
+		dump_shader_info(v, binning_pass, debug);
 	}
 
 	return v;
@@ -133,7 +123,7 @@ ir3_shader_create(struct ir3_compiler *compiler,
 		if (ir3_shader_debug & IR3_DBG_DISASM) {
 			tgsi_dump(cso->tokens, 0);
 		}
-		nir = ir3_tgsi_to_nir(compiler, cso->tokens, screen);
+		nir = tgsi_to_nir(cso->tokens, screen);
 	}
 
 	struct ir3_shader *shader = ir3_shader_from_nir(compiler, nir);
@@ -145,9 +135,11 @@ ir3_shader_create(struct ir3_compiler *compiler,
 		 * (as otherwise nothing will trigger the shader to be
 		 * actually compiled)
 		 */
-		static struct ir3_shader_key key;
-		memset(&key, 0, sizeof(key));
+		static struct ir3_shader_key key; /* static is implicitly zeroed */
 		ir3_shader_variant(shader, key, false, debug);
+
+		if (nir->info.stage != MESA_SHADER_FRAGMENT)
+			ir3_shader_variant(shader, key, true, debug);
 	}
 	return shader;
 }
@@ -170,26 +162,12 @@ ir3_shader_create_compute(struct ir3_compiler *compiler,
 		if (ir3_shader_debug & IR3_DBG_DISASM) {
 			tgsi_dump(cso->prog, 0);
 		}
-		nir = ir3_tgsi_to_nir(compiler, cso->prog, screen);
+		nir = tgsi_to_nir(cso->prog, screen);
 	}
 
 	struct ir3_shader *shader = ir3_shader_from_nir(compiler, nir);
 
 	return shader;
-}
-
-struct nir_shader *
-ir3_tgsi_to_nir(struct ir3_compiler *compiler,
-		const struct tgsi_token *tokens,
-		struct pipe_screen *screen)
-{
-	if (!screen) {
-		const nir_shader_compiler_options *options =
-			ir3_get_compiler_options(compiler);
-		return tgsi_to_nir_noscreen(tokens, options);
-	}
-
-	return tgsi_to_nir(tokens, screen);
 }
 
 /* This has to reach into the fd_context a bit more than the rest of
@@ -222,44 +200,25 @@ ring_wfi(struct fd_batch *batch, struct fd_ringbuffer *ring)
 }
 
 static void
+emit_const(struct fd_context *ctx, struct fd_ringbuffer *ring,
+		const struct ir3_shader_variant *v, uint32_t dst_offset,
+		uint32_t offset, uint32_t size,
+		const void *user_buffer, struct pipe_resource *buffer)
+{
+	assert(dst_offset + size <= v->constlen * 4);
+
+	ctx->emit_const(ring, v->type, dst_offset,
+			offset, size, user_buffer, buffer);
+}
+
+static void
 emit_user_consts(struct fd_context *ctx, const struct ir3_shader_variant *v,
 		struct fd_ringbuffer *ring, struct fd_constbuf_stateobj *constbuf)
 {
-	const unsigned index = 0;     /* user consts are index 0 */
-
-	if (constbuf->enabled_mask & (1 << index)) {
-		struct pipe_constant_buffer *cb = &constbuf->cb[index];
-		/* size in dwords, aligned to vec4.  (This works at least
-		 * with mesa/st, which seems to align constant buffer to
-		 * 16 bytes)
-		 */
-		unsigned size = align(cb->buffer_size, 16) / 4;
-
-		/* in particular, with binning shader we may end up with
-		 * unused consts, ie. we could end up w/ constlen that is
-		 * smaller than first_driver_param.  In that case truncate
-		 * the user consts early to avoid HLSQ lockup caused by
-		 * writing too many consts
-		 */
-		uint32_t max_const = MIN2(v->num_uniforms, v->constlen);
-
-		/* and even if the start of the const buffer is before
-		 * first_immediate, the end may not be:
-		 */
-		size = MIN2(size, 4 * max_const);
-
-		if (size > 0) {
-			ring_wfi(ctx->batch, ring);
-			ctx->emit_const(ring, v->type, 0,
-					cb->buffer_offset, size,
-					cb->user_buffer, cb->buffer);
-		}
-	}
-
 	struct ir3_ubo_analysis_state *state;
 	state = &v->shader->ubo_state;
 
-	for (uint32_t i = 1; i < ARRAY_SIZE(state->range); i++) {
+	for (uint32_t i = 0; i < ARRAY_SIZE(state->range); i++) {
 		struct pipe_constant_buffer *cb = &constbuf->cb[i];
 
 		if (state->range[i].start < state->range[i].end &&
@@ -267,10 +226,21 @@ emit_user_consts(struct fd_context *ctx, const struct ir3_shader_variant *v,
 
 			uint32_t size = state->range[i].end - state->range[i].start;
 			uint32_t offset = cb->buffer_offset + state->range[i].start;
+
+			/* and even if the start of the const buffer is before
+			 * first_immediate, the end may not be:
+			 */
+			size = MIN2(size, (16 * v->constlen) - state->range[i].offset);
+
+			if (size == 0)
+				continue;
+
+			/* things should be aligned to vec4: */
 			debug_assert((state->range[i].offset % 16) == 0);
 			debug_assert((size % 16) == 0);
 			debug_assert((offset % 16) == 0);
-			ctx->emit_const(ring, v->type, state->range[i].offset / 4,
+
+			emit_const(ctx, ring, v, state->range[i].offset / 4,
 							offset, size / 4, cb->user_buffer, cb->buffer);
 		}
 	}
@@ -280,9 +250,10 @@ static void
 emit_ubos(struct fd_context *ctx, const struct ir3_shader_variant *v,
 		struct fd_ringbuffer *ring, struct fd_constbuf_stateobj *constbuf)
 {
-	uint32_t offset = v->constbase.ubo;
+	const struct ir3_const_state *const_state = &v->shader->const_state;
+	uint32_t offset = const_state->offsets.ubo;
 	if (v->constlen > offset) {
-		uint32_t params = v->num_ubos;
+		uint32_t params = const_state->num_ubos;
 		uint32_t offsets[params];
 		struct pipe_resource *prscs[params];
 
@@ -300,6 +271,8 @@ emit_ubos(struct fd_context *ctx, const struct ir3_shader_variant *v,
 			}
 		}
 
+		assert(offset * 4 + params < v->constlen * 4);
+
 		ring_wfi(ctx->batch, ring);
 		ctx->emit_const_bo(ring, v->type, false, offset * 4, params, prscs, offsets);
 	}
@@ -309,19 +282,20 @@ static void
 emit_ssbo_sizes(struct fd_context *ctx, const struct ir3_shader_variant *v,
 		struct fd_ringbuffer *ring, struct fd_shaderbuf_stateobj *sb)
 {
-	uint32_t offset = v->constbase.ssbo_sizes;
+	const struct ir3_const_state *const_state = &v->shader->const_state;
+	uint32_t offset = const_state->offsets.ssbo_sizes;
 	if (v->constlen > offset) {
-		uint32_t sizes[align(v->const_layout.ssbo_size.count, 4)];
-		unsigned mask = v->const_layout.ssbo_size.mask;
+		uint32_t sizes[align(const_state->ssbo_size.count, 4)];
+		unsigned mask = const_state->ssbo_size.mask;
 
 		while (mask) {
 			unsigned index = u_bit_scan(&mask);
-			unsigned off = v->const_layout.ssbo_size.off[index];
+			unsigned off = const_state->ssbo_size.off[index];
 			sizes[off] = sb->sb[index].buffer_size;
 		}
 
 		ring_wfi(ctx->batch, ring);
-		ctx->emit_const(ring, v->type, offset * 4,
+		emit_const(ctx, ring, v, offset * 4,
 			0, ARRAY_SIZE(sizes), sizes, NULL);
 	}
 }
@@ -330,16 +304,17 @@ static void
 emit_image_dims(struct fd_context *ctx, const struct ir3_shader_variant *v,
 		struct fd_ringbuffer *ring, struct fd_shaderimg_stateobj *si)
 {
-	uint32_t offset = v->constbase.image_dims;
+	const struct ir3_const_state *const_state = &v->shader->const_state;
+	uint32_t offset = const_state->offsets.image_dims;
 	if (v->constlen > offset) {
-		uint32_t dims[align(v->const_layout.image_dims.count, 4)];
-		unsigned mask = v->const_layout.image_dims.mask;
+		uint32_t dims[align(const_state->image_dims.count, 4)];
+		unsigned mask = const_state->image_dims.mask;
 
 		while (mask) {
 			struct pipe_image_view *img;
 			struct fd_resource *rsc;
 			unsigned index = u_bit_scan(&mask);
-			unsigned off = v->const_layout.image_dims.off[index];
+			unsigned off = const_state->image_dims.off[index];
 
 			img = &si->si[index];
 			rsc = fd_resource(img->resource);
@@ -371,10 +346,10 @@ emit_image_dims(struct fd_context *ctx, const struct ir3_shader_variant *v,
 				dims[off + 1] = ffs(dims[off + 0]) - 1;
 			}
 		}
+		uint32_t size = MIN2(ARRAY_SIZE(dims), v->constlen * 4 - offset * 4);
 
 		ring_wfi(ctx->batch, ring);
-		ctx->emit_const(ring, v->type, offset * 4,
-			0, ARRAY_SIZE(dims), dims, NULL);
+		emit_const(ctx, ring, v, offset * 4, 0, size, dims, NULL);
 	}
 }
 
@@ -382,8 +357,9 @@ static void
 emit_immediates(struct fd_context *ctx, const struct ir3_shader_variant *v,
 		struct fd_ringbuffer *ring)
 {
-	int size = v->immediates_count;
-	uint32_t base = v->constbase.immediate;
+	const struct ir3_const_state *const_state = &v->shader->const_state;
+	uint32_t base = const_state->offsets.immediate;
+	int size = const_state->immediates_count;
 
 	/* truncate size to avoid writing constants that shader
 	 * does not use:
@@ -396,8 +372,8 @@ emit_immediates(struct fd_context *ctx, const struct ir3_shader_variant *v,
 
 	if (size > 0) {
 		ring_wfi(ctx->batch, ring);
-		ctx->emit_const(ring, v->type, base,
-			0, size, v->immediates[0].val, NULL);
+		emit_const(ctx, ring, v, base,
+			0, size, const_state->immediates[0].val, NULL);
 	}
 }
 
@@ -407,7 +383,8 @@ emit_tfbos(struct fd_context *ctx, const struct ir3_shader_variant *v,
 		struct fd_ringbuffer *ring)
 {
 	/* streamout addresses after driver-params: */
-	uint32_t offset = v->constbase.tfbo;
+	const struct ir3_const_state *const_state = &v->shader->const_state;
+	uint32_t offset = const_state->offsets.tfbo;
 	if (v->constlen > offset) {
 		struct fd_streamout_stateobj *so = &ctx->streamout;
 		struct ir3_stream_output_info *info = &v->shader->stream_output;
@@ -427,6 +404,8 @@ emit_tfbos(struct fd_context *ctx, const struct ir3_shader_variant *v,
 				prscs[i] = NULL;
 			}
 		}
+
+		assert(offset * 4 + params < v->constlen * 4);
 
 		ring_wfi(ctx->batch, ring);
 		ctx->emit_const_bo(ring, v->type, true, offset * 4, params, prscs, offsets);
@@ -532,9 +511,9 @@ ir3_emit_vs_consts(const struct ir3_shader_variant *v, struct fd_ringbuffer *rin
 	emit_common_consts(v, ring, ctx, PIPE_SHADER_VERTEX);
 
 	/* emit driver params every time: */
-	/* TODO skip emit if shader doesn't use driver params to avoid WFI.. */
 	if (info) {
-		uint32_t offset = v->constbase.driver_param;
+		const struct ir3_const_state *const_state = &v->shader->const_state;
+		uint32_t offset = const_state->offsets.driver_param;
 		if (v->constlen > offset) {
 			uint32_t vertex_params[IR3_DP_VS_COUNT] = {
 				[IR3_DP_VTXID_BASE] = info->index_size ?
@@ -592,12 +571,12 @@ ir3_emit_vs_consts(const struct ir3_shader_variant *v, struct fd_ringbuffer *rin
 				ctx->mem_to_mem(ring, vertex_params_rsc, 0,
 						indirect->buffer, src_off, 1);
 
-				ctx->emit_const(ring, MESA_SHADER_VERTEX, offset * 4, 0,
+				emit_const(ctx, ring, v, offset * 4, 0,
 						vertex_params_size, NULL, vertex_params_rsc);
 
 				pipe_resource_reference(&vertex_params_rsc, NULL);
 			} else {
-				ctx->emit_const(ring, MESA_SHADER_VERTEX, offset * 4, 0,
+				emit_const(ctx, ring, v, offset * 4, 0,
 						vertex_params_size, vertex_params, NULL);
 			}
 
@@ -628,7 +607,8 @@ ir3_emit_cs_consts(const struct ir3_shader_variant *v, struct fd_ringbuffer *rin
 	emit_common_consts(v, ring, ctx, PIPE_SHADER_COMPUTE);
 
 	/* emit compute-shader driver-params: */
-	uint32_t offset = v->constbase.driver_param;
+	const struct ir3_const_state *const_state = &v->shader->const_state;
+	uint32_t offset = const_state->offsets.driver_param;
 	if (v->constlen > offset) {
 		ring_wfi(ctx->batch, ring);
 
@@ -657,7 +637,7 @@ ir3_emit_cs_consts(const struct ir3_shader_variant *v, struct fd_ringbuffer *rin
 				indirect_offset = info->indirect_offset;
 			}
 
-			ctx->emit_const(ring, MESA_SHADER_COMPUTE, offset * 4,
+			emit_const(ctx, ring, v, offset * 4,
 					indirect_offset, 4, NULL, indirect);
 
 			pipe_resource_reference(&indirect, NULL);
@@ -670,9 +650,10 @@ ir3_emit_cs_consts(const struct ir3_shader_variant *v, struct fd_ringbuffer *rin
 				[IR3_DP_LOCAL_GROUP_SIZE_Y] = info->block[1],
 				[IR3_DP_LOCAL_GROUP_SIZE_Z] = info->block[2],
 			};
+			uint32_t size = MIN2(ARRAY_SIZE(compute_params),
+					v->constlen * 4 - offset * 4);
 
-			ctx->emit_const(ring, MESA_SHADER_COMPUTE, offset * 4, 0,
-					ARRAY_SIZE(compute_params), compute_params, NULL);
+			emit_const(ctx, ring, v, offset * 4, 0, size, compute_params, NULL);
 		}
 	}
 }

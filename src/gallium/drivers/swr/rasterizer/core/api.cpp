@@ -65,9 +65,6 @@ void WakeAllThreads(SWR_CONTEXT* pContext)
 /// @param pCreateInfo - pointer to creation info.
 HANDLE SwrCreateContext(SWR_CREATECONTEXT_INFO* pCreateInfo)
 {
-    RDTSC_RESET();
-    RDTSC_INIT(0);
-
     void* pContextMem = AlignedMalloc(sizeof(SWR_CONTEXT), KNOB_SIMD_WIDTH * 4);
     memset(pContextMem, 0, sizeof(SWR_CONTEXT));
     SWR_CONTEXT* pContext = new (pContextMem) SWR_CONTEXT();
@@ -157,6 +154,12 @@ HANDLE SwrCreateContext(SWR_CREATECONTEXT_INFO* pCreateInfo)
         ArchRast::CreateThreadContext(ArchRast::AR_THREAD::API);
 #endif
 
+#if defined(KNOB_ENABLE_RDTSC)
+    pContext->pBucketMgr = new BucketManager(pCreateInfo->contextName);
+    RDTSC_RESET(pContext->pBucketMgr);
+    RDTSC_INIT(pContext->pBucketMgr, 0);
+#endif
+
     // Allocate scratch space for workers.
     ///@note We could lazily allocate this but its rather small amount of memory.
     for (uint32_t i = 0; i < pContext->NumWorkerThreads; ++i)
@@ -178,7 +181,12 @@ HANDLE SwrCreateContext(SWR_CREATECONTEXT_INFO* pCreateInfo)
 #if defined(KNOB_ENABLE_AR)
         // Initialize worker thread context for ArchRast.
         pContext->pArContext[i] = ArchRast::CreateThreadContext(ArchRast::AR_THREAD::WORKER);
+
+        SWR_WORKER_DATA* pWorkerData = (SWR_WORKER_DATA*)pContext->threadPool.pThreadData[i].pWorkerPrivateData;
+        pWorkerData->hArContext = pContext->pArContext[i];
 #endif
+
+
     }
 
 #if defined(KNOB_ENABLE_AR)
@@ -193,20 +201,19 @@ HANDLE SwrCreateContext(SWR_CREATECONTEXT_INFO* pCreateInfo)
     pContext->pHotTileMgr = new HotTileMgr();
 
     // initialize callback functions
-    pContext->pfnLoadTile                 = pCreateInfo->pfnLoadTile;
-    pContext->pfnStoreTile                = pCreateInfo->pfnStoreTile;
-    pContext->pfnClearTile                = pCreateInfo->pfnClearTile;
-    pContext->pfnTranslateGfxptrForRead   = pCreateInfo->pfnTranslateGfxptrForRead;
-    pContext->pfnTranslateGfxptrForWrite  = pCreateInfo->pfnTranslateGfxptrForWrite;
-    pContext->pfnMakeGfxPtr               = pCreateInfo->pfnMakeGfxPtr;
-    pContext->pfnUpdateSoWriteOffset      = pCreateInfo->pfnUpdateSoWriteOffset;
-    pContext->pfnUpdateStats              = pCreateInfo->pfnUpdateStats;
-    pContext->pfnUpdateStatsFE            = pCreateInfo->pfnUpdateStatsFE;
+    pContext->pfnLoadTile                = pCreateInfo->pfnLoadTile;
+    pContext->pfnStoreTile               = pCreateInfo->pfnStoreTile;
+    pContext->pfnTranslateGfxptrForRead  = pCreateInfo->pfnTranslateGfxptrForRead;
+    pContext->pfnTranslateGfxptrForWrite = pCreateInfo->pfnTranslateGfxptrForWrite;
+    pContext->pfnMakeGfxPtr              = pCreateInfo->pfnMakeGfxPtr;
+    pContext->pfnUpdateSoWriteOffset     = pCreateInfo->pfnUpdateSoWriteOffset;
+    pContext->pfnUpdateStats             = pCreateInfo->pfnUpdateStats;
+    pContext->pfnUpdateStatsFE           = pCreateInfo->pfnUpdateStatsFE;
 
 
     // pass pointer to bucket manager back to caller
 #ifdef KNOB_ENABLE_RDTSC
-    pCreateInfo->pBucketMgr = &gBucketMgr;
+    pCreateInfo->pBucketMgr = pContext->pBucketMgr;
 #endif
 
     pCreateInfo->contextSaveSize = sizeof(API_STATE);
@@ -278,9 +285,9 @@ void QueueWork(SWR_CONTEXT* pContext)
     }
     else
     {
-        RDTSC_BEGIN(APIDrawWakeAllThreads, pDC->drawId);
+        RDTSC_BEGIN(pContext->pBucketMgr, APIDrawWakeAllThreads, pDC->drawId);
         WakeAllThreads(pContext);
-        RDTSC_END(APIDrawWakeAllThreads, 1);
+        RDTSC_END(pContext->pBucketMgr, APIDrawWakeAllThreads, 1);
     }
 
     // Set current draw context to NULL so that next state call forces a new draw context to be
@@ -301,7 +308,7 @@ INLINE void QueueDispatch(SWR_CONTEXT* pContext)
 
 DRAW_CONTEXT* GetDrawContext(SWR_CONTEXT* pContext, bool isSplitDraw = false)
 {
-    RDTSC_BEGIN(APIGetDrawContext, 0);
+    RDTSC_BEGIN(pContext->pBucketMgr, APIGetDrawContext, 0);
     // If current draw context is null then need to obtain a new draw context to use from ring.
     if (pContext->pCurDrawContext == nullptr)
     {
@@ -390,7 +397,7 @@ DRAW_CONTEXT* GetDrawContext(SWR_CONTEXT* pContext, bool isSplitDraw = false)
         SWR_ASSERT(isSplitDraw == false, "Split draw should only be used when obtaining a new DC");
     }
 
-    RDTSC_END(APIGetDrawContext, 0);
+    RDTSC_END(pContext->pBucketMgr, APIGetDrawContext, 0);
     return pContext->pCurDrawContext;
 }
 
@@ -441,6 +448,10 @@ void SwrDestroyContext(HANDLE hContext)
         ArchRast::DestroyThreadContext(pContext->pArContext[i]);
 #endif
     }
+
+#if defined(KNOB_ENABLE_RDTSC)
+    delete pContext->pBucketMgr;
+#endif
 
     delete[] pContext->ppScratch;
     AlignedFree(pContext->pStats);
@@ -499,7 +510,7 @@ void SWR_API SwrSync(HANDLE            hContext,
     SWR_CONTEXT*  pContext = GetContext(hContext);
     DRAW_CONTEXT* pDC      = GetDrawContext(pContext);
 
-    RDTSC_BEGIN(APISync, 0);
+    RDTSC_BEGIN(pContext->pBucketMgr, APISync, 0);
 
     pDC->FeWork.type    = SYNC;
     pDC->FeWork.pfnWork = ProcessSync;
@@ -515,7 +526,7 @@ void SWR_API SwrSync(HANDLE            hContext,
     // enqueue
     QueueDraw(pContext);
 
-    RDTSC_END(APISync, 1);
+    RDTSC_END(pContext->pBucketMgr, APISync, 1);
 }
 
 void SwrStallBE(HANDLE hContext)
@@ -530,28 +541,28 @@ void SwrWaitForIdle(HANDLE hContext)
 {
     SWR_CONTEXT* pContext = GetContext(hContext);
 
-    RDTSC_BEGIN(APIWaitForIdle, 0);
+    RDTSC_BEGIN(pContext->pBucketMgr, APIWaitForIdle, 0);
 
     while (!pContext->dcRing.IsEmpty())
     {
         _mm_pause();
     }
 
-    RDTSC_END(APIWaitForIdle, 1);
+    RDTSC_END(pContext->pBucketMgr, APIWaitForIdle, 1);
 }
 
 void SwrWaitForIdleFE(HANDLE hContext)
 {
     SWR_CONTEXT* pContext = GetContext(hContext);
 
-    RDTSC_BEGIN(APIWaitForIdle, 0);
+    RDTSC_BEGIN(pContext->pBucketMgr, APIWaitForIdle, 0);
 
     while (pContext->drawsOutstandingFE > 0)
     {
         _mm_pause();
     }
 
-    RDTSC_END(APIWaitForIdle, 1);
+    RDTSC_END(pContext->pBucketMgr, APIWaitForIdle, 1);
 }
 
 void SwrSetVertexBuffers(HANDLE                         hContext,
@@ -905,8 +916,8 @@ void SetupPipeline(DRAW_CONTEXT* pDC)
     };
 
 
-    // Disable clipper if viewport transform is disabled
-    if (pState->state.frontendState.vpTransformDisable)
+    // Disable clipper if viewport transform is disabled or if clipper is disabled
+    if (pState->state.frontendState.vpTransformDisable || !pState->state.rastState.clipEnable)
     {
         pState->pfnProcessPrims = pfnBinner;
 #if USE_SIMD16_FRONTEND
@@ -1173,7 +1184,7 @@ void DrawInstanced(HANDLE             hContext,
     SWR_CONTEXT*  pContext = GetContext(hContext);
     DRAW_CONTEXT* pDC      = GetDrawContext(pContext);
 
-    RDTSC_BEGIN(APIDraw, pDC->drawId);
+    RDTSC_BEGIN(pContext->pBucketMgr, APIDraw, pDC->drawId);
 
     uint32_t maxVertsPerDraw = MaxVertsPerDraw(pDC, numVertices, topology);
     uint32_t primsPerDraw    = GetNumPrims(topology, maxVertsPerDraw);
@@ -1244,7 +1255,7 @@ void DrawInstanced(HANDLE             hContext,
     pDC                                   = GetDrawContext(pContext);
     pDC->pState->state.rastState.cullMode = oldCullMode;
 
-    RDTSC_END(APIDraw, numVertices * numInstances);
+    RDTSC_END(pContext->pBucketMgr, APIDraw, numVertices * numInstances);
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -1308,7 +1319,7 @@ void DrawIndexedInstance(HANDLE             hContext,
     DRAW_CONTEXT* pDC      = GetDrawContext(pContext);
     API_STATE*    pState   = &pDC->pState->state;
 
-    RDTSC_BEGIN(APIDrawIndexed, pDC->drawId);
+    RDTSC_BEGIN(pContext->pBucketMgr, APIDrawIndexed, pDC->drawId);
 
     uint32_t maxIndicesPerDraw = MaxVertsPerDraw(pDC, numIndices, topology);
     uint32_t primsPerDraw      = GetNumPrims(topology, maxIndicesPerDraw);
@@ -1404,7 +1415,7 @@ void DrawIndexedInstance(HANDLE             hContext,
     pDC                                   = GetDrawContext(pContext);
     pDC->pState->state.rastState.cullMode = oldCullMode;
 
-    RDTSC_END(APIDrawIndexed, numIndices * numInstances);
+    RDTSC_END(pContext->pBucketMgr, APIDrawIndexed, numIndices * numInstances);
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -1530,7 +1541,7 @@ void SwrDispatch(HANDLE   hContext,
     SWR_CONTEXT*  pContext = GetContext(hContext);
     DRAW_CONTEXT* pDC      = GetDrawContext(pContext);
 
-    RDTSC_BEGIN(APIDispatch, pDC->drawId);
+    RDTSC_BEGIN(pContext->pBucketMgr, APIDispatch, pDC->drawId);
     AR_API_EVENT(
         DispatchEvent(pDC->drawId, threadGroupCountX, threadGroupCountY, threadGroupCountZ));
     pDC->isCompute = true; // This is a compute context.
@@ -1547,7 +1558,9 @@ void SwrDispatch(HANDLE   hContext,
     pDC->pDispatch->initialize(totalThreadGroups, pTaskData, &ProcessComputeBE);
 
     QueueDispatch(pContext);
-    RDTSC_END(APIDispatch, threadGroupCountX * threadGroupCountY * threadGroupCountZ);
+    RDTSC_END(pContext->pBucketMgr,
+              APIDispatch,
+              threadGroupCountX * threadGroupCountY * threadGroupCountZ);
 }
 
 // Deswizzles, converts and stores current contents of the hot tiles to surface
@@ -1565,7 +1578,7 @@ void SWR_API SwrStoreTiles(HANDLE          hContext,
     SWR_CONTEXT*  pContext = GetContext(hContext);
     DRAW_CONTEXT* pDC      = GetDrawContext(pContext);
 
-    RDTSC_BEGIN(APIStoreTiles, pDC->drawId);
+    RDTSC_BEGIN(pContext->pBucketMgr, APIStoreTiles, pDC->drawId);
 
     pDC->FeWork.type                               = STORETILES;
     pDC->FeWork.pfnWork                            = ProcessStoreTiles;
@@ -1579,7 +1592,7 @@ void SWR_API SwrStoreTiles(HANDLE          hContext,
 
     AR_API_EVENT(SwrStoreTilesEvent(pDC->drawId));
 
-    RDTSC_END(APIStoreTiles, 1);
+    RDTSC_END(pContext->pBucketMgr, APIStoreTiles, 1);
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -1607,7 +1620,7 @@ void SWR_API SwrClearRenderTarget(HANDLE          hContext,
     SWR_CONTEXT*  pContext = GetContext(hContext);
     DRAW_CONTEXT* pDC      = GetDrawContext(pContext);
 
-    RDTSC_BEGIN(APIClearRenderTarget, pDC->drawId);
+    RDTSC_BEGIN(pContext->pBucketMgr, APIClearRenderTarget, pDC->drawId);
 
     pDC->FeWork.type            = CLEAR;
     pDC->FeWork.pfnWork         = ProcessClear;
@@ -1625,7 +1638,7 @@ void SWR_API SwrClearRenderTarget(HANDLE          hContext,
     // enqueue draw
     QueueDraw(pContext);
 
-    RDTSC_END(APIClearRenderTarget, 1);
+    RDTSC_END(pContext->pBucketMgr, APIClearRenderTarget, 1);
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -1698,7 +1711,7 @@ void SWR_API SwrEndFrame(HANDLE hContext)
     DRAW_CONTEXT* pDC      = GetDrawContext(pContext);
     (void)pDC; // var used
 
-    RDTSC_ENDFRAME();
+    RDTSC_ENDFRAME(pContext->pBucketMgr);
     AR_API_EVENT(FrameEndEvent(pContext->frameCount, pDC->drawId));
 
     pContext->frameCount++;
@@ -1769,7 +1782,4 @@ void SwrGetInterface(SWR_INTERFACE& out_funcs)
     out_funcs.pfnSwrEnableStatsBE          = SwrEnableStatsBE;
     out_funcs.pfnSwrEndFrame               = SwrEndFrame;
     out_funcs.pfnSwrInit                   = SwrInit;
-    out_funcs.pfnSwrLoadHotTile = SwrLoadHotTile;
-    out_funcs.pfnSwrStoreHotTileToSurface = SwrStoreHotTileToSurface;
-    out_funcs.pfnSwrStoreHotTileClear = SwrStoreHotTileClear;
 }

@@ -42,14 +42,6 @@ static bool insert_to_load_tex(ppir_block *block, ppir_node *load_coords, ppir_n
    ppir_dest *dest = ppir_node_get_dest(ldtex);
    ppir_node *move = NULL;
 
-   ppir_load_node *load = ppir_node_to_load(load_coords);
-   load->dest.type = ppir_target_pipeline;
-   load->dest.pipeline = ppir_pipeline_reg_discard;
-
-   ppir_load_texture_node *load_texture = ppir_node_to_load_texture(ldtex);
-   load_texture->src_coords.type = ppir_target_pipeline;
-   load_texture->src_coords.pipeline = ppir_pipeline_reg_discard;
-
    /* Insert load_coords to ldtex instruction */
    if (!ppir_instr_insert_node(ldtex->instr, load_coords))
       return false;
@@ -93,7 +85,8 @@ static bool insert_to_each_succ_instr(ppir_block *block, ppir_node *node)
 
    ppir_node_foreach_succ_safe(node, dep) {
       ppir_node *succ = dep->succ;
-      assert(succ->type == ppir_node_type_alu);
+      assert(succ->type == ppir_node_type_alu ||
+             succ->type == ppir_node_type_branch);
 
       if (!ppir_instr_insert_node(succ->instr, node)) {
          /* create a move node to insert for failed node */
@@ -122,7 +115,7 @@ static bool insert_to_each_succ_instr(ppir_block *block, ppir_node *node)
       if (!create_new_instr(block, move))
          return false;
 
-      MAYBE_UNUSED bool insert_result =
+      ASSERTED bool insert_result =
          ppir_instr_insert_node(move->instr, node);
       assert(insert_result);
 
@@ -239,7 +232,9 @@ static bool ppir_do_node_to_instr(ppir_block *block, ppir_node *node)
          load->dest.pipeline = ppir_pipeline_reg_uniform;
       }
       else if (node->op == ppir_op_load_varying ||
-               node->op == ppir_op_load_fragcoord) {
+               node->op == ppir_op_load_fragcoord ||
+               node->op == ppir_op_load_pointcoord ||
+               node->op == ppir_op_load_frontface) {
          /* delay the load varying dup to scheduler */
          if (!create_new_instr(block, node))
             return false;
@@ -323,6 +318,15 @@ static bool ppir_do_node_to_instr(ppir_block *block, ppir_node *node)
       node = move;
       break;
    }
+   case ppir_node_type_discard:
+      if (!create_new_instr(block, node))
+         return false;
+      node->instr->is_end = true;
+      break;
+   case ppir_node_type_branch:
+      if (!create_new_instr(block, node))
+         return false;
+      break;
    default:
       return false;
    }

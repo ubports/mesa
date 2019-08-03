@@ -575,11 +575,14 @@ typedef enum
     */
    /*@{*/
    SYSTEM_VALUE_FRAG_COORD,
+   SYSTEM_VALUE_POINT_COORD,
    SYSTEM_VALUE_FRONT_FACE,
    SYSTEM_VALUE_SAMPLE_ID,
    SYSTEM_VALUE_SAMPLE_POS,
    SYSTEM_VALUE_SAMPLE_MASK_IN,
    SYSTEM_VALUE_HELPER_INVOCATION,
+   SYSTEM_VALUE_COLOR0,
+   SYSTEM_VALUE_COLOR1,
    /*@}*/
 
    /**
@@ -725,6 +728,14 @@ enum gl_access_qualifier
 
    /** The access may use a non-uniform buffer or image index */
    ACCESS_NON_UNIFORM   = (1 << 5),
+
+   /* This has the same semantics as NIR_INTRINSIC_CAN_REORDER, only to be
+    * used with loads. In other words, it means that the load can be
+    * arbitrarily reordered, or combined with other loads to the same address.
+    * It is implied by ACCESS_NON_WRITEABLE together with ACCESS_RESTRICT, and
+    * a lack of ACCESS_COHERENT and ACCESS_VOLATILE.
+    */
+   ACCESS_CAN_REORDER = (1 << 6),
 };
 
 /**
@@ -751,6 +762,27 @@ enum gl_advanced_blend_mode
    BLEND_HSL_LUMINOSITY = 0x4000,
 
    BLEND_ALL            = 0x7fff,
+};
+
+enum blend_func
+{
+   BLEND_FUNC_ADD,
+   BLEND_FUNC_SUBTRACT,
+   BLEND_FUNC_REVERSE_SUBTRACT,
+   BLEND_FUNC_MIN,
+   BLEND_FUNC_MAX,
+};
+
+enum blend_factor
+{
+   BLEND_FACTOR_ZERO,
+   BLEND_FACTOR_SRC_COLOR,
+   BLEND_FACTOR_DST_COLOR,
+   BLEND_FACTOR_SRC_ALPHA,
+   BLEND_FACTOR_DST_ALPHA,
+   BLEND_FACTOR_CONSTANT_COLOR,
+   BLEND_FACTOR_CONSTANT_ALPHA,
+   BLEND_FACTOR_SRC_ALPHA_SATURATE,
 };
 
 enum gl_tess_spacing

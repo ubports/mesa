@@ -289,7 +289,7 @@ get_alignment_for_imm(const struct imm *imm)
 }
 
 static bool
-needs_negate(const struct fs_reg *reg, const struct imm *imm)
+needs_negate(const fs_reg *reg, const struct imm *imm)
 {
    switch (reg->type) {
    case BRW_REGISTER_TYPE_DF:
@@ -442,7 +442,7 @@ fs_visitor::opt_combine_constants()
 
       reg.offset += imm->size * width;
    }
-   promoted_constants = table.len;
+   shader_stats.promoted_constants = table.len;
 
    /* Rewrite the immediate sources to refer to the new GRFs. */
    for (int i = 0; i < table.len; i++) {

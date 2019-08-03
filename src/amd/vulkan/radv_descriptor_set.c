@@ -477,8 +477,17 @@ radv_descriptor_set_create(struct radv_device *device,
 			   struct radv_descriptor_set **out_set)
 {
 	struct radv_descriptor_set *set;
+	uint32_t buffer_count = layout->buffer_count;
+	if (variable_count) {
+		unsigned stride = 1;
+		if (layout->binding[layout->binding_count - 1].type == VK_DESCRIPTOR_TYPE_SAMPLER ||
+		    layout->binding[layout->binding_count - 1].type == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK_EXT)
+			stride = 0;
+		buffer_count = layout->binding[layout->binding_count - 1].buffer_offset +
+		               *variable_count * stride;
+	}
 	unsigned range_offset = sizeof(struct radv_descriptor_set) +
-		sizeof(struct radeon_winsys_bo *) * layout->buffer_count;
+		sizeof(struct radeon_winsys_bo *) * buffer_count;
 	unsigned mem_size = range_offset +
 		sizeof(struct radv_descriptor_range) * layout->dynamic_offset_count;
 
@@ -503,7 +512,17 @@ radv_descriptor_set_create(struct radv_device *device,
 	}
 
 	set->layout = layout;
-	uint32_t layout_size = align_u32(layout->size, 32);
+	uint32_t layout_size = layout->size;
+	if (variable_count) {
+		assert(layout->has_variable_descriptors);
+		uint32_t stride = layout->binding[layout->binding_count - 1].size;
+		if (layout->binding[layout->binding_count - 1].type == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK_EXT)
+			stride = 1;
+
+		layout_size = layout->binding[layout->binding_count - 1].offset +
+		              *variable_count * stride;
+	}
+	layout_size = align_u32(layout_size, 32);
 	if (layout_size) {
 		set->size = layout_size;
 
@@ -777,9 +796,13 @@ VkResult radv_AllocateDescriptorSets(
 		pDescriptorSets[i] = radv_descriptor_set_to_handle(set);
 	}
 
-	if (result != VK_SUCCESS)
+	if (result != VK_SUCCESS) {
 		radv_FreeDescriptorSets(_device, pAllocateInfo->descriptorPool,
 					i, pDescriptorSets);
+		for (i = 0; i < pAllocateInfo->descriptorSetCount; i++) {
+			pDescriptorSets[i] = VK_NULL_HANDLE;
+		}
+	}
 	return result;
 }
 
@@ -837,9 +860,16 @@ static void write_buffer_descriptor(struct radv_device *device,
 	dst[3] = S_008F0C_DST_SEL_X(V_008F0C_SQ_SEL_X) |
 		S_008F0C_DST_SEL_Y(V_008F0C_SQ_SEL_Y) |
 		S_008F0C_DST_SEL_Z(V_008F0C_SQ_SEL_Z) |
-		S_008F0C_DST_SEL_W(V_008F0C_SQ_SEL_W) |
-		S_008F0C_NUM_FORMAT(V_008F0C_BUF_NUM_FORMAT_FLOAT) |
-		S_008F0C_DATA_FORMAT(V_008F0C_BUF_DATA_FORMAT_32);
+		S_008F0C_DST_SEL_W(V_008F0C_SQ_SEL_W);
+
+	if (device->physical_device->rad_info.chip_class >= GFX10) {
+		dst[3] |= S_008F0C_FORMAT(V_008F0C_IMG_FORMAT_32_FLOAT) |
+			  S_008F0C_OOB_SELECT(3) |
+			  S_008F0C_RESOURCE_LEVEL(1);
+	} else {
+		dst[3] |= S_008F0C_NUM_FORMAT(V_008F0C_BUF_NUM_FORMAT_FLOAT) |
+			  S_008F0C_DATA_FORMAT(V_008F0C_BUF_DATA_FORMAT_32);
+	}
 
 	if (cmd_buffer)
 		radv_cs_add_buffer(device->ws, cmd_buffer->cs, buffer->bo);

@@ -76,6 +76,8 @@ genX(cmd_buffer_emit_state_base_address)(struct anv_cmd_buffer *cmd_buffer)
       sba.GeneralStateMOCS = GENX(MOCS);
       sba.GeneralStateBaseAddressModifyEnable = true;
 
+      sba.StatelessDataPortAccessMOCS = GENX(MOCS);
+
       sba.SurfaceStateBaseAddress =
          anv_cmd_buffer_surface_base_address(cmd_buffer);
       sba.SurfaceStateMOCS = GENX(MOCS);
@@ -244,7 +246,7 @@ color_attachment_compute_aux_usage(struct anv_device * device,
                                    union isl_color_value *fast_clear_color)
 {
    struct anv_attachment_state *att_state = &cmd_state->attachments[att];
-   struct anv_image_view *iview = cmd_state->framebuffer->attachments[att];
+   struct anv_image_view *iview = cmd_state->attachments[att].image_view;
 
    assert(iview->n_planes == 1);
 
@@ -386,7 +388,7 @@ depth_stencil_attachment_compute_aux_usage(struct anv_device *device,
    struct anv_render_pass_attachment *pass_att =
       &cmd_state->pass->attachments[att];
    struct anv_attachment_state *att_state = &cmd_state->attachments[att];
-   struct anv_image_view *iview = cmd_state->framebuffer->attachments[att];
+   struct anv_image_view *iview = cmd_state->attachments[att].image_view;
 
    /* These will be initialized after the first subpass transition. */
    att_state->aux_usage = ISL_AUX_USAGE_NONE;
@@ -489,6 +491,55 @@ transition_depth_buffer(struct anv_cmd_buffer *cmd_buffer,
    if (hiz_op != ISL_AUX_OP_NONE)
       anv_image_hiz_op(cmd_buffer, image, VK_IMAGE_ASPECT_DEPTH_BIT,
                        0, 0, 1, hiz_op);
+}
+
+static inline bool
+vk_image_layout_stencil_write_optimal(VkImageLayout layout)
+{
+   return layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL ||
+          layout == VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL;
+}
+
+/* Transitions a HiZ-enabled depth buffer from one layout to another. Unless
+ * the initial layout is undefined, the HiZ buffer and depth buffer will
+ * represent the same data at the end of this operation.
+ */
+static void
+transition_stencil_buffer(struct anv_cmd_buffer *cmd_buffer,
+                          const struct anv_image *image,
+                          uint32_t base_level, uint32_t level_count,
+                          uint32_t base_layer, uint32_t layer_count,
+                          VkImageLayout initial_layout,
+                          VkImageLayout final_layout)
+{
+#if GEN_GEN == 7
+   uint32_t plane = anv_image_aspect_to_plane(image->aspects,
+                                              VK_IMAGE_ASPECT_STENCIL_BIT);
+
+   /* On gen7, we have to store a texturable version of the stencil buffer in
+    * a shadow whenever VK_IMAGE_USAGE_SAMPLED_BIT is set and copy back and
+    * forth at strategic points.  Stencil writes are only allowed in three
+    * layouts:
+    *
+    *  - VK_IMAGE_LAYOUT_GENERAL
+    *  - VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+    *  - VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+    *  - VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL
+    *
+    * For general, we have no nice opportunity to transition so we do the copy
+    * to the shadow unconditionally at the end of the subpass.  For transfer
+    * destinations, we can update it as part of the transfer op.  For the
+    * other two, we delay the copy until a transition into some other layout.
+    */
+   if (image->planes[plane].shadow_surface.isl.size_B > 0 &&
+       vk_image_layout_stencil_write_optimal(initial_layout) &&
+       !vk_image_layout_stencil_write_optimal(final_layout)) {
+      anv_image_copy_to_shadow(cmd_buffer, image,
+                               VK_IMAGE_ASPECT_STENCIL_BIT,
+                               base_level, level_count,
+                               base_layer, layer_count);
+   }
+#endif /* GEN_GEN == 7 */
 }
 
 #define MI_PREDICATE_SRC0    0x2400
@@ -944,6 +995,7 @@ transition_color_buffer(struct anv_cmd_buffer *cmd_buffer,
       assert(isl_format_is_compressed(image->planes[plane].surface.isl.format));
       assert(plane == 0);
       anv_image_copy_to_shadow(cmd_buffer, image,
+                               VK_IMAGE_ASPECT_COLOR_BIT,
                                base_level, level_count,
                                base_layer, layer_count);
    }
@@ -1142,6 +1194,7 @@ genX(cmd_buffer_setup_attachments)(struct anv_cmd_buffer *cmd_buffer,
 {
    const struct isl_device *isl_dev = &cmd_buffer->device->isl_dev;
    struct anv_cmd_state *state = &cmd_buffer->state;
+   struct anv_framebuffer *framebuffer = cmd_buffer->state.framebuffer;
 
    vk_free(&cmd_buffer->pool->alloc, state->attachments);
 
@@ -1181,6 +1234,12 @@ genX(cmd_buffer_setup_attachments)(struct anv_cmd_buffer *cmd_buffer,
    next_state.offset += ss_stride;
    next_state.map += ss_stride;
 
+   const VkRenderPassAttachmentBeginInfoKHR *begin_attachment =
+      vk_find_struct_const(begin, RENDER_PASS_ATTACHMENT_BEGIN_INFO_KHR);
+
+   if (begin && !begin_attachment)
+      assert(pass->attachment_count == framebuffer->attachment_count);
+
    for (uint32_t i = 0; i < pass->attachment_count; ++i) {
       if (vk_format_is_color(pass->attachments[i].format)) {
          state->attachments[i].color.state = next_state;
@@ -1193,14 +1252,19 @@ genX(cmd_buffer_setup_attachments)(struct anv_cmd_buffer *cmd_buffer,
          next_state.offset += ss_stride;
          next_state.map += ss_stride;
       }
+
+      if (begin_attachment && begin_attachment->attachmentCount != 0) {
+         assert(begin_attachment->attachmentCount == pass->attachment_count);
+         ANV_FROM_HANDLE(anv_image_view, iview, begin_attachment->pAttachments[i]);
+         cmd_buffer->state.attachments[i].image_view = iview;
+      } else if (framebuffer && i < framebuffer->attachment_count) {
+         cmd_buffer->state.attachments[i].image_view = framebuffer->attachments[i];
+      }
    }
    assert(next_state.offset == state->render_pass_states.offset +
                                state->render_pass_states.alloc_size);
 
    if (begin) {
-      ANV_FROM_HANDLE(anv_framebuffer, framebuffer, begin->framebuffer);
-      assert(pass->attachment_count == framebuffer->attachment_count);
-
       isl_null_fill_state(isl_dev, state->null_surface_state.map,
                           isl_extent3d(framebuffer->width,
                                        framebuffer->height,
@@ -1243,7 +1307,7 @@ genX(cmd_buffer_setup_attachments)(struct anv_cmd_buffer *cmd_buffer,
          if (clear_aspects)
             state->attachments[i].clear_value = begin->pClearValues[i];
 
-         struct anv_image_view *iview = framebuffer->attachments[i];
+         struct anv_image_view *iview = cmd_buffer->state.attachments[i].image_view;
          anv_assert(iview->vk_format == att->format);
 
          const uint32_t num_layers = iview->planes[0].isl.array_len;
@@ -1667,7 +1731,7 @@ genX(cmd_buffer_config_l3)(struct anv_cmd_buffer *cmd_buffer,
    assert(!urb_low_bw || cfg->n[GEN_L3P_URB] == cfg->n[GEN_L3P_SLM]);
 
    /* Minimum number of ways that can be allocated to the URB. */
-   MAYBE_UNUSED const unsigned n0_urb = devinfo->is_baytrail ? 32 : 0;
+   const unsigned n0_urb = devinfo->is_baytrail ? 32 : 0;
    assert(cfg->n[GEN_L3P_URB] >= n0_urb);
 
    uint32_t l3sqcr1, l3cr2, l3cr3;
@@ -1870,24 +1934,34 @@ void genX(CmdPipelineBarrier)(
       const VkImageSubresourceRange *range =
          &pImageMemoryBarriers[i].subresourceRange;
 
+      uint32_t base_layer, layer_count;
+      if (image->type == VK_IMAGE_TYPE_3D) {
+         base_layer = 0;
+         layer_count = anv_minify(image->extent.depth, range->baseMipLevel);
+      } else {
+         base_layer = range->baseArrayLayer;
+         layer_count = anv_get_layerCount(image, range);
+      }
+
       if (range->aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT) {
          transition_depth_buffer(cmd_buffer, image,
                                  pImageMemoryBarriers[i].oldLayout,
                                  pImageMemoryBarriers[i].newLayout);
-      } else if (range->aspectMask & VK_IMAGE_ASPECT_ANY_COLOR_BIT_ANV) {
+      }
+
+      if (range->aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT) {
+         transition_stencil_buffer(cmd_buffer, image,
+                                   range->baseMipLevel,
+                                   anv_get_levelCount(image, range),
+                                   base_layer, layer_count,
+                                   pImageMemoryBarriers[i].oldLayout,
+                                   pImageMemoryBarriers[i].newLayout);
+      }
+
+      if (range->aspectMask & VK_IMAGE_ASPECT_ANY_COLOR_BIT_ANV) {
          VkImageAspectFlags color_aspects =
             anv_image_expand_aspects(image, range->aspectMask);
          uint32_t aspect_bit;
-
-         uint32_t base_layer, layer_count;
-         if (image->type == VK_IMAGE_TYPE_3D) {
-            base_layer = 0;
-            layer_count = anv_minify(image->extent.depth, range->baseMipLevel);
-         } else {
-            base_layer = range->baseArrayLayer;
-            layer_count = anv_get_layerCount(image, range);
-         }
-
          anv_foreach_image_aspect_bit(aspect_bit, image, color_aspects) {
             transition_color_buffer(cmd_buffer, image, 1UL << aspect_bit,
                                     range->baseMipLevel,
@@ -3466,7 +3540,7 @@ void
 genX(cmd_buffer_flush_compute_state)(struct anv_cmd_buffer *cmd_buffer)
 {
    struct anv_pipeline *pipeline = cmd_buffer->state.compute.base.pipeline;
-   MAYBE_UNUSED VkResult result;
+   VkResult result;
 
    assert(pipeline->active_stages == VK_SHADER_STAGE_COMPUTE_BIT);
 
@@ -3546,16 +3620,8 @@ anv_cmd_buffer_push_base_group_id(struct anv_cmd_buffer *cmd_buffer,
    if (anv_batch_has_error(&cmd_buffer->batch))
       return;
 
-   VkResult result =
-      anv_cmd_buffer_ensure_push_constant_field(cmd_buffer, MESA_SHADER_COMPUTE,
-                                                base_work_group_id);
-   if (result != VK_SUCCESS) {
-      cmd_buffer->batch.status = result;
-      return;
-   }
-
    struct anv_push_constants *push =
-      cmd_buffer->state.push_constants[MESA_SHADER_COMPUTE];
+      &cmd_buffer->state.push_constants[MESA_SHADER_COMPUTE];
    if (push->base_work_group_id[0] != baseGroupX ||
        push->base_work_group_id[1] != baseGroupY ||
        push->base_work_group_id[2] != baseGroupZ) {
@@ -4018,7 +4084,7 @@ cmd_buffer_begin_subpass(struct anv_cmd_buffer *cmd_buffer,
       assert(a < cmd_state->pass->attachment_count);
       struct anv_attachment_state *att_state = &cmd_state->attachments[a];
 
-      struct anv_image_view *iview = fb->attachments[a];
+      struct anv_image_view *iview = cmd_state->attachments[a].image_view;
       const struct anv_image *image = iview->image;
 
       /* A resolve is necessary before use as an input attachment if the clear
@@ -4041,29 +4107,37 @@ cmd_buffer_begin_subpass(struct anv_cmd_buffer *cmd_buffer,
          target_layout = subpass->attachments[i].layout;
       }
 
+      uint32_t base_layer, layer_count;
+      if (image->type == VK_IMAGE_TYPE_3D) {
+         base_layer = 0;
+         layer_count = anv_minify(iview->image->extent.depth,
+                                  iview->planes[0].isl.base_level);
+      } else {
+         base_layer = iview->planes[0].isl.base_array_layer;
+         layer_count = fb->layers;
+      }
+
       if (image->aspects & VK_IMAGE_ASPECT_ANY_COLOR_BIT_ANV) {
          assert(image->aspects == VK_IMAGE_ASPECT_COLOR_BIT);
-
-         uint32_t base_layer, layer_count;
-         if (image->type == VK_IMAGE_TYPE_3D) {
-            base_layer = 0;
-            layer_count = anv_minify(iview->image->extent.depth,
-                                     iview->planes[0].isl.base_level);
-         } else {
-            base_layer = iview->planes[0].isl.base_array_layer;
-            layer_count = fb->layers;
-         }
-
          transition_color_buffer(cmd_buffer, image, VK_IMAGE_ASPECT_COLOR_BIT,
                                  iview->planes[0].isl.base_level, 1,
                                  base_layer, layer_count,
                                  att_state->current_layout, target_layout);
-      } else if (image->aspects & VK_IMAGE_ASPECT_DEPTH_BIT) {
+      }
+
+      if (image->aspects & VK_IMAGE_ASPECT_DEPTH_BIT) {
          transition_depth_buffer(cmd_buffer, image,
                                  att_state->current_layout, target_layout);
          att_state->aux_usage =
             anv_layout_to_aux_usage(&cmd_buffer->device->info, image,
                                     VK_IMAGE_ASPECT_DEPTH_BIT, target_layout);
+      }
+
+      if (image->aspects & VK_IMAGE_ASPECT_STENCIL_BIT) {
+         transition_stencil_buffer(cmd_buffer, image,
+                                   iview->planes[0].isl.base_level, 1,
+                                   base_layer, layer_count,
+                                   att_state->current_layout, target_layout);
       }
       att_state->current_layout = target_layout;
 
@@ -4347,8 +4421,8 @@ cmd_buffer_end_subpass(struct anv_cmd_buffer *cmd_buffer)
             cmd_buffer->state.attachments[dst_att].pending_clear_aspects = 0;
          }
 
-         struct anv_image_view *src_iview = fb->attachments[src_att];
-         struct anv_image_view *dst_iview = fb->attachments[dst_att];
+         struct anv_image_view *src_iview = cmd_state->attachments[src_att].image_view;
+         struct anv_image_view *dst_iview = cmd_state->attachments[dst_att].image_view;
 
          const VkRect2D render_area = cmd_buffer->state.render_area;
 
@@ -4402,8 +4476,8 @@ cmd_buffer_end_subpass(struct anv_cmd_buffer *cmd_buffer)
          cmd_buffer->state.attachments[dst_att].pending_clear_aspects = 0;
       }
 
-      struct anv_image_view *src_iview = fb->attachments[src_att];
-      struct anv_image_view *dst_iview = fb->attachments[dst_att];
+      struct anv_image_view *src_iview = cmd_state->attachments[src_att].image_view;
+      struct anv_image_view *dst_iview = cmd_state->attachments[dst_att].image_view;
 
       const VkRect2D render_area = cmd_buffer->state.render_area;
 
@@ -4495,6 +4569,47 @@ cmd_buffer_end_subpass(struct anv_cmd_buffer *cmd_buffer)
       }
    }
 
+#if GEN_GEN == 7
+   /* On gen7, we have to store a texturable version of the stencil buffer in
+    * a shadow whenever VK_IMAGE_USAGE_SAMPLED_BIT is set and copy back and
+    * forth at strategic points.  Stencil writes are only allowed in three
+    * layouts:
+    *
+    *  - VK_IMAGE_LAYOUT_GENERAL
+    *  - VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+    *  - VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+    *  - VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL
+    *
+    * For general, we have no nice opportunity to transition so we do the copy
+    * to the shadow unconditionally at the end of the subpass.  For transfer
+    * destinations, we can update it as part of the transfer op.  For the
+    * other two, we delay the copy until a transition into some other layout.
+    */
+   if (subpass->depth_stencil_attachment) {
+      uint32_t a = subpass->depth_stencil_attachment->attachment;
+      assert(a != VK_ATTACHMENT_UNUSED);
+
+      struct anv_attachment_state *att_state = &cmd_state->attachments[a];
+      struct anv_image_view *iview = cmd_state->attachments[a].image_view;;
+      const struct anv_image *image = iview->image;
+
+      if (image->aspects & VK_IMAGE_ASPECT_STENCIL_BIT) {
+         uint32_t plane = anv_image_aspect_to_plane(image->aspects,
+                                                    VK_IMAGE_ASPECT_STENCIL_BIT);
+
+         if (image->planes[plane].shadow_surface.isl.size_B > 0 &&
+             att_state->current_layout == VK_IMAGE_LAYOUT_GENERAL) {
+            assert(image->aspects & VK_IMAGE_ASPECT_STENCIL_BIT);
+            anv_image_copy_to_shadow(cmd_buffer, image,
+                                     VK_IMAGE_ASPECT_STENCIL_BIT,
+                                     iview->planes[plane].isl.base_level, 1,
+                                     iview->planes[plane].isl.base_array_layer,
+                                     fb->layers);
+         }
+      }
+   }
+#endif /* GEN_GEN == 7 */
+
    for (uint32_t i = 0; i < subpass->attachment_count; ++i) {
       const uint32_t a = subpass->attachments[i].attachment;
       if (a == VK_ATTACHMENT_UNUSED)
@@ -4505,7 +4620,7 @@ cmd_buffer_end_subpass(struct anv_cmd_buffer *cmd_buffer)
 
       assert(a < cmd_state->pass->attachment_count);
       struct anv_attachment_state *att_state = &cmd_state->attachments[a];
-      struct anv_image_view *iview = fb->attachments[a];
+      struct anv_image_view *iview = cmd_state->attachments[a].image_view;
       const struct anv_image *image = iview->image;
 
       if ((image->aspects & VK_IMAGE_ASPECT_ANY_COLOR_BIT_ANV) &&
@@ -4521,7 +4636,7 @@ cmd_buffer_end_subpass(struct anv_cmd_buffer *cmd_buffer)
           * SRGB view & a UNORM image).
           */
          if (fast_clear_type != ANV_FAST_CLEAR_NONE) {
-            anv_perf_warn(cmd_buffer->device->instance, fb,
+            anv_perf_warn(cmd_buffer->device->instance, iview,
                           "Doing a partial resolve to get rid of clear color at the "
                           "end of a renderpass due to an image/view format mismatch");
 
@@ -4561,26 +4676,34 @@ cmd_buffer_end_subpass(struct anv_cmd_buffer *cmd_buffer)
       VkImageLayout target_layout =
          cmd_state->pass->attachments[a].final_layout;
 
+      uint32_t base_layer, layer_count;
+      if (image->type == VK_IMAGE_TYPE_3D) {
+         base_layer = 0;
+         layer_count = anv_minify(iview->image->extent.depth,
+                                  iview->planes[0].isl.base_level);
+      } else {
+         base_layer = iview->planes[0].isl.base_array_layer;
+         layer_count = fb->layers;
+      }
+
       if (image->aspects & VK_IMAGE_ASPECT_ANY_COLOR_BIT_ANV) {
          assert(image->aspects == VK_IMAGE_ASPECT_COLOR_BIT);
-
-         uint32_t base_layer, layer_count;
-         if (image->type == VK_IMAGE_TYPE_3D) {
-            base_layer = 0;
-            layer_count = anv_minify(iview->image->extent.depth,
-                                     iview->planes[0].isl.base_level);
-         } else {
-            base_layer = iview->planes[0].isl.base_array_layer;
-            layer_count = fb->layers;
-         }
-
          transition_color_buffer(cmd_buffer, image, VK_IMAGE_ASPECT_COLOR_BIT,
                                  iview->planes[0].isl.base_level, 1,
                                  base_layer, layer_count,
                                  att_state->current_layout, target_layout);
-      } else if (image->aspects & VK_IMAGE_ASPECT_DEPTH_BIT) {
+      }
+
+      if (image->aspects & VK_IMAGE_ASPECT_DEPTH_BIT) {
          transition_depth_buffer(cmd_buffer, image,
                                  att_state->current_layout, target_layout);
+      }
+
+      if (image->aspects & VK_IMAGE_ASPECT_STENCIL_BIT) {
+         transition_stencil_buffer(cmd_buffer, image,
+                                   iview->planes[0].isl.base_level, 1,
+                                   base_layer, layer_count,
+                                   att_state->current_layout, target_layout);
       }
    }
 
@@ -4665,7 +4788,7 @@ void genX(CmdEndRenderPass)(
    cmd_buffer->state.hiz_enabled = false;
 
 #ifndef NDEBUG
-   anv_dump_add_framebuffer(cmd_buffer, cmd_buffer->state.framebuffer);
+   anv_dump_add_attachments(cmd_buffer);
 #endif
 
    /* Remove references to render pass specific state. This enables us to
@@ -4754,3 +4877,110 @@ void genX(CmdEndConditionalRenderingEXT)(
    cmd_state->conditional_render_enabled = false;
 }
 #endif
+
+/* Set of stage bits for which are pipelined, i.e. they get queued by the
+ * command streamer for later execution.
+ */
+#define ANV_PIPELINE_STAGE_PIPELINED_BITS \
+   (VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | \
+    VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | \
+    VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT | \
+    VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT | \
+    VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT | \
+    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | \
+    VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | \
+    VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | \
+    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | \
+    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | \
+    VK_PIPELINE_STAGE_TRANSFER_BIT | \
+    VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT | \
+    VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | \
+    VK_PIPELINE_STAGE_ALL_COMMANDS_BIT)
+
+void genX(CmdSetEvent)(
+    VkCommandBuffer                             commandBuffer,
+    VkEvent                                     _event,
+    VkPipelineStageFlags                        stageMask)
+{
+   ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
+   ANV_FROM_HANDLE(anv_event, event, _event);
+
+   anv_batch_emit(&cmd_buffer->batch, GENX(PIPE_CONTROL), pc) {
+      if (stageMask & ANV_PIPELINE_STAGE_PIPELINED_BITS) {
+         pc.StallAtPixelScoreboard = true;
+         pc.CommandStreamerStallEnable = true;
+      }
+
+      pc.DestinationAddressType  = DAT_PPGTT,
+      pc.PostSyncOperation       = WriteImmediateData,
+      pc.Address = (struct anv_address) {
+         cmd_buffer->device->dynamic_state_pool.block_pool.bo,
+         event->state.offset
+      };
+      pc.ImmediateData           = VK_EVENT_SET;
+   }
+}
+
+void genX(CmdResetEvent)(
+    VkCommandBuffer                             commandBuffer,
+    VkEvent                                     _event,
+    VkPipelineStageFlags                        stageMask)
+{
+   ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
+   ANV_FROM_HANDLE(anv_event, event, _event);
+
+   anv_batch_emit(&cmd_buffer->batch, GENX(PIPE_CONTROL), pc) {
+      if (stageMask & ANV_PIPELINE_STAGE_PIPELINED_BITS) {
+         pc.StallAtPixelScoreboard = true;
+         pc.CommandStreamerStallEnable = true;
+      }
+
+      pc.DestinationAddressType  = DAT_PPGTT;
+      pc.PostSyncOperation       = WriteImmediateData;
+      pc.Address = (struct anv_address) {
+         cmd_buffer->device->dynamic_state_pool.block_pool.bo,
+         event->state.offset
+      };
+      pc.ImmediateData           = VK_EVENT_RESET;
+   }
+}
+
+void genX(CmdWaitEvents)(
+    VkCommandBuffer                             commandBuffer,
+    uint32_t                                    eventCount,
+    const VkEvent*                              pEvents,
+    VkPipelineStageFlags                        srcStageMask,
+    VkPipelineStageFlags                        destStageMask,
+    uint32_t                                    memoryBarrierCount,
+    const VkMemoryBarrier*                      pMemoryBarriers,
+    uint32_t                                    bufferMemoryBarrierCount,
+    const VkBufferMemoryBarrier*                pBufferMemoryBarriers,
+    uint32_t                                    imageMemoryBarrierCount,
+    const VkImageMemoryBarrier*                 pImageMemoryBarriers)
+{
+#if GEN_GEN >= 8
+   ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
+
+   for (uint32_t i = 0; i < eventCount; i++) {
+      ANV_FROM_HANDLE(anv_event, event, pEvents[i]);
+
+      anv_batch_emit(&cmd_buffer->batch, GENX(MI_SEMAPHORE_WAIT), sem) {
+         sem.WaitMode            = PollingMode,
+         sem.CompareOperation    = COMPARE_SAD_EQUAL_SDD,
+         sem.SemaphoreDataDword  = VK_EVENT_SET,
+         sem.SemaphoreAddress = (struct anv_address) {
+            cmd_buffer->device->dynamic_state_pool.block_pool.bo,
+            event->state.offset
+         };
+      }
+   }
+#else
+   anv_finishme("Implement events on gen7");
+#endif
+
+   genX(CmdPipelineBarrier)(commandBuffer, srcStageMask, destStageMask,
+                            false, /* byRegion */
+                            memoryBarrierCount, pMemoryBarriers,
+                            bufferMemoryBarrierCount, pBufferMemoryBarriers,
+                            imageMemoryBarrierCount, pImageMemoryBarriers);
+}

@@ -149,7 +149,7 @@ dri2_drm_create_window_surface(_EGLDriver *drv, _EGLDisplay *disp,
    }
 
    if (!dri2_init_surface(&dri2_surf->base, disp, EGL_WINDOW_BIT, conf,
-                          attrib_list, false))
+                          attrib_list, false, native_surface))
       goto cleanup_surf;
 
    config = dri2_get_dri_config(dri2_conf, EGL_WINDOW_BIT,
@@ -171,7 +171,7 @@ dri2_drm_create_window_surface(_EGLDriver *drv, _EGLDisplay *disp,
    dri2_surf->base.Height = surf->base.height;
    surf->dri_private = dri2_surf;
 
-   if (!dri2_create_drawable(dri2_dpy, config, dri2_surf))
+   if (!dri2_create_drawable(dri2_dpy, config, dri2_surf, dri2_surf->gbm_surf))
       goto cleanup_surf;
 
    return &dri2_surf->base;
@@ -715,6 +715,7 @@ dri2_initialize_drm(_EGLDriver *drv, _EGLDisplay *disp)
          goto cleanup;
       }
    }
+   dri2_dpy->gbm_dri = gbm_dri_device(gbm);
 
    if (strcmp(gbm_device_get_backend_name(gbm), "drm") != 0) {
       err = "DRI2: gbm device using incorrect/incompatible backend";
@@ -729,7 +730,6 @@ dri2_initialize_drm(_EGLDriver *drv, _EGLDisplay *disp)
 
    disp->Device = dev;
 
-   dri2_dpy->gbm_dri = gbm_dri_device(gbm);
    dri2_dpy->driver_name = strdup(dri2_dpy->gbm_dri->driver_name);
 
    dri2_dpy->dri_screen = dri2_dpy->gbm_dri->screen;

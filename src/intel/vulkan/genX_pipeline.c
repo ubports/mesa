@@ -448,6 +448,79 @@ static const uint32_t vk_to_gen_front_face[] = {
    [VK_FRONT_FACE_CLOCKWISE]                 = 0
 };
 
+/** Returns the final polygon mode for rasterization
+ *
+ * This function takes into account polygon mode, primitive topology and the
+ * different shader stages which might generate their own type of primitives.
+ */
+static VkPolygonMode
+anv_raster_polygon_mode(struct anv_pipeline *pipeline,
+                        const VkPipelineInputAssemblyStateCreateInfo *ia_info,
+                        const VkPipelineRasterizationStateCreateInfo *rs_info)
+{
+   /* Points always override everything.  This saves us from having to handle
+    * rs_info->polygonMode in all of the line cases below.
+    */
+   if (rs_info->polygonMode == VK_POLYGON_MODE_POINT)
+      return VK_POLYGON_MODE_POINT;
+
+   if (anv_pipeline_has_stage(pipeline, MESA_SHADER_GEOMETRY)) {
+      switch (get_gs_prog_data(pipeline)->output_topology) {
+      case _3DPRIM_POINTLIST:
+         return VK_POLYGON_MODE_POINT;
+
+      case _3DPRIM_LINELIST:
+      case _3DPRIM_LINESTRIP:
+      case _3DPRIM_LINELOOP:
+         return VK_POLYGON_MODE_LINE;
+
+      case _3DPRIM_TRILIST:
+      case _3DPRIM_TRIFAN:
+      case _3DPRIM_TRISTRIP:
+      case _3DPRIM_RECTLIST:
+      case _3DPRIM_QUADLIST:
+      case _3DPRIM_QUADSTRIP:
+      case _3DPRIM_POLYGON:
+         return rs_info->polygonMode;
+      }
+      unreachable("Unsupported GS output topology");
+   } else if (anv_pipeline_has_stage(pipeline, MESA_SHADER_TESS_EVAL)) {
+      switch (get_tes_prog_data(pipeline)->output_topology) {
+      case BRW_TESS_OUTPUT_TOPOLOGY_POINT:
+         return VK_POLYGON_MODE_POINT;
+
+      case BRW_TESS_OUTPUT_TOPOLOGY_LINE:
+         return VK_POLYGON_MODE_LINE;
+
+      case BRW_TESS_OUTPUT_TOPOLOGY_TRI_CW:
+      case BRW_TESS_OUTPUT_TOPOLOGY_TRI_CCW:
+         return rs_info->polygonMode;
+      }
+      unreachable("Unsupported TCS output topology");
+   } else {
+      switch (ia_info->topology) {
+      case VK_PRIMITIVE_TOPOLOGY_POINT_LIST:
+         return VK_POLYGON_MODE_POINT;
+
+      case VK_PRIMITIVE_TOPOLOGY_LINE_LIST:
+      case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP:
+      case VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY:
+      case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY:
+         return VK_POLYGON_MODE_LINE;
+
+      case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST:
+      case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP:
+      case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN:
+      case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY:
+      case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP_WITH_ADJACENCY:
+         return rs_info->polygonMode;
+
+      default:
+         unreachable("Unsupported primitive topology");
+      }
+   }
+}
+
 static void
 emit_rs_state(struct anv_pipeline *pipeline,
               const VkPipelineRasterizationStateCreateInfo *rs_info,
@@ -882,7 +955,7 @@ emit_ds_state(struct anv_pipeline *pipeline,
 #endif
 }
 
-MAYBE_UNUSED static bool
+static bool
 is_dual_src_blend_factor(VkBlendFactor factor)
 {
    return factor == VK_BLEND_FACTOR_SRC1_COLOR ||
@@ -1066,6 +1139,7 @@ emit_cb_state(struct anv_pipeline *pipeline,
 
 static void
 emit_3dstate_clip(struct anv_pipeline *pipeline,
+                  const VkPipelineInputAssemblyStateCreateInfo *ia_info,
                   const VkPipelineViewportStateCreateInfo *vp_info,
                   const VkPipelineRasterizationStateCreateInfo *rs_info)
 {
@@ -1075,8 +1149,16 @@ emit_3dstate_clip(struct anv_pipeline *pipeline,
       clip.ClipEnable               = true;
       clip.StatisticsEnable         = true;
       clip.EarlyCullEnable          = true;
-      clip.APIMode                  = APIMODE_D3D,
-      clip.ViewportXYClipTestEnable = true;
+      clip.APIMode                  = APIMODE_D3D;
+      clip.GuardbandClipTestEnable  = true;
+
+      /* Only enable the XY clip test when the final polygon rasterization
+       * mode is VK_POLYGON_MODE_FILL.  We want to leave it disabled for
+       * points and lines so we get "pop-free" clipping.
+       */
+      VkPolygonMode raster_mode =
+         anv_raster_polygon_mode(pipeline, ia_info, rs_info);
+      clip.ViewportXYClipTestEnable = (raster_mode == VK_POLYGON_MODE_FILL);
 
 #if GEN_GEN >= 8
       clip.VertexSubPixelPrecisionSelect = _8Bit;
@@ -1434,6 +1516,11 @@ emit_3dstate_hs_te_ds(struct anv_pipeline *pipeline,
       hs.PerThreadScratchSpace = get_scratch_space(tcs_bin);
       hs.ScratchSpaceBasePointer =
          get_scratch_address(pipeline, MESA_SHADER_TESS_CTRL, tcs_bin);
+
+#if GEN_GEN >= 9
+      hs.DispatchMode = tcs_prog_data->base.dispatch_mode;
+      hs.IncludePrimitiveID = tcs_prog_data->include_primitive_id;
+#endif
    }
 
    const VkPipelineTessellationDomainOriginStateCreateInfo *domain_origin_state =
@@ -1608,9 +1695,6 @@ emit_3dstate_wm(struct anv_pipeline *pipeline, struct anv_subpass *subpass,
 {
    const struct brw_wm_prog_data *wm_prog_data = get_wm_prog_data(pipeline);
 
-   MAYBE_UNUSED uint32_t samples =
-      multisample ? multisample->rasterizationSamples : 1;
-
    anv_batch_emit(&pipeline->batch, GENX(3DSTATE_WM), wm) {
       wm.StatisticsEnable                    = true;
       wm.LineEndCapAntialiasingRegionWidth   = _05pixels;
@@ -1673,7 +1757,7 @@ emit_3dstate_wm(struct anv_pipeline *pipeline, struct anv_subpass *subpass,
              has_color_buffer_write_enabled(pipeline, blend))
             wm.ThreadDispatchEnable = true;
 
-         if (samples > 1) {
+         if (multisample && multisample->rasterizationSamples > 1) {
             wm.MultisampleRasterizationMode = MSRASTMODE_ON_PATTERN;
             if (wm_prog_data->persample_dispatch) {
                wm.MultisampleDispatchMode = MSDISPMODE_PERSAMPLE;
@@ -1694,7 +1778,7 @@ emit_3dstate_ps(struct anv_pipeline *pipeline,
                 const VkPipelineColorBlendStateCreateInfo *blend,
                 const VkPipelineMultisampleStateCreateInfo *multisample)
 {
-   MAYBE_UNUSED const struct gen_device_info *devinfo = &pipeline->device->info;
+   UNUSED const struct gen_device_info *devinfo = &pipeline->device->info;
    const struct anv_shader_bin *fs_bin =
       pipeline->shaders[MESA_SHADER_FRAGMENT];
 
@@ -1946,7 +2030,9 @@ genX(graphics_pipeline_create)(
 
    emit_urb_setup(pipeline);
 
-   emit_3dstate_clip(pipeline, pCreateInfo->pViewportState,
+   emit_3dstate_clip(pipeline,
+                     pCreateInfo->pInputAssemblyState,
+                     pCreateInfo->pViewportState,
                      pCreateInfo->pRasterizationState);
    emit_3dstate_streamout(pipeline, pCreateInfo->pRasterizationState);
 

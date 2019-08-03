@@ -231,12 +231,14 @@ static ppir_reg *ppir_regalloc_build_liveness_info(ppir_compiler *comp)
                reg->live_out = node->instr->seq;
             break;
          }
-         case ppir_node_type_load_texture:
+         case ppir_node_type_branch:
          {
-            ppir_load_texture_node *load_tex = ppir_node_to_load_texture(node);
-            ppir_reg *reg = get_src_reg(&load_tex->src_coords);
-            if (reg && node->instr->seq > reg->live_out)
-               reg->live_out = node->instr->seq;
+            ppir_branch_node *branch = ppir_node_to_branch(node);
+            for (int i = 0; i < 2; i++) {
+               ppir_reg *reg = get_src_reg(branch->src + i);
+               if (reg && node->instr->seq > reg->live_out)
+                  reg->live_out = node->instr->seq;
+            }
             break;
          }
          default:
@@ -309,10 +311,15 @@ static void ppir_regalloc_print_result(ppir_compiler *comp)
                   printf("%d", ppir_target_get_src_reg_index(&load->src));
                break;
             }
-            case ppir_node_type_load_texture:
+            case ppir_node_type_branch:
             {
-               ppir_load_texture_node *load_tex = ppir_node_to_load_texture(node);
-               printf("%d", ppir_target_get_src_reg_index(&load_tex->src_coords));
+               ppir_branch_node *branch = ppir_node_to_branch(node);
+               for (int j = 0; j < 2; j++) {
+                  if (j)
+                     printf(" ");
+
+                  printf("%d", ppir_target_get_src_reg_index(branch->src + j));
+               }
                break;
             }
             default:
@@ -389,7 +396,7 @@ static ppir_alu_node* ppir_update_spilled_src(ppir_compiler *comp,
    ppir_load_node *load = ppir_node_to_load(load_node);
 
    load->index = -comp->prog->stack_size; /* index sizes are negative */
-   load->num_components = src->reg->num_components;
+   load->num_components = 4;
 
    ppir_dest *ld_dest = &load->dest;
    ld_dest->type = ppir_target_pipeline;
@@ -600,13 +607,15 @@ static bool ppir_regalloc_spill_reg(ppir_compiler *comp, ppir_reg *chosen)
             }
             break;
          }
-         case ppir_node_type_load_texture:
+         case ppir_node_type_branch:
          {
-            ppir_load_texture_node *load_tex = ppir_node_to_load_texture(node);
-            reg = get_src_reg(&load_tex->src_coords);
-            if (reg == chosen) {
-               ppir_update_spilled_src(comp, block, node, &load_tex->src_coords,
-                                       NULL);
+            ppir_branch_node *branch = ppir_node_to_branch(node);
+            for (int i = 0; i < 2; i++) {
+               reg = get_src_reg(branch->src + i);
+               if (reg == chosen) {
+                  ppir_update_spilled_src(comp, block, node,
+                                          branch->src + i, NULL);
+               }
             }
             break;
          }
@@ -710,11 +719,11 @@ static bool ppir_regalloc_prog_try(ppir_compiler *comp, bool *spilled)
          /* Ask the outer loop to call back in. */
          *spilled = true;
 
-         ppir_debug("ppir: spilled register\n");
+         ppir_debug("spilled register\n");
          goto err_out;
       }
 
-      ppir_error("ppir: regalloc fail\n");
+      ppir_error("regalloc fail\n");
       goto err_out;
    }
 
@@ -746,6 +755,10 @@ bool ppir_regalloc_prog(ppir_compiler *comp)
    comp->force_spilling = lima_ppir_force_spilling;
 
    ppir_regalloc_update_reglist_ssa(comp);
+
+   /* No registers? Probably shader consists of discard instruction */
+   if (list_empty(&comp->reg_list))
+      return true;
 
    /* this will most likely succeed in the first
     * try, except for very complicated shaders */

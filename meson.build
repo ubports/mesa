@@ -25,7 +25,7 @@ project(
     [find_program('python', 'python2', 'python3'), 'bin/meson_get_version.py']
   ).stdout(),
   license : 'MIT',
-  meson_version : '>= 0.45',
+  meson_version : '>= 0.46',
   default_options : ['buildtype=debugoptimized', 'b_ndebug=if-release', 'c_std=c99', 'cpp_std=c++11']
 )
 
@@ -49,14 +49,22 @@ with_vulkan_icd_dir = get_option('vulkan-icd-dir')
 with_tests = get_option('build-tests')
 with_valgrind = get_option('valgrind')
 with_libunwind = get_option('libunwind')
-with_asm = get_option('asm')
 with_glx_read_only_text = get_option('glx-read-only-text')
 with_glx_direct = get_option('glx-direct')
 with_osmesa = get_option('osmesa')
 with_swr_arches = get_option('swr-arches')
 with_tools = get_option('tools')
 if with_tools.contains('all')
-  with_tools = ['etnaviv', 'freedreno', 'glsl', 'intel', 'nir', 'nouveau', 'xvmc']
+  with_tools = [
+    'drm-shim',
+    'etnaviv',
+    'freedreno',
+    'glsl',
+    'intel',
+    'nir',
+    'nouveau',
+    'xvmc',
+  ]
 endif
 
 dri_drivers_path = get_option('dri-drivers-path')
@@ -107,7 +115,7 @@ with_any_opengl = with_opengl or with_gles1 or with_gles2
 # Only build shared_glapi if at least one OpenGL API is enabled
 with_shared_glapi = get_option('shared-glapi') and with_any_opengl
 
-system_has_kms_drm = ['openbsd', 'netbsd', 'freebsd', 'dragonfly', 'linux'].contains(host_machine.system())
+system_has_kms_drm = ['openbsd', 'netbsd', 'freebsd', 'gnu/kfreebsd', 'dragonfly', 'linux'].contains(host_machine.system())
 
 dri_drivers = get_option('dri-drivers')
 if dri_drivers.contains('auto')
@@ -244,6 +252,7 @@ endif
 
 if host_machine.system() == 'darwin'
   with_dri_platform = 'apple'
+  pre_args += '-DBUILDING_MESA'
 elif ['windows', 'cygwin'].contains(host_machine.system())
   with_dri_platform = 'windows'
 elif system_has_kms_drm
@@ -278,6 +287,10 @@ with_platform_surfaceless = _platforms.contains('surfaceless')
 
 with_platforms = false
 if _platforms.length() != 0 and _platforms != ['']
+  # sanity check that list contains no empty strings
+  if _platforms.contains('')
+    error('Invalid argument list given to -Dplatforms, please fix.')
+  endif
   with_platforms = true
   egl_native_platform = _platforms[0]
 endif
@@ -312,7 +325,7 @@ if with_glx == 'dri'
    endif
 endif
 
-if not (with_dri or with_gallium or with_glx == 'xlib' or with_glx == 'gallium-xlib')
+if not (with_dri or with_gallium or with_glx != 'disabled')
   with_gles1 = false
   with_gles2 = false
   with_opengl = false
@@ -379,9 +392,7 @@ if with_glx != 'disabled'
       error('xlib conflicts with any dri driver')
     endif
   elif with_glx == 'dri'
-    if not with_dri
-      error('dri based GLX requires at least one DRI driver')
-    elif not with_shared_glapi
+    if not with_shared_glapi
       error('dri based GLX requires shared-glapi')
     endif
   endif
@@ -503,12 +514,6 @@ if not system_has_kms_drm
   else
     error('OMX state tracker can only be built on unix-like OSes.')
   endif
-elif not (with_platform_x11 or with_platform_drm)
-  if ['auto', 'disabled'].contains(_omx)
-    _omx = 'disabled'
-  else
-    error('OMX state tracker requires X11 or drm platform support.')
-  endif
 elif not (with_gallium_r600 or with_gallium_radeonsi or with_gallium_nouveau)
   if ['auto', 'disabled'].contains(_omx)
     _omx = 'disabled'
@@ -589,12 +594,6 @@ if not system_has_kms_drm
   else
     _va = 'false'
   endif
-elif not (with_platform_x11 or with_platform_drm)
-  if _va == 'true'
-    error('VA state tracker requires X11 or drm or wayland platform support.')
-  else
-    _va = 'false'
-  endif
 elif not (with_gallium_r600 or with_gallium_radeonsi or with_gallium_nouveau)
   if _va == 'true'
     error('VA state tracker requires at least one of the following gallium drivers: r600, radeonsi, nouveau.')
@@ -658,7 +657,7 @@ endif
 if get_option('power8') != 'false'
   # on old versions of meson the cpu family would return as ppc64le on little
   # endian power8, this was changed in 0.48 such that the family would always
-  # be ppc64 regardless of endianness, and the the machine.endian() value
+  # be ppc64 regardless of endianness, and then the machine.endian() value
   # should be checked. Since we support versions < 0.48 we need to use
   # startswith.
   if host_machine.cpu_family().startswith('ppc64') and host_machine.endian() == 'little'
@@ -754,7 +753,11 @@ if with_platform_haiku
   pre_args += '-DHAVE_HAIKU_PLATFORM'
 endif
 
-prog_python = import('python3').find_python()
+if meson.version().version_compare('>=0.50')
+  prog_python = import('python').find_installation('python3')
+else
+  prog_python = import('python3').find_python()
+endif
 has_mako = run_command(
   prog_python, '-c',
   '''
@@ -834,9 +837,13 @@ if cc.compiles('int foo(void) __attribute__((__noreturn__));',
                name : '__attribute__((__noreturn__))')
   pre_args += '-DHAVE_FUNC_ATTRIBUTE_NORETURN'
 endif
+if cc.compiles('__uint128_t foo(void) { return 0; }',
+               name : '__uint128_t')
+  pre_args += '-DHAVE_UINT128'
+endif
 
 # TODO: this is very incomplete
-if ['linux', 'cygwin', 'gnu'].contains(host_machine.system())
+if ['linux', 'cygwin', 'gnu', 'gnu/kfreebsd'].contains(host_machine.system())
   pre_args += '-D_GNU_SOURCE'
 endif
 
@@ -845,6 +852,8 @@ c_args = []
 foreach a : ['-Werror=implicit-function-declaration',
              '-Werror=missing-prototypes', '-Werror=return-type',
              '-Werror=incompatible-pointer-types',
+             '-Werror=format',
+             '-Wformat-security',
              '-fno-math-errno',
              '-fno-trapping-math', '-Qunused-arguments']
   if cc.has_argument(a)
@@ -866,6 +875,8 @@ endif
 # Check for generic C++ arguments
 cpp_args = []
 foreach a : ['-Werror=return-type',
+             '-Werror=format',
+             '-Wformat-security',
              '-fno-math-errno', '-fno-trapping-math',
              '-Qunused-arguments']
   if cpp.has_argument(a)
@@ -968,68 +979,41 @@ endif
 
 # TODO: shared/static? Is this even worth doing?
 
-# When cross compiling we generally need to turn off the use of assembly,
-# because mesa's assembly relies on building an executable for the host system,
-# and running it to get information about struct sizes. There is at least one
-# case of cross compiling where we can use asm, and that's x86_64 -> x86 when
-# host OS == build OS, since in that case the build machine can run the host's
-# binaries.
-if with_asm and meson.is_cross_build()
-  if build_machine.system() != host_machine.system()
-    # TODO: It may be possible to do this with an exe_wrapper (like wine).
-    message('Cross compiling from one OS to another, disabling assembly.')
-    with_asm = false
-  elif not (build_machine.cpu_family().startswith('x86') and host_machine.cpu_family() == 'x86')
-    # FIXME: Gentoo always sets -m32 for x86_64 -> x86 builds, resulting in an
-    # x86 -> x86 cross compile. We use startswith rather than == to handle this
-    # case.
-    # TODO: There may be other cases where the 64 bit version of the
-    # architecture can run 32 bit binaries (aarch64 and armv7 for example)
-    message('''
-      Cross compiling to different architectures, and the host cannot run
-      the build machine's binaries. Disabling assembly.
-    ''')
-    with_asm = false
-  endif
-endif
-
 with_asm_arch = ''
-if with_asm
-  if host_machine.cpu_family() == 'x86'
-    if system_has_kms_drm or host_machine.system() == 'gnu'
-      with_asm_arch = 'x86'
-      pre_args += ['-DUSE_X86_ASM', '-DUSE_MMX_ASM', '-DUSE_3DNOW_ASM',
-                   '-DUSE_SSE_ASM']
+if host_machine.cpu_family() == 'x86'
+  if system_has_kms_drm or host_machine.system() == 'gnu'
+    with_asm_arch = 'x86'
+    pre_args += ['-DUSE_X86_ASM', '-DUSE_MMX_ASM', '-DUSE_3DNOW_ASM',
+                 '-DUSE_SSE_ASM']
 
-      if with_glx_read_only_text
-         pre_args += ['-DGLX_X86_READONLY_TEXT']
-      endif
+    if with_glx_read_only_text
+      pre_args += ['-DGLX_X86_READONLY_TEXT']
     endif
-  elif host_machine.cpu_family() == 'x86_64'
-    if system_has_kms_drm
-      with_asm_arch = 'x86_64'
-      pre_args += ['-DUSE_X86_64_ASM']
-    endif
-  elif host_machine.cpu_family() == 'arm'
-    if system_has_kms_drm
-      with_asm_arch = 'arm'
-      pre_args += ['-DUSE_ARM_ASM']
-    endif
-  elif host_machine.cpu_family() == 'aarch64'
-    if system_has_kms_drm
-      with_asm_arch = 'aarch64'
-      pre_args += ['-DUSE_AARCH64_ASM']
-    endif
-  elif host_machine.cpu_family() == 'sparc64'
-    if system_has_kms_drm
-      with_asm_arch = 'sparc'
-      pre_args += ['-DUSE_SPARC_ASM']
-    endif
-  elif host_machine.cpu_family().startswith('ppc64') and host_machine.endian() == 'little'
-    if system_has_kms_drm
-      with_asm_arch = 'ppc64le'
-      pre_args += ['-DUSE_PPC64LE_ASM']
-    endif
+  endif
+elif host_machine.cpu_family() == 'x86_64'
+  if system_has_kms_drm
+    with_asm_arch = 'x86_64'
+    pre_args += ['-DUSE_X86_64_ASM']
+  endif
+elif host_machine.cpu_family() == 'arm'
+  if system_has_kms_drm
+    with_asm_arch = 'arm'
+    pre_args += ['-DUSE_ARM_ASM']
+  endif
+elif host_machine.cpu_family() == 'aarch64'
+  if system_has_kms_drm
+    with_asm_arch = 'aarch64'
+    pre_args += ['-DUSE_AARCH64_ASM']
+  endif
+elif host_machine.cpu_family() == 'sparc64'
+  if system_has_kms_drm
+    with_asm_arch = 'sparc'
+    pre_args += ['-DUSE_SPARC_ASM']
+  endif
+elif host_machine.cpu_family().startswith('ppc64') and host_machine.endian() == 'little'
+  if system_has_kms_drm
+    with_asm_arch = 'ppc64le'
+    pre_args += ['-DUSE_PPC64LE_ASM']
   endif
 endif
 
@@ -1040,17 +1024,24 @@ elif cc.has_header_symbol('sys/mkdev.h', 'major')
   pre_args += '-DMAJOR_IN_MKDEV'
 endif
 
-foreach h : ['xlocale.h', 'sys/sysctl.h', 'linux/futex.h', 'endian.h', 'dlfcn.h']
+foreach h : ['xlocale.h', 'sys/sysctl.h', 'linux/futex.h', 'endian.h', 'dlfcn.h', 'execinfo.h', 'sys/shm.h']
   if cc.compiles('#include <@0@>'.format(h), name : '@0@'.format(h))
     pre_args += '-DHAVE_@0@'.format(h.to_upper().underscorify())
   endif
 endforeach
 
-foreach f : ['strtof', 'mkostemp', 'posix_memalign', 'timespec_get', 'memfd_create']
+foreach f : ['strtof', 'mkostemp', 'posix_memalign', 'timespec_get', 'memfd_create', 'random_r']
   if cc.has_function(f)
     pre_args += '-DHAVE_@0@'.format(f.to_upper())
   endif
 endforeach
+
+if cc.has_header_symbol('errno.h', 'program_invocation_name',
+                        args : '-D_GNU_SOURCE')
+   pre_args += '-DHAVE_PROGRAM_INVOCATION_NAME'
+elif with_tools.contains('intel')
+  error('Intel tools require the program_invocation_name variable')
+endif
 
 # strtod locale support
 if cc.links('''
@@ -1145,25 +1136,23 @@ if dep_thread.found() and host_machine.system() != 'windows'
 endif
 dep_expat = dependency('expat')
 # this only exists on linux so either this is linux and it will be found, or
-# its not linux and and wont
+# it's not linux and wont
 dep_m = cc.find_library('m', required : false)
 
-# Check for libdrm. various drivers have different libdrm version requirements,
+# Check for libdrm. Various drivers have different libdrm version requirements,
 # but we always want to use the same version for all libdrm modules. That means
 # even if driver foo requires 2.4.0 and driver bar requires 2.4.3, if foo and
 # bar are both on use 2.4.3 for both of them
 dep_libdrm_amdgpu = null_dep
 dep_libdrm_radeon = null_dep
 dep_libdrm_nouveau = null_dep
-dep_libdrm_etnaviv = null_dep
 dep_libdrm_intel = null_dep
 
-_drm_amdgpu_ver = '2.4.97'
+_drm_amdgpu_ver = '2.4.99'
 _drm_radeon_ver = '2.4.71'
 _drm_nouveau_ver = '2.4.66'
-_drm_etnaviv_ver = '2.4.89'
 _drm_intel_ver = '2.4.75'
-_drm_ver = '2.4.75'
+_drm_ver = '2.4.81'
 
 _libdrm_checks = [
   ['intel', with_dri_i915 or with_gallium_i915],
@@ -1171,12 +1160,16 @@ _libdrm_checks = [
   ['radeon', (with_gallium_radeonsi or with_dri_r100 or with_dri_r200 or
               with_gallium_r300 or with_gallium_r600)],
   ['nouveau', (with_gallium_nouveau or with_dri_nouveau)],
-  ['etnaviv', with_gallium_etnaviv],
 ]
 
 # VC4 only needs core libdrm support of this version, not a libdrm_vc4
 # library.
 if with_gallium_vc4
+  _drm_ver = '2.4.89'
+endif
+
+# etnaviv only needs core libdrm
+if with_gallium_etnaviv
   _drm_ver = '2.4.89'
 endif
 
@@ -1504,10 +1497,6 @@ endif
 pkg = import('pkgconfig')
 
 prog_nm = find_program('nm', required : false)
-env_test = environment()
-if prog_nm.found()
-  env_test.set('NM', prog_nm.path())
-endif
 
 # This quirk needs to be applied to sources with functions defined in assembly
 # as GCC LTO drops them. See: https://bugs.freedesktop.org/show_bug.cgi?id=109391
@@ -1533,8 +1522,8 @@ lines = ['',
                                                     with_gles2 ? 'yes' : 'no'),
 ]
 
-lines += ''
 if with_osmesa != 'none'
+  lines += ''
   suffix = ''
   if with_osmesa == 'gallium'
     suffix = '(Gallium)'
@@ -1544,8 +1533,8 @@ else
   lines += 'OSMesa:          no'
 endif
 
-lines += ''
 if with_dri
+  lines += ''
   lines += 'DRI platform:    ' + with_dri_platform
   if dri_drivers.length() != 0 and dri_drivers != ['']
     lines += 'DRI drivers:     ' + ' '.join(dri_drivers)
@@ -1555,8 +1544,8 @@ if with_dri
   lines += 'DRI driver dir:  ' + dri_drivers_path
 endif
 
-lines += ''
 if with_glx != 'disabled'
+  lines += ''
   if with_glx == 'dri'
     lines += 'GLX:             DRI-based'
   elif with_glx == 'xlib'

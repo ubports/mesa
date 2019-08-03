@@ -729,7 +729,7 @@ struct anv_fixed_size_state_pool {
 };
 
 #define ANV_MIN_STATE_SIZE_LOG2 6
-#define ANV_MAX_STATE_SIZE_LOG2 20
+#define ANV_MAX_STATE_SIZE_LOG2 21
 
 #define ANV_STATE_BUCKETS (ANV_MAX_STATE_SIZE_LOG2 - ANV_MIN_STATE_SIZE_LOG2 + 1)
 
@@ -2170,12 +2170,6 @@ struct anv_xfb_binding {
 #define ANV_PARAM_DYN_OFFSET_IDX(param)   ((param) & 0xffff)
 
 struct anv_push_constants {
-   /* Current allocated size of this push constants data structure.
-    * Because a decent chunk of it may not be used (images on SKL, for
-    * instance), we won't actually allocate the entire structure up-front.
-    */
-   uint32_t size;
-
    /* Push constant data provided by the client through vkPushConstants */
    uint8_t client_data[MAX_PUSH_CONSTANTS_SIZE];
 
@@ -2279,6 +2273,7 @@ struct anv_attachment_state {
     * have not been cleared yet when multiview is active.
     */
    uint32_t                                     pending_clear_views;
+   struct anv_image_view *                      image_view;
 };
 
 /** State tracking for particular pipeline bind point
@@ -2358,7 +2353,7 @@ struct anv_cmd_state {
    bool                                         xfb_enabled;
    struct anv_xfb_binding                       xfb_bindings[MAX_XFB_BUFFERS];
    VkShaderStageFlags                           push_constant_stages;
-   struct anv_push_constants *                  push_constants[MESA_SHADER_STAGES];
+   struct anv_push_constants                    push_constants[MESA_SHADER_STAGES];
    struct anv_state                             binding_tables[MESA_SHADER_STAGES];
    struct anv_state                             samplers[MESA_SHADER_STAGES];
 
@@ -2477,14 +2472,6 @@ VkResult anv_cmd_buffer_execbuf(struct anv_device *device,
                                 VkFence fence);
 
 VkResult anv_cmd_buffer_reset(struct anv_cmd_buffer *cmd_buffer);
-
-VkResult
-anv_cmd_buffer_ensure_push_constants_size(struct anv_cmd_buffer *cmd_buffer,
-                                          gl_shader_stage stage, uint32_t size);
-#define anv_cmd_buffer_ensure_push_constant_field(cmd_buffer, stage, field) \
-   anv_cmd_buffer_ensure_push_constants_size(cmd_buffer, stage, \
-      (offsetof(struct anv_push_constants, field) + \
-       sizeof(cmd_buffer->state.push_constants[0]->field)))
 
 struct anv_state anv_cmd_buffer_emit_dynamic(struct anv_cmd_buffer *cmd_buffer,
                                              const void *data, uint32_t size, uint32_t alignment);
@@ -2992,7 +2979,8 @@ struct anv_image {
    uint32_t array_size;
    uint32_t samples; /**< VkImageCreateInfo::samples */
    uint32_t n_planes;
-   VkImageUsageFlags usage; /**< Superset of VkImageCreateInfo::usage. */
+   VkImageUsageFlags usage; /**< VkImageCreateInfo::usage. */
+   VkImageUsageFlags stencil_usage;
    VkImageCreateFlags create_flags; /* Flags used when creating image. */
    VkImageTiling tiling; /** VkImageCreateInfo::tiling */
 
@@ -3299,6 +3287,7 @@ anv_image_ccs_op(struct anv_cmd_buffer *cmd_buffer,
 void
 anv_image_copy_to_shadow(struct anv_cmd_buffer *cmd_buffer,
                          const struct anv_image *image,
+                         VkImageAspectFlagBits aspect,
                          uint32_t base_level, uint32_t level_count,
                          uint32_t base_layer, uint32_t layer_count);
 
@@ -3639,8 +3628,7 @@ enum anv_dump_action {
 void anv_dump_start(struct anv_device *device, enum anv_dump_action actions);
 void anv_dump_finish(void);
 
-void anv_dump_add_framebuffer(struct anv_cmd_buffer *cmd_buffer,
-                              struct anv_framebuffer *fb);
+void anv_dump_add_attachments(struct anv_cmd_buffer *cmd_buffer);
 
 static inline uint32_t
 anv_get_subpass_id(const struct anv_cmd_state * const cmd_state)

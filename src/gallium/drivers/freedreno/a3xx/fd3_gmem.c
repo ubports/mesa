@@ -711,7 +711,7 @@ patch_draws(struct fd_batch *batch, enum pc_di_vis_cull_mode vismode)
 		struct fd_cs_patch *patch = fd_patch_element(&batch->draw_patches, i);
 		*patch->cs = patch->val | DRAW(0, 0, 0, vismode, 0);
 	}
-	util_dynarray_resize(&batch->draw_patches, 0);
+	util_dynarray_clear(&batch->draw_patches);
 }
 
 static void
@@ -722,7 +722,7 @@ patch_rbrc(struct fd_batch *batch, uint32_t val)
 		struct fd_cs_patch *patch = fd_patch_element(&batch->rbrc_patches, i);
 		*patch->cs = patch->val | val;
 	}
-	util_dynarray_resize(&batch->rbrc_patches, 0);
+	util_dynarray_clear(&batch->rbrc_patches);
 }
 
 /* for rendering directly to system memory: */
@@ -1016,7 +1016,7 @@ fd3_emit_tile_renderprep(struct fd_batch *batch, struct fd_tile *tile)
 	if (use_hw_binning(batch)) {
 		struct fd_vsc_pipe *pipe = &ctx->vsc_pipe[tile->p];
 
-		assert(pipe->w * pipe->h);
+		assert(pipe->w && pipe->h);
 
 		fd_event_write(batch, ring, HLSQ_FLUSH);
 		fd_wfi(batch, ring);

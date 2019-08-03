@@ -115,7 +115,7 @@ static GLboolean
 dri_is_thread_safe(void *loaderPrivate)
 {
    struct dri2_egl_surface *dri2_surf = loaderPrivate;
-   MAYBE_UNUSED _EGLDisplay *display =  dri2_surf->base.Resource.Display;
+   UNUSED _EGLDisplay *display =  dri2_surf->base.Resource.Display;
 
 #ifdef HAVE_X11_PLATFORM
    Display *xdpy = (Display*)display->PlatformDisplay;
@@ -874,6 +874,9 @@ dri2_initialize(_EGLDriver *drv, _EGLDisplay *disp)
    case _EGL_PLATFORM_SURFACELESS:
       ret = dri2_initialize_surfaceless(drv, disp);
       break;
+   case _EGL_PLATFORM_DEVICE:
+      ret = dri2_initialize_device(drv, disp);
+      break;
    case _EGL_PLATFORM_X11:
       ret = dri2_initialize_x11(drv, disp);
       break;
@@ -1242,6 +1245,9 @@ dri2_create_context(_EGLDriver *drv, _EGLDisplay *disp, _EGLConfig *conf,
                && dri2_ctx->base.ClientMinorVersion >= 2))
           && dri2_ctx->base.Profile == EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT_KHR)
          api = __DRI_API_OPENGL_CORE;
+      else if (dri2_ctx->base.ClientMajorVersion == 3 &&
+               dri2_ctx->base.ClientMinorVersion == 1)
+         api = __DRI_API_OPENGL_CORE;
       else
          api = __DRI_API_OPENGL;
       break;
@@ -1354,7 +1360,8 @@ dri2_destroy_context(_EGLDriver *drv, _EGLDisplay *disp, _EGLContext *ctx)
 
 EGLBoolean
 dri2_init_surface(_EGLSurface *surf, _EGLDisplay *disp, EGLint type,
-        _EGLConfig *conf, const EGLint *attrib_list, EGLBoolean enable_out_fence)
+        _EGLConfig *conf, const EGLint *attrib_list,
+        EGLBoolean enable_out_fence, void *native_surface)
 {
    struct dri2_egl_surface *dri2_surf = dri2_egl_surface(surf);
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
@@ -1368,7 +1375,7 @@ dri2_init_surface(_EGLSurface *surf, _EGLDisplay *disp, EGLint type,
       dri2_surf->enable_out_fence = enable_out_fence;
    }
 
-   return _eglInitSurface(surf, disp, type, conf, attrib_list);
+   return _eglInitSurface(surf, disp, type, conf, attrib_list, native_surface);
 }
 
 static void
@@ -1427,10 +1434,10 @@ dri2_surf_update_fence_fd(_EGLContext *ctx,
 EGLBoolean
 dri2_create_drawable(struct dri2_egl_display *dri2_dpy,
                      const __DRIconfig *config,
-                     struct dri2_egl_surface *dri2_surf)
+                     struct dri2_egl_surface *dri2_surf,
+                     void *loaderPrivate)
 {
    __DRIcreateNewDrawableFunc createNewDrawable;
-   void *loaderPrivate = dri2_surf;
 
    if (dri2_dpy->image_driver)
       createNewDrawable = dri2_dpy->image_driver->createNewDrawable;
@@ -1440,12 +1447,6 @@ dri2_create_drawable(struct dri2_egl_display *dri2_dpy,
       createNewDrawable = dri2_dpy->swrast->createNewDrawable;
    else
       return _eglError(EGL_BAD_ALLOC, "no createNewDrawable");
-
-   /* As always gbm is a bit special.. */
-#ifdef HAVE_DRM_PLATFORM
-   if (dri2_surf->gbm_surf)
-      loaderPrivate = dri2_surf->gbm_surf;
-#endif
 
    dri2_surf->dri_drawable = (*createNewDrawable)(dri2_dpy->dri_screen,
                                                   config, loaderPrivate);
@@ -2658,21 +2659,39 @@ dri2_export_dma_buf_image_query_mesa(_EGLDriver *drv, _EGLDisplay *disp,
 {
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
    struct dri2_egl_image *dri2_img = dri2_egl_image(img);
+   int num_planes;
 
    (void) drv;
 
    if (!dri2_can_export_dma_buf_image(disp, img))
       return EGL_FALSE;
 
+   dri2_dpy->image->queryImage(dri2_img->dri_image,
+                               __DRI_IMAGE_ATTRIB_NUM_PLANES, &num_planes);
    if (nplanes)
-      dri2_dpy->image->queryImage(dri2_img->dri_image,
-                                  __DRI_IMAGE_ATTRIB_NUM_PLANES, nplanes);
+     *nplanes = num_planes;
+
    if (fourcc)
       dri2_dpy->image->queryImage(dri2_img->dri_image,
                                   __DRI_IMAGE_ATTRIB_FOURCC, fourcc);
 
-   if (modifiers)
-      *modifiers = 0;
+   if (modifiers) {
+      int mod_hi, mod_lo;
+      uint64_t modifier = DRM_FORMAT_MOD_INVALID;
+      bool query;
+
+      query = dri2_dpy->image->queryImage(dri2_img->dri_image,
+                                          __DRI_IMAGE_ATTRIB_MODIFIER_UPPER,
+                                          &mod_hi);
+      query &= dri2_dpy->image->queryImage(dri2_img->dri_image,
+                                           __DRI_IMAGE_ATTRIB_MODIFIER_LOWER,
+                                           &mod_lo);
+      if (query)
+         modifier = combine_u32_into_u64 (mod_hi, mod_lo);
+
+      for (int i = 0; i < num_planes; i++)
+        modifiers[i] = modifier;
+   }
 
    return EGL_TRUE;
 }

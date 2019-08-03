@@ -477,7 +477,7 @@ static void
 etna_compile_parse_declarations(struct etna_compile *c)
 {
    struct tgsi_parse_context ctx = { };
-   MAYBE_UNUSED unsigned status = tgsi_parse_init(&ctx, c->tokens);
+   ASSERTED unsigned status = tgsi_parse_init(&ctx, c->tokens);
    assert(status == TGSI_PARSE_OK);
 
    while (!tgsi_parse_end_of_tokens(&ctx)) {
@@ -529,7 +529,7 @@ static void
 etna_compile_pass_check_usage(struct etna_compile *c)
 {
    struct tgsi_parse_context ctx = { };
-   MAYBE_UNUSED unsigned status = tgsi_parse_init(&ctx, c->tokens);
+   ASSERTED unsigned status = tgsi_parse_init(&ctx, c->tokens);
    assert(status == TGSI_PARSE_OK);
 
    for (int idx = 0; idx < c->total_decls; ++idx) {
@@ -660,7 +660,7 @@ etna_compile_pass_optimize_outputs(struct etna_compile *c)
 {
    struct tgsi_parse_context ctx = { };
    int inst_idx = 0;
-   MAYBE_UNUSED unsigned status = tgsi_parse_init(&ctx, c->tokens);
+   ASSERTED unsigned status = tgsi_parse_init(&ctx, c->tokens);
    assert(status == TGSI_PARSE_OK);
 
    while (!tgsi_parse_end_of_tokens(&ctx)) {
@@ -1809,7 +1809,7 @@ static void
 etna_compile_pass_generate_code(struct etna_compile *c)
 {
    struct tgsi_parse_context ctx = { };
-   MAYBE_UNUSED unsigned status = tgsi_parse_init(&ctx, c->tokens);
+   ASSERTED unsigned status = tgsi_parse_init(&ctx, c->tokens);
    assert(status == TGSI_PARSE_OK);
 
    int inst_idx = 0;
@@ -2575,16 +2575,18 @@ etna_link_shader(struct etna_shader_link_info *info,
       else /* texture coord or other bypasses flat shading */
          varying->pa_attributes = 0x2f1;
 
-      varying->use[0] = interpolate_always ? VARYING_COMPONENT_USE_POINTCOORD_X : VARYING_COMPONENT_USE_USED;
-      varying->use[1] = interpolate_always ? VARYING_COMPONENT_USE_POINTCOORD_Y : VARYING_COMPONENT_USE_USED;
-      varying->use[2] = VARYING_COMPONENT_USE_USED;
-      varying->use[3] = VARYING_COMPONENT_USE_USED;
-
+      varying->use[0] = VARYING_COMPONENT_USE_UNUSED;
+      varying->use[1] = VARYING_COMPONENT_USE_UNUSED;
+      varying->use[2] = VARYING_COMPONENT_USE_UNUSED;
+      varying->use[3] = VARYING_COMPONENT_USE_UNUSED;
 
       /* point coord is an input to the PS without matching VS output,
        * so it gets a varying slot without being assigned a VS register.
        */
       if (fsio->semantic.Name == TGSI_SEMANTIC_PCOORD) {
+         varying->use[0] = VARYING_COMPONENT_USE_POINTCOORD_X;
+         varying->use[1] = VARYING_COMPONENT_USE_POINTCOORD_Y;
+
          info->pcoord_varying_comp_ofs = comp_ofs;
       } else {
          if (vsio == NULL) { /* not found -- link error */

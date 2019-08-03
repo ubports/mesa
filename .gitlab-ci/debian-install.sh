@@ -5,17 +5,22 @@ set -o xtrace
 
 export DEBIAN_FRONTEND=noninteractive
 
+CROSS_ARCHITECTURES="armhf arm64 i386"
+for arch in $CROSS_ARCHITECTURES; do
+    dpkg --add-architecture $arch
+done
+
 apt-get install -y \
       apt-transport-https \
       ca-certificates \
       curl \
       wget \
-      gnupg \
-      software-properties-common
+      unzip \
+      gnupg
 
 curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add -
-add-apt-repository "deb https://apt.llvm.org/stretch/ llvm-toolchain-stretch-7 main"
-add-apt-repository "deb https://apt.llvm.org/stretch/ llvm-toolchain-stretch-8 main"
+echo "deb [trusted=yes] https://apt.llvm.org/stretch/ llvm-toolchain-stretch-7 main" >/etc/apt/sources.list.d/llvm7.list
+echo "deb [trusted=yes] https://apt.llvm.org/stretch/ llvm-toolchain-stretch-8 main" >/etc/apt/sources.list.d/llvm8.list
 
 sed -i -e 's/http:\/\/deb/https:\/\/deb/g' /etc/apt/sources.list
 echo 'deb https://deb.debian.org/debian stretch-backports main' >/etc/apt/sources.list.d/backports.list
@@ -26,16 +31,22 @@ apt-get install -y -t stretch-backports \
       llvm-3.4-dev \
       llvm-3.9-dev \
       libclang-3.9-dev \
+      llvm-4.0-dev \
+      libclang-4.0-dev \
       llvm-5.0-dev \
+      libclang-5.0-dev \
       llvm-6.0-dev \
+      libclang-6.0-dev \
       llvm-7-dev \
+      libclang-7-dev \
+      llvm-8-dev \
+      libclang-8-dev \
       g++ \
-      clang-8 \
-      libclang-7-dev
+      clang-8
 
 # Install remaining packages from Debian buster to get newer versions
-add-apt-repository "deb https://deb.debian.org/debian/ buster main"
-add-apt-repository "deb https://deb.debian.org/debian/ buster-updates main"
+echo "deb https://deb.debian.org/debian/ buster main" >/etc/apt/sources.list.d/buster.list
+echo "deb https://deb.debian.org/debian/ buster-updates main" >/etc/apt/sources.list.d/buster-updates.list
 apt-get update
 apt-get install -y \
       bzip2 \
@@ -45,6 +56,10 @@ apt-get install -y \
       libxdamage-dev \
       libxxf86vm-dev \
       gcc \
+      git \
+      libepoxy-dev \
+      libegl1-mesa-dev \
+      libgbm-dev \
       libclc-dev \
       libxvmc-dev \
       libomxil-bellagio-dev \
@@ -68,10 +83,31 @@ apt-get install -y \
       gettext \
       make
 
-# for 64bit windows cross-builds
+# Cross-build Mesa deps
+for arch in $CROSS_ARCHITECTURES; do
+    apt-get install -y \
+            libdrm-dev:${arch} \
+            libexpat1-dev:${arch} \
+            libelf-dev:${arch}
+done
 apt-get install -y \
-      wine64 \
-      mingw-w64
+        dpkg-dev \
+        gcc-aarch64-linux-gnu \
+        g++-aarch64-linux-gnu \
+        gcc-arm-linux-gnueabihf \
+        g++-arm-linux-gnueabihf \
+        gcc-i686-linux-gnu \
+        g++-i686-linux-gnu
+
+# for 64bit windows cross-builds
+apt-get install -y mingw-w64
+
+# for the vulkan overlay layer
+wget https://github.com/KhronosGroup/glslang/releases/download/master-tot/glslang-master-linux-Release.zip
+unzip glslang-master-linux-Release.zip bin/glslangValidator
+install -m755 bin/glslangValidator /usr/local/bin/
+rm bin/glslangValidator glslang-master-linux-Release.zip
+
 
 # dependencies where we want a specific version
 export              XORG_RELEASES=https://xorg.freedesktop.org/releases/individual
@@ -82,7 +118,7 @@ export         XORGMACROS_VERSION=util-macros-1.19.0
 export            GLPROTO_VERSION=glproto-1.4.17
 export          DRI2PROTO_VERSION=dri2proto-2.8
 export       LIBPCIACCESS_VERSION=libpciaccess-0.13.4
-export             LIBDRM_VERSION=libdrm-2.4.97
+export             LIBDRM_VERSION=libdrm-2.4.99
 export           XCBPROTO_VERSION=xcb-proto-1.13
 export         RANDRPROTO_VERSION=randrproto-1.3.0
 export          LIBXRANDR_VERSION=libXrandr-1.3.0
@@ -163,6 +199,13 @@ tar -xvf $WAYLAND_PROTOCOLS_VERSION.tar.xz && rm $WAYLAND_PROTOCOLS_VERSION.tar.
 cd $WAYLAND_PROTOCOLS_VERSION; ./configure; make install; cd ..
 rm -rf $WAYLAND_PROTOCOLS_VERSION
 
+pushd /usr/local
+git clone https://gitlab.freedesktop.org/mesa/shader-db.git --depth 1
+rm -rf shader-db/.git
+cd shader-db
+make
+popd
+
 # Use ccache to speed up builds
 apt-get install -y ccache
 
@@ -172,10 +215,10 @@ apt-get install -y libxml2-utils
 # Remove unused packages
 apt-get purge -y \
       automake \
+      git \
       libtool \
-      make \
       curl \
-      wget \
+      unzip \
       gnupg \
       software-properties-common
 apt-get autoremove -y --purge

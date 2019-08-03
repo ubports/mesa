@@ -42,6 +42,8 @@
 
 #include "xf86drm.h"
 
+int lima_plb_max_blk = 0;
+
 static void
 lima_screen_destroy(struct pipe_screen *pscreen)
 {
@@ -115,9 +117,12 @@ lima_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       return 1;
 
    case PIPE_CAP_TGSI_FS_POSITION_IS_SYSVAL:
+   case PIPE_CAP_TGSI_FS_POINT_IS_SYSVAL:
+   case PIPE_CAP_TGSI_FS_FACE_IS_INTEGER_SYSVAL:
       return 1;
 
-   case PIPE_CAP_MAX_TEXTURE_2D_LEVELS:
+   case PIPE_CAP_MAX_TEXTURE_2D_SIZE:
+      return 1 << (LIMA_MAX_MIP_LEVELS - 1);
    case PIPE_CAP_MAX_TEXTURE_3D_LEVELS:
    case PIPE_CAP_MAX_TEXTURE_CUBE_LEVELS:
       return LIMA_MAX_MIP_LEVELS;
@@ -245,7 +250,7 @@ lima_screen_get_shader_param(struct pipe_screen *pscreen,
    }
 }
 
-static boolean
+static bool
 lima_screen_is_format_supported(struct pipe_screen *pscreen,
                                 enum pipe_format format,
                                 enum pipe_texture_target target,
@@ -259,7 +264,7 @@ lima_screen_is_format_supported(struct pipe_screen *pscreen,
    case PIPE_TEXTURE_2D:
       break;
    default:
-      return FALSE;
+      return false;
    }
 
    if (MAX2(1, sample_count) != MAX2(1, storage_sample_count))
@@ -267,7 +272,7 @@ lima_screen_is_format_supported(struct pipe_screen *pscreen,
 
    /* be able to support 16, now limit to 4 */
    if (sample_count > 1 && sample_count != 4)
-      return FALSE;
+      return false;
 
    if (usage & PIPE_BIND_RENDER_TARGET) {
       switch (format) {
@@ -280,7 +285,7 @@ lima_screen_is_format_supported(struct pipe_screen *pscreen,
       case PIPE_FORMAT_Z24X8_UNORM:
          break;
       default:
-         return FALSE;
+         return false;
       }
    }
 
@@ -291,7 +296,7 @@ lima_screen_is_format_supported(struct pipe_screen *pscreen,
       case PIPE_FORMAT_Z24X8_UNORM:
          break;
       default:
-         return FALSE;
+         return false;
       }
    }
 
@@ -300,7 +305,7 @@ lima_screen_is_format_supported(struct pipe_screen *pscreen,
       case PIPE_FORMAT_R32G32B32_FLOAT:
          break;
       default:
-         return FALSE;
+         return false;
       }
    }
 
@@ -311,7 +316,7 @@ lima_screen_is_format_supported(struct pipe_screen *pscreen,
       case PIPE_FORMAT_I32_UINT:
          break;
       default:
-         return FALSE;
+         return false;
       }
    }
 
@@ -328,11 +333,11 @@ lima_screen_is_format_supported(struct pipe_screen *pscreen,
       case PIPE_FORMAT_Z24X8_UNORM:
          break;
       default:
-         return FALSE;
+         return false;
       }
    }
 
-   return TRUE;
+   return true;
 }
 
 static const void *
@@ -341,6 +346,37 @@ lima_screen_get_compiler_options(struct pipe_screen *pscreen,
                                  enum pipe_shader_type shader)
 {
    return lima_program_get_compiler_options(shader);
+}
+
+static bool
+lima_screen_set_plb_max_blk(struct lima_screen *screen)
+{
+   if (lima_plb_max_blk) {
+      screen->plb_max_blk = lima_plb_max_blk;
+      return true;
+   }
+
+   if (screen->gpu_type == DRM_LIMA_PARAM_GPU_ID_MALI450)
+      screen->plb_max_blk = 4096;
+   else
+      screen->plb_max_blk = 512;
+
+   drmDevicePtr devinfo;
+
+   if (drmGetDevice2(screen->fd, 0, &devinfo))
+      return false;
+
+   if (devinfo->bustype == DRM_BUS_PLATFORM && devinfo->deviceinfo.platform) {
+      char **compatible = devinfo->deviceinfo.platform->compatible;
+
+      if (compatible && *compatible)
+         if (!strcmp("allwinner,sun50i-h5-mali", *compatible))
+            screen->plb_max_blk = 2048;
+   }
+
+   drmFreeDevice(&devinfo);
+
+   return true;
 }
 
 static bool
@@ -368,6 +404,8 @@ lima_screen_query_info(struct lima_screen *screen)
       return false;
 
    screen->num_pp = param.value;
+
+   lima_screen_set_plb_max_blk(screen);
 
    return true;
 }
@@ -431,6 +469,13 @@ lima_screen_parse_env(void)
       lima_ctx_num_plb = LIMA_CTX_PLB_DEF_NUM;
    }
 
+   lima_plb_max_blk = debug_get_num_option("LIMA_PLB_MAX_BLK", 0);
+   if (lima_plb_max_blk < 0 || lima_plb_max_blk > 65536) {
+      fprintf(stderr, "lima: LIMA_PLB_MAX_BLK %d out of range [%d %d], "
+              "reset to default %d\n", lima_plb_max_blk, 0, 65536, 0);
+      lima_plb_max_blk = 0;
+   }
+
    lima_ppir_force_spilling = debug_get_num_option("LIMA_PPIR_FORCE_SPILLING", 0);
    if (lima_ppir_force_spilling < 0) {
       fprintf(stderr, "lima: LIMA_PPIR_FORCE_SPILLING %d less than 0, "
@@ -449,6 +494,8 @@ lima_screen_create(int fd, struct renderonly *ro)
       return NULL;
 
    screen->fd = fd;
+
+   lima_screen_parse_env();
 
    if (!lima_screen_query_info(screen))
       goto err_out0;
@@ -531,8 +578,6 @@ lima_screen_create(int fd, struct renderonly *ro)
    slab_create_parent(&screen->transfer_pool, sizeof(struct lima_transfer), 16);
 
    screen->refcnt = 1;
-
-   lima_screen_parse_env();
 
    return &screen->base;
 

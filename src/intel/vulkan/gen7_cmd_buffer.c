@@ -117,15 +117,33 @@ gen7_cmd_buffer_emit_scissor(struct anv_cmd_buffer *cmd_buffer)
 }
 #endif
 
-static const uint32_t vk_to_gen_index_type[] = {
-   [VK_INDEX_TYPE_UINT16]                       = INDEX_WORD,
-   [VK_INDEX_TYPE_UINT32]                       = INDEX_DWORD,
-};
+static uint32_t vk_to_gen_index_type(VkIndexType type)
+{
+   switch (type) {
+   case VK_INDEX_TYPE_UINT8_EXT:
+      return INDEX_BYTE;
+   case VK_INDEX_TYPE_UINT16:
+      return INDEX_WORD;
+   case VK_INDEX_TYPE_UINT32:
+      return INDEX_DWORD;
+   default:
+      unreachable("invalid index type");
+   }
+}
 
-static const uint32_t restart_index_for_type[] = {
-   [VK_INDEX_TYPE_UINT16]                    = UINT16_MAX,
-   [VK_INDEX_TYPE_UINT32]                    = UINT32_MAX,
-};
+static uint32_t restart_index_for_type(VkIndexType type)
+{
+   switch (type) {
+   case VK_INDEX_TYPE_UINT8_EXT:
+      return UINT8_MAX;
+   case VK_INDEX_TYPE_UINT16:
+      return UINT16_MAX;
+   case VK_INDEX_TYPE_UINT32:
+      return UINT32_MAX;
+   default:
+      unreachable("invalid index type");
+   }
+}
 
 void genX(CmdBindIndexBuffer)(
     VkCommandBuffer                             commandBuffer,
@@ -138,9 +156,9 @@ void genX(CmdBindIndexBuffer)(
 
    cmd_buffer->state.gfx.dirty |= ANV_CMD_DIRTY_INDEX_BUFFER;
    if (GEN_IS_HASWELL)
-      cmd_buffer->state.restart_index = restart_index_for_type[indexType];
+      cmd_buffer->state.restart_index = restart_index_for_type(indexType);
    cmd_buffer->state.gfx.gen7.index_buffer = buffer;
-   cmd_buffer->state.gfx.gen7.index_type = vk_to_gen_index_type[indexType];
+   cmd_buffer->state.gfx.gen7.index_type = vk_to_gen_index_type(indexType);
    cmd_buffer->state.gfx.gen7.index_offset = offset;
 }
 
@@ -285,42 +303,4 @@ genX(cmd_buffer_enable_pma_fix)(struct anv_cmd_buffer *cmd_buffer,
                                 bool enable)
 {
    /* The NP PMA fix doesn't exist on gen7 */
-}
-
-void genX(CmdSetEvent)(
-    VkCommandBuffer                             commandBuffer,
-    VkEvent                                     event,
-    VkPipelineStageFlags                        stageMask)
-{
-   anv_finishme("Implement events on gen7");
-}
-
-void genX(CmdResetEvent)(
-    VkCommandBuffer                             commandBuffer,
-    VkEvent                                     event,
-    VkPipelineStageFlags                        stageMask)
-{
-   anv_finishme("Implement events on gen7");
-}
-
-void genX(CmdWaitEvents)(
-    VkCommandBuffer                             commandBuffer,
-    uint32_t                                    eventCount,
-    const VkEvent*                              pEvents,
-    VkPipelineStageFlags                        srcStageMask,
-    VkPipelineStageFlags                        destStageMask,
-    uint32_t                                    memoryBarrierCount,
-    const VkMemoryBarrier*                      pMemoryBarriers,
-    uint32_t                                    bufferMemoryBarrierCount,
-    const VkBufferMemoryBarrier*                pBufferMemoryBarriers,
-    uint32_t                                    imageMemoryBarrierCount,
-    const VkImageMemoryBarrier*                 pImageMemoryBarriers)
-{
-   anv_finishme("Implement events on gen7");
-
-   genX(CmdPipelineBarrier)(commandBuffer, srcStageMask, destStageMask,
-                            false, /* byRegion */
-                            memoryBarrierCount, pMemoryBarriers,
-                            bufferMemoryBarrierCount, pBufferMemoryBarriers,
-                            imageMemoryBarrierCount, pImageMemoryBarriers);
 }

@@ -400,8 +400,8 @@ opt_split_alu_of_phi(nir_builder *b, nir_loop *loop)
        * should be one of the other two operands, so the result of the bcsel
        * should never be replaced with undef.
        *
-       * nir_op_vec{2,3,4}, nir_op_imov, and nir_op_fmov are excluded because
-       * they can easily lead to infinite optimization loops.
+       * nir_op_vec{2,3,4} and nir_op_mov are excluded because they can easily
+       * lead to infinite optimization loops.
        */
       if (alu->op == nir_op_bcsel ||
           alu->op == nir_op_b32csel ||
@@ -409,8 +409,7 @@ opt_split_alu_of_phi(nir_builder *b, nir_loop *loop)
           alu->op == nir_op_vec2 ||
           alu->op == nir_op_vec3 ||
           alu->op == nir_op_vec4 ||
-          alu->op == nir_op_imov ||
-          alu->op == nir_op_fmov ||
+          alu->op == nir_op_mov ||
           alu_instr_is_comparison(alu) ||
           alu_instr_is_type_conversion(alu))
          continue;
@@ -1039,6 +1038,13 @@ opt_if_loop_terminator(nir_if *nif)
 
    if (!nir_is_trivial_loop_if(nif, break_blk))
       return false;
+
+   /* Even though this if statement has a jump on one side, we may still have
+    * phis afterwards.  Single-source phis can be produced by loop unrolling
+    * or dead control-flow passes and are perfectly legal.  Run a quick phi
+    * removal on the block after the if to clean up any such phis.
+    */
+   nir_opt_remove_phis_block(nir_cf_node_as_block(nir_cf_node_next(&nif->cf_node)));
 
    /* Finally, move the continue from branch after the if-statement. */
    nir_cf_list tmp;

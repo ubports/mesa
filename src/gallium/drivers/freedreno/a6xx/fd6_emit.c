@@ -45,24 +45,6 @@
 #include "fd6_format.h"
 #include "fd6_zsa.h"
 
-static uint32_t
-shader_t_to_opcode(gl_shader_stage type)
-{
-	switch (type) {
-	case MESA_SHADER_VERTEX:
-	case MESA_SHADER_TESS_CTRL:
-	case MESA_SHADER_TESS_EVAL:
-	case MESA_SHADER_GEOMETRY:
-		return CP_LOAD_STATE6_GEOM;
-	case MESA_SHADER_FRAGMENT:
-	case MESA_SHADER_COMPUTE:
-	case MESA_SHADER_KERNEL:
-		return CP_LOAD_STATE6_FRAG;
-	default:
-		unreachable("bad shader type");
-	}
-}
-
 /* regid:          base const register
  * prsc or dwords: buffer containing constant values
  * sizedwords:     size of const value buffer
@@ -87,7 +69,7 @@ fd6_emit_const(struct fd_ringbuffer *ring, gl_shader_stage type,
 
 	align_sz = align(sz, 4);
 
-	OUT_PKT7(ring, shader_t_to_opcode(type), 3 + align_sz);
+	OUT_PKT7(ring, fd6_stage2opcode(type), 3 + align_sz);
 	OUT_RING(ring, CP_LOAD_STATE6_0_DST_OFF(regid/4) |
 			CP_LOAD_STATE6_0_STATE_TYPE(ST6_CONSTANTS) |
 			CP_LOAD_STATE6_0_STATE_SRC(src) |
@@ -121,7 +103,7 @@ fd6_emit_const_bo(struct fd_ringbuffer *ring, gl_shader_stage type, boolean writ
 
 	debug_assert((regid % 4) == 0);
 
-	OUT_PKT7(ring, shader_t_to_opcode(type), 3 + (2 * anum));
+	OUT_PKT7(ring, fd6_stage2opcode(type), 3 + (2 * anum));
 	OUT_RING(ring, CP_LOAD_STATE6_0_DST_OFF(regid/4) |
 			CP_LOAD_STATE6_0_STATE_TYPE(ST6_CONSTANTS)|
 			CP_LOAD_STATE6_0_STATE_SRC(SS6_DIRECT) |
@@ -567,12 +549,15 @@ fd6_emit_combined_textures(struct fd_ringbuffer *ring, struct fd6_emit *emit,
 	struct fd_context *ctx = emit->ctx;
 	bool needs_border = false;
 
-	static const enum fd6_state_id state_id[PIPE_SHADER_TYPES] = {
-		[PIPE_SHADER_VERTEX]    = FD6_GROUP_VS_TEX,
-		[PIPE_SHADER_FRAGMENT]  = FD6_GROUP_FS_TEX,
+	static const struct {
+		enum fd6_state_id state_id;
+		unsigned enable_mask;
+	} s[PIPE_SHADER_TYPES] = {
+		[PIPE_SHADER_VERTEX]    = { FD6_GROUP_VS_TEX, 0x7 },
+		[PIPE_SHADER_FRAGMENT]  = { FD6_GROUP_FS_TEX, 0x6 },
 	};
 
-	debug_assert(state_id[type]);
+	debug_assert(s[type].state_id);
 
 	if (!v->image_mapping.num_tex && !v->fb_read) {
 		/* in the fast-path, when we don't have to mix in any image/SSBO
@@ -596,7 +581,8 @@ fd6_emit_combined_textures(struct fd_ringbuffer *ring, struct fd6_emit *emit,
 
 			needs_border |= tex->needs_border;
 
-			fd6_emit_add_group(emit, tex->stateobj, state_id[type], 0x7);
+			fd6_emit_add_group(emit, tex->stateobj, s[type].state_id,
+					s[type].enable_mask);
 		}
 	} else {
 		/* In the slow-path, create a one-shot texture state object
@@ -616,7 +602,8 @@ fd6_emit_combined_textures(struct fd_ringbuffer *ring, struct fd6_emit *emit,
 			needs_border |= fd6_emit_textures(ctx->pipe, stateobj, type, tex,
 					bcolor_offset, v, ctx);
 
-			fd6_emit_add_group(emit, stateobj, state_id[type], 0x7);
+			fd6_emit_add_group(emit, stateobj, s[type].state_id,
+					s[type].enable_mask);
 
 			fd_ringbuffer_del(stateobj);
 		}
@@ -741,7 +728,7 @@ fd6_emit_streamout(struct fd_ringbuffer *ring, struct fd6_emit *emit, struct ir3
 		// TODO just give hw a dummy addr for now.. we should
 		// be using this an then CP_MEM_TO_REG to set the
 		// VPC_SO[i].BUFFER_OFFSET for the next draw..
-		OUT_RELOCW(ring, fd6_context(ctx)->blit_mem, 0x100, 0, 0);
+		OUT_RELOCW(ring, control_ptr(fd6_context(ctx), flush_base));
 
 		emit->streamout_mask |= (1 << i);
 	}
@@ -885,6 +872,7 @@ fd6_emit_state(struct fd_ringbuffer *ring, struct fd6_emit *emit)
 	}
 
 	if (dirty & FD_DIRTY_PROG) {
+		fd6_emit_add_group(emit, prog->config_stateobj, FD6_GROUP_PROG_CONFIG, 0x7);
 		fd6_emit_add_group(emit, prog->stateobj, FD6_GROUP_PROG, 0x6);
 		fd6_emit_add_group(emit, prog->binning_stateobj,
 				FD6_GROUP_PROG_BINNING, 0x1);
@@ -946,7 +934,6 @@ fd6_emit_state(struct fd_ringbuffer *ring, struct fd6_emit *emit)
 		struct fd_ringbuffer *vsconstobj = fd_submit_new_ringbuffer(
 				ctx->batch->submit, 0x1000, FD_RINGBUFFER_STREAMING);
 
-		OUT_WFI5(vsconstobj);
 		ir3_emit_vs_consts(vp, vsconstobj, ctx, emit->info);
 		fd6_emit_add_group(emit, vsconstobj, FD6_GROUP_VS_CONST, 0x7);
 		fd_ringbuffer_del(vsconstobj);
@@ -956,7 +943,6 @@ fd6_emit_state(struct fd_ringbuffer *ring, struct fd6_emit *emit)
 		struct fd_ringbuffer *fsconstobj = fd_submit_new_ringbuffer(
 				ctx->batch->submit, 0x1000, FD_RINGBUFFER_STREAMING);
 
-		OUT_WFI5(fsconstobj);
 		ir3_emit_fs_consts(fp, fsconstobj, ctx);
 		fd6_emit_add_group(emit, fsconstobj, FD6_GROUP_FS_CONST, 0x6);
 		fd_ringbuffer_del(fsconstobj);
@@ -995,6 +981,9 @@ fd6_emit_state(struct fd_ringbuffer *ring, struct fd6_emit *emit)
 			OUT_PKT4(ring, REG_A6XX_RB_MRT_BLEND_CONTROL(i), 1);
 			OUT_RING(ring, blend_control);
 		}
+
+		OUT_PKT4(ring, REG_A6XX_RB_DITHER_CNTL, 1);
+		OUT_RING(ring, blend->rb_dither_cntl);
 
 		OUT_PKT4(ring, REG_A6XX_SP_BLEND_CNTL, 1);
 		OUT_RING(ring, blend->sp_blend_cntl);
@@ -1043,10 +1032,13 @@ fd6_emit_state(struct fd_ringbuffer *ring, struct fd6_emit *emit)
 		OUT_PKT4(obj, REG_A6XX_SP_IBO_LO, 2);
 		OUT_RB(obj, state);
 
+		/* TODO if we used CP_SET_DRAW_STATE for compute shaders, we could
+		 * de-duplicate this from program->config_stateobj
+		 */
 		OUT_PKT4(obj, REG_A6XX_SP_IBO_COUNT, 1);
 		OUT_RING(obj, mapping->num_ibo);
 
-		fd6_emit_add_group(emit, obj, FD6_GROUP_IBO, 0x7);
+		fd6_emit_add_group(emit, obj, FD6_GROUP_IBO, 0x6);
 		fd_ringbuffer_del(obj);
 		fd_ringbuffer_del(state);
 	}
@@ -1156,6 +1148,8 @@ t7              opcode: CP_PERFCOUNTER_ACTION (50) (4 dwords)
 t7              opcode: CP_WAIT_FOR_IDLE (26) (1 dwords)
 0000000500024068:               70268000
 */
+
+	OUT_WFI5(ring);
 
 	WRITE(REG_A6XX_RB_CCU_CNTL, 0x7c400004);
 	WRITE(REG_A6XX_RB_UNKNOWN_8E04, 0x00100000);
@@ -1318,7 +1312,7 @@ fd6_framebuffer_barrier(struct fd_context *ctx)
 
 	OUT_PKT7(ring, CP_WAIT_REG_MEM, 6);
 	OUT_RING(ring, 0x00000013);
-	OUT_RELOC(ring, fd6_ctx->blit_mem, 0, 0, 0);
+	OUT_RELOC(ring, control_ptr(fd6_ctx, seqno));
 	OUT_RING(ring, seqno);
 	OUT_RING(ring, 0xffffffff);
 	OUT_RING(ring, 0x00000010);
@@ -1332,7 +1326,7 @@ fd6_framebuffer_barrier(struct fd_context *ctx)
 
 	OUT_PKT7(ring, CP_UNK_A6XX_14, 4);
 	OUT_RING(ring, 0x00000000);
-	OUT_RELOC(ring, fd6_ctx->blit_mem, 0, 0, 0);
+	OUT_RELOC(ring, control_ptr(fd6_ctx, seqno));
 	OUT_RING(ring, seqno);
 }
 

@@ -378,6 +378,9 @@ static const struct vgpu10_format_entry format_conversion_table[] =
    { PIPE_FORMAT_ATC_RGB,               SVGA3D_FORMAT_INVALID,      SVGA3D_FORMAT_INVALID,       SVGA3D_FORMAT_INVALID,       0 },
    { PIPE_FORMAT_ATC_RGBA_EXPLICIT,     SVGA3D_FORMAT_INVALID,      SVGA3D_FORMAT_INVALID,       SVGA3D_FORMAT_INVALID,       0 },
    { PIPE_FORMAT_ATC_RGBA_INTERPOLATED, SVGA3D_FORMAT_INVALID,      SVGA3D_FORMAT_INVALID,       SVGA3D_FORMAT_INVALID,       0 },
+   { PIPE_FORMAT_Z24_UNORM_S8_UINT_AS_R8G8B8A8, SVGA3D_FORMAT_INVALID, SVGA3D_FORMAT_INVALID,    SVGA3D_FORMAT_INVALID,       0 },
+   { PIPE_FORMAT_AYUV,                  SVGA3D_FORMAT_INVALID,      SVGA3D_FORMAT_INVALID,       SVGA3D_FORMAT_INVALID,       0 },
+   { PIPE_FORMAT_XYUV,                  SVGA3D_FORMAT_INVALID,      SVGA3D_FORMAT_INVALID,       SVGA3D_FORMAT_INVALID,       0 },
 };
 
 
@@ -2274,7 +2277,7 @@ svga_linear_to_srgb(SVGA3dSurfaceFormat format)
  * Implement pipe_screen::is_format_supported().
  * \param bindings  bitmask of PIPE_BIND_x flags
  */
-boolean
+bool
 svga_is_format_supported(struct pipe_screen *screen,
                          enum pipe_format format,
                          enum pipe_texture_target target,
@@ -2292,17 +2295,17 @@ svga_is_format_supported(struct pipe_screen *screen,
 
    /* Multisamples is not supported in VGPU9 device */
    if (sample_count > 1)
-      return FALSE;
+      return false;
 
    svga_format = svga_translate_format(ss, format, bindings);
    if (svga_format == SVGA3D_FORMAT_INVALID) {
-      return FALSE;
+      return false;
    }
 
    if (util_format_is_srgb(format) &&
        (bindings & PIPE_BIND_DISPLAY_TARGET)) {
        /* We only support sRGB rendering with vgpu10 */
-      return FALSE;
+      return false;
    }
 
    /*
@@ -2330,10 +2333,10 @@ svga_is_format_supported(struct pipe_screen *screen,
        */
       case SVGA3D_A4R4G4B4:
       case SVGA3D_A1R5G5B5:
-         return FALSE;
+         return false;
 
       default:
-         return FALSE;
+         return false;
       }
    }
 
@@ -2348,7 +2351,7 @@ svga_is_format_supported(struct pipe_screen *screen,
        */
       if (!svga_format_is_integer(svga_format) &&
           (caps.value & SVGA3DFORMAT_OP_NOALPHABLEND)) {
-         return FALSE;
+         return false;
       }
    }
 
@@ -2375,7 +2378,7 @@ svga_is_format_supported(struct pipe_screen *screen,
  * Implement pipe_screen::is_format_supported() for VGPU10 device.
  * \param bindings  bitmask of PIPE_BIND_x flags
  */
-boolean
+bool
 svga_is_dx_format_supported(struct pipe_screen *screen,
                             enum pipe_format format,
                             enum pipe_texture_target target,
@@ -2399,7 +2402,7 @@ svga_is_dx_format_supported(struct pipe_screen *screen,
        * multisample with N+1 samples per pixel.
        */
       if ((ss->ms_samples & (1 << (sample_count - 1))) == 0) {
-         return FALSE;
+         return false;
       }
       mask |= SVGA3D_DXFMT_MULTISAMPLE;
    }
@@ -2417,7 +2420,7 @@ svga_is_dx_format_supported(struct pipe_screen *screen,
 
    svga_format = svga_translate_format(ss, format, bindings);
    if (svga_format == SVGA3D_FORMAT_INVALID) {
-      return FALSE;
+      return false;
    }
 
    /*
@@ -2445,10 +2448,10 @@ svga_is_dx_format_supported(struct pipe_screen *screen,
        */
       case SVGA3D_A4R4G4B4:
       case SVGA3D_A1R5G5B5:
-         return FALSE;
+         return false;
 
       default:
-         return FALSE;
+         return false;
       }
    }
 
@@ -2463,7 +2466,7 @@ svga_is_dx_format_supported(struct pipe_screen *screen,
        */
       if (!(svga_format_is_integer(svga_format) ||
             (caps.u & SVGA3D_DXFMT_BLENDABLE))) {
-         return FALSE;
+         return false;
       }
       mask |= SVGA3D_DXFMT_COLOR_RENDERTARGET;
    }
@@ -2486,7 +2489,7 @@ svga_is_dx_format_supported(struct pipe_screen *screen,
 
    /* Is the format supported for rendering */
    if ((caps.u & mask) != mask)
-      return FALSE;
+      return false;
 
    if (bindings & PIPE_BIND_SAMPLER_VIEW) {
       SVGA3dSurfaceFormat sampler_format;
@@ -2499,9 +2502,9 @@ svga_is_dx_format_supported(struct pipe_screen *screen,
          mask &= SVGA3D_DXFMT_VOLUME;
          mask |= SVGA3D_DXFMT_SHADER_SAMPLE;
          if ((caps.u & mask) != mask)
-            return FALSE;
+            return false;
       }
    }
 
-   return TRUE;
+   return true;
 }

@@ -87,7 +87,7 @@ blit_surf_for_image_level_layer(struct radv_image *image,
 {
 	VkFormat format = radv_get_aspect_format(image, aspect_mask);
 
-	if (!radv_image_has_dcc(image) &&
+	if (!radv_dcc_enabled(image, subres->mipLevel) &&
 	    !(radv_image_is_tc_compat_htile(image)))
 		format = vk_format_for_size(vk_format_get_blocksize(format));
 
@@ -191,7 +191,7 @@ meta_copy_buffer_to_image(struct radv_cmd_buffer *cmd_buffer,
 			uint32_t queue_mask = radv_image_queue_family_mask(image,
 			                                                   cmd_buffer->queue_family_index,
 			                                                   cmd_buffer->queue_family_index);
-			MAYBE_UNUSED bool compressed = radv_layout_dcc_compressed(image, layout, queue_mask);
+			bool compressed = radv_layout_dcc_compressed(image, layout, queue_mask);
 			if (compressed) {
 				radv_decompress_dcc(cmd_buffer, image, &(VkImageSubresourceRange) {
 								.aspectMask = pRegions[r].imageSubresource.aspectMask,
@@ -335,7 +335,7 @@ meta_copy_image_to_buffer(struct radv_cmd_buffer *cmd_buffer,
 			uint32_t queue_mask = radv_image_queue_family_mask(image,
 			                                                   cmd_buffer->queue_family_index,
 			                                                   cmd_buffer->queue_family_index);
-			MAYBE_UNUSED bool compressed = radv_layout_dcc_compressed(image, layout, queue_mask);
+			bool compressed = radv_layout_dcc_compressed(image, layout, queue_mask);
 			if (compressed) {
 				radv_decompress_dcc(cmd_buffer, image, &(VkImageSubresourceRange) {
 								.aspectMask = pRegions[r].imageSubresource.aspectMask,

@@ -125,6 +125,7 @@ files_libnir = files(
   'nir_lower_double_ops.c',
   'nir_lower_drawpixels.c',
   'nir_lower_fb_read.c',
+  'nir_lower_flrp.c',
   'nir_lower_fragcoord_wtrans.c',
   'nir_lower_frexp.c',
   'nir_lower_global_vars_to_local.c',
@@ -133,7 +134,10 @@ files_libnir = files(
   'nir_lower_locals_to_regs.c',
   'nir_lower_idiv.c',
   'nir_lower_indirect_derefs.c',
+  'nir_lower_input_attachments.c',
   'nir_lower_int64.c',
+  'nir_lower_interpolation.c',
+  'nir_lower_int_to_float.c',
   'nir_lower_io.c',
   'nir_lower_io_arrays_to_elements.c',
   'nir_lower_io_to_temporaries.c',
@@ -184,10 +188,12 @@ files_libnir = files(
   'nir_opt_move_comparisons.c',
   'nir_opt_move_load_ubo.c',
   'nir_opt_peephole_select.c',
+  'nir_opt_rematerialize_compares.c',
   'nir_opt_remove_phis.c',
   'nir_opt_shrink_load.c',
   'nir_opt_trivial_continues.c',
   'nir_opt_undef.c',
+  'nir_opt_vectorize.c',
   'nir_phi_builder.c',
   'nir_phi_builder.h',
   'nir_print.c',
@@ -261,9 +267,8 @@ if with_tests
       files('tests/control_flow_tests.cpp'),
       cpp_args : [cpp_vis_args, cpp_msvc_compat_args],
       include_directories : [inc_common],
-      dependencies : [dep_thread, idep_gtest, idep_nir],
-      link_with : libmesa_util,
-    ), 
+      dependencies : [dep_thread, idep_gtest, idep_nir, idep_mesautil],
+    ),
     suite : ['compiler', 'nir'],
   )
 
@@ -274,8 +279,7 @@ if with_tests
       files('tests/vars_tests.cpp'),
       cpp_args : [cpp_vis_args, cpp_msvc_compat_args],
       include_directories : [inc_common],
-      dependencies : [dep_thread, idep_gtest, idep_nir],
-      link_with : libmesa_util,
+      dependencies : [dep_thread, idep_gtest, idep_nir, idep_mesautil],
     ),
     suite : ['compiler', 'nir'],
   )
@@ -295,8 +299,18 @@ if with_tests
       files('tests/negative_equal_tests.cpp'),
       c_args : [c_vis_args, c_msvc_compat_args, no_override_init_args],
       include_directories : [inc_common],
-      dependencies : [dep_thread, idep_gtest, idep_nir],
-      link_with : libmesa_util,
+      dependencies : [dep_thread, idep_gtest, idep_nir, idep_mesautil],
+    )
+  )
+
+  test(
+    'comparison_pre',
+    executable(
+      'comparison_pre',
+      files('tests/comparison_pre_tests.cpp'),
+      c_args : [c_vis_args, c_msvc_compat_args, no_override_init_args],
+      include_directories : [inc_common],
+      dependencies : [dep_thread, idep_gtest, idep_nir, idep_mesautil],
     )
   )
 endif

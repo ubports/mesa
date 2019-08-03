@@ -875,6 +875,16 @@ brw_finish_drawing(struct gl_context *ctx)
       brw_bo_unreference(brw->draw.draw_params_count_bo);
       brw->draw.draw_params_count_bo = NULL;
    }
+
+   if (brw->draw.draw_params_bo) {
+      brw_bo_unreference(brw->draw.draw_params_bo);
+      brw->draw.draw_params_bo = NULL;
+   }
+
+   if (brw->draw.derived_draw_params_bo) {
+      brw_bo_unreference(brw->draw.derived_draw_params_bo);
+      brw->draw.derived_draw_params_bo = NULL;
+   }
 }
 
 /**
@@ -889,7 +899,7 @@ gen9_emit_preempt_wa(struct brw_context *brw,
                      const struct _mesa_prim *prim)
 {
    bool object_preemption = true;
-   const struct gen_device_info *devinfo = &brw->screen->devinfo;
+   ASSERTED const struct gen_device_info *devinfo = &brw->screen->devinfo;
 
    /* Only apply these workarounds for gen9 */
    assert(devinfo->gen == 9);

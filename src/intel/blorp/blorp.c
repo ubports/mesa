@@ -165,7 +165,7 @@ brw_blorp_init_wm_prog_key(struct brw_wm_prog_key *wm_key)
    memset(wm_key, 0, sizeof(*wm_key));
    wm_key->nr_color_regions = 1;
    for (int i = 0; i < MAX_SAMPLERS; i++)
-      wm_key->tex.swizzles[i] = SWIZZLE_XYZW;
+      wm_key->base.tex.swizzles[i] = SWIZZLE_XYZW;
 }
 
 const unsigned *
@@ -192,7 +192,7 @@ blorp_compile_fs(struct blorp_context *blorp, void *mem_ctx,
     */
    wm_prog_data->base.binding_table.texture_start = BLORP_TEXTURE_BT_INDEX;
 
-   nir = brw_preprocess_nir(compiler, nir, NULL);
+   brw_preprocess_nir(compiler, nir, NULL);
    nir_remove_dead_variables(nir, nir_var_shader_in);
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
 
@@ -221,7 +221,7 @@ blorp_compile_vs(struct blorp_context *blorp, void *mem_ctx,
    nir->options =
       compiler->glsl_compiler_options[MESA_SHADER_VERTEX].NirOptions;
 
-   nir = brw_preprocess_nir(compiler, nir, NULL);
+   brw_preprocess_nir(compiler, nir, NULL);
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
 
    vs_prog_data->inputs_read = nir->info.inputs_read;

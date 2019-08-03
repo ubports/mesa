@@ -46,6 +46,7 @@
 #include "main/framebuffer.h"
 #include "main/stencil.h"
 #include "main/state.h"
+#include "main/spirv_extensions.h"
 
 #include "vbo/vbo.h"
 
@@ -477,11 +478,11 @@ brw_initialize_context_constants(struct brw_context *brw)
    ctx->Const.MaxImageUnits = MAX_IMAGE_UNITS;
    if (devinfo->gen >= 7) {
       ctx->Const.MaxRenderbufferSize = 16384;
-      ctx->Const.MaxTextureLevels = MIN2(15 /* 16384 */, MAX_TEXTURE_LEVELS);
+      ctx->Const.MaxTextureSize = 16384;
       ctx->Const.MaxCubeTextureLevels = 15; /* 16384 */
    } else {
       ctx->Const.MaxRenderbufferSize = 8192;
-      ctx->Const.MaxTextureLevels = MIN2(14 /* 8192 */, MAX_TEXTURE_LEVELS);
+      ctx->Const.MaxTextureSize = 8192;
       ctx->Const.MaxCubeTextureLevels = 14; /* 8192 */
    }
    ctx->Const.Max3DTextureLevels = 12; /* 2048 */
@@ -620,6 +621,8 @@ brw_initialize_context_constants(struct brw_context *brw)
    if (devinfo->gen >= 5 || devinfo->is_g4x)
       ctx->Const.MaxClipPlanes = 8;
 
+   ctx->Const.GLSLFragCoordIsSysVal = true;
+   ctx->Const.GLSLFrontFacingIsSysVal = true;
    ctx->Const.GLSLTessLevelsAsInputs = true;
    ctx->Const.PrimitiveRestartForPatches = true;
 
@@ -1126,8 +1129,16 @@ brwCreateContext(gl_api api,
    _mesa_compute_version(ctx);
 
    /* GL_ARB_gl_spirv */
-   if (ctx->Extensions.ARB_gl_spirv)
+   if (ctx->Extensions.ARB_gl_spirv) {
       brw_initialize_spirv_supported_capabilities(brw);
+
+      if (ctx->Extensions.ARB_spirv_extensions) {
+         /* GL_ARB_spirv_extensions */
+         ctx->Const.SpirVExtensions = MALLOC_STRUCT(spirv_supported_extensions);
+         _mesa_fill_supported_spirv_extensions(ctx->Const.SpirVExtensions,
+                                               &ctx->Const.SpirVCapabilities);
+      }
+   }
 
    _mesa_initialize_dispatch_tables(ctx);
    _mesa_initialize_vbo_vtxfmt(ctx);
