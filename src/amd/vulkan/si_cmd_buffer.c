@@ -161,9 +161,12 @@ si_emit_graphics(struct radv_physical_device *physical_device,
 {
 	int i;
 
-	radeon_emit(cs, PKT3(PKT3_CONTEXT_CONTROL, 1, 0));
-	radeon_emit(cs, CONTEXT_CONTROL_LOAD_ENABLE(1));
-	radeon_emit(cs, CONTEXT_CONTROL_SHADOW_ENABLE(1));
+	/* Since amdgpu version 3.6.0, CONTEXT_CONTROL is emitted by the kernel */
+	if (physical_device->rad_info.drm_minor < 6) {
+		radeon_emit(cs, PKT3(PKT3_CONTEXT_CONTROL, 1, 0));
+		radeon_emit(cs, CONTEXT_CONTROL_LOAD_ENABLE(1));
+		radeon_emit(cs, CONTEXT_CONTROL_SHADOW_ENABLE(1));
+	}
 
 	if (physical_device->has_clear_state) {
 		radeon_emit(cs, PKT3(PKT3_CLEAR_STATE, 0, 0));
@@ -189,7 +192,8 @@ si_emit_graphics(struct radv_physical_device *physical_device,
 		radeon_set_context_reg(cs, R_028B98_VGT_STRMOUT_BUFFER_CONFIG, 0x0);
 	}
 
-	radeon_set_context_reg(cs, R_028AA0_VGT_INSTANCE_STEP_RATE_0, 1);
+	if (physical_device->rad_info.chip_class <= GFX9)
+		radeon_set_context_reg(cs, R_028AA0_VGT_INSTANCE_STEP_RATE_0, 1);
 	if (!physical_device->has_clear_state)
 		radeon_set_context_reg(cs, R_028AB8_VGT_VTX_CNT_EN, 0x0);
 	if (physical_device->rad_info.chip_class < GFX7)
@@ -363,8 +367,6 @@ si_emit_graphics(struct radv_physical_device *physical_device,
 		radeon_set_context_reg(cs, R_028C50_PA_SC_NGG_MODE_CNTL,
 				       S_028C50_MAX_DEALLOCS_IN_WAVE(512));
 		radeon_set_context_reg(cs, R_028C58_VGT_VERTEX_REUSE_BLOCK_CNTL, 14);
-		radeon_set_context_reg(cs, R_02835C_PA_SC_TILE_STEERING_OVERRIDE,
-				       physical_device->rad_info.pa_sc_tile_steering_override);
 		radeon_set_context_reg(cs, R_02807C_DB_RMI_L2_CACHE_CONTROL,
 				       S_02807C_Z_WR_POLICY(V_02807C_CACHE_STREAM_WR) |
 				       S_02807C_S_WR_POLICY(V_02807C_CACHE_STREAM_WR) |
@@ -436,6 +438,7 @@ si_emit_graphics(struct radv_physical_device *physical_device,
 			break;
 		case CHIP_RAVEN:
 		case CHIP_RAVEN2:
+		case CHIP_RENOIR:
 		case CHIP_NAVI10:
 		case CHIP_NAVI12:
 			pc_lines = 1024;
@@ -454,7 +457,7 @@ si_emit_graphics(struct radv_physical_device *physical_device,
 		}
 
 		radeon_set_context_reg(cs, R_028C48_PA_SC_BINNER_CNTL_1,
-				       S_028C48_MAX_ALLOC_COUNT(max_alloc_count) |
+				       S_028C48_MAX_ALLOC_COUNT(max_alloc_count - 1) |
 				       S_028C48_MAX_PRIM_PER_BATCH(1023));
 		radeon_set_context_reg(cs, R_028C4C_PA_SC_CONSERVATIVE_RASTERIZATION_CNTL,
 				       S_028C4C_NULL_SQUAD_AA_MASK_ENABLE(1));

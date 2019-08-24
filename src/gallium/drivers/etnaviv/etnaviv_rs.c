@@ -262,15 +262,13 @@ etna_rs_gen_clear_surface(struct etna_context *ctx, struct etna_surface *surf,
    case 32:
       format = RS_FORMAT_A8R8G8B8;
       break;
-   default:
-      format = ETNA_NO_MATCH;
+   case 64:
+      assert(ctx->specs.halti >= 2);
+      format = RS_FORMAT_64BPP_CLEAR;
       break;
-   }
-
-   if (format == ETNA_NO_MATCH) {
-      BUG("etna_rs_gen_clear_surface: Unhandled clear fmt %s", util_format_name(surf->base.format));
-      format = RS_FORMAT_A8R8G8B8;
-      assert(0);
+   default:
+      unreachable("bpp not supported for clear by RS");
+      break;
    }
 
    /* use tiled clear if width is multiple of 16 */
@@ -597,15 +595,6 @@ etna_try_rs_blit(struct pipe_context *pctx,
    etna_get_rs_alignment_mask(ctx, dst->layout, &w_mask, &h_mask);
    if ((blit_info->dst.box.x & w_mask) || (blit_info->dst.box.y & h_mask))
       return false;
-
-   /* Ensure that the Z coordinate is sane */
-   if (dst->base.target != PIPE_TEXTURE_CUBE)
-      assert(blit_info->dst.box.z == 0);
-   if (src->base.target != PIPE_TEXTURE_CUBE)
-      assert(blit_info->src.box.z == 0);
-
-   assert(blit_info->src.box.z < src->base.array_size);
-   assert(blit_info->dst.box.z < dst->base.array_size);
 
    struct etna_resource_level *src_lev = &src->levels[blit_info->src.level];
    struct etna_resource_level *dst_lev = &dst->levels[blit_info->dst.level];

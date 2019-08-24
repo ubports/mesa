@@ -26,6 +26,7 @@
 #include "ac_gpu_info.h"
 #include "sid.h"
 
+#include "util/macros.h"
 #include "util/u_math.h"
 
 #include <stdio.h>
@@ -460,7 +461,7 @@ bool ac_query_gpu_info(int fd, void *dev_p,
 	info->gart_page_size = alignment_info.size_remote;
 
 	if (info->chip_class == GFX6)
-		info->gfx_ib_pad_with_type2 = TRUE;
+		info->gfx_ib_pad_with_type2 = true;
 
 	unsigned ib_align = 0;
 	ib_align = MAX2(ib_align, gfx.ib_start_alignment);
@@ -477,7 +478,8 @@ bool ac_query_gpu_info(int fd, void *dev_p,
 
 	if (info->drm_minor >= 31 &&
 	    (info->family == CHIP_RAVEN ||
-	     info->family == CHIP_RAVEN2)) {
+	     info->family == CHIP_RAVEN2 ||
+	     info->family == CHIP_RENOIR)) {
 		if (info->num_render_backends == 1)
 			info->use_display_dcc_unaligned = true;
 		else
@@ -485,8 +487,7 @@ bool ac_query_gpu_info(int fd, void *dev_p,
 	}
 
 	info->has_gds_ordered_append = info->chip_class >= GFX7 &&
-				       info->drm_minor >= 29 &&
-				       HAVE_LLVM >= 0x0800;
+				       info->drm_minor >= 29;
 	return true;
 }
 

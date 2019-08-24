@@ -247,7 +247,7 @@ radv_optimize_nir(struct nir_shader *shader, bool optimize_conservatively,
 
 	NIR_PASS(progress, shader, nir_opt_conditional_discard);
         NIR_PASS(progress, shader, nir_opt_shrink_load);
-        NIR_PASS(progress, shader, nir_opt_move_load_ubo);
+        NIR_PASS(progress, shader, nir_opt_move, nir_move_load_ubo);
 }
 
 nir_shader *
@@ -297,7 +297,7 @@ radv_shader_compile_to_nir(struct radv_device *device,
 			.lower_ubo_ssbo_access_to_offsets = true,
 			.caps = {
 				.amd_gcn_shader = true,
-				.amd_shader_ballot = device->instance->perftest_flags & RADV_PERFTEST_SHADER_BALLOT,
+				.amd_shader_ballot = device->physical_device->use_shader_ballot,
 				.amd_trinary_minmax = true,
 				.derivative_group = true,
 				.descriptor_array_dynamic_indexing = true,
@@ -667,17 +667,6 @@ radv_get_shader_binary_size(size_t code_size)
 	return code_size + DEBUGGER_NUM_MARKERS * 4;
 }
 
-static uint8_t
-radv_get_shader_wave_size(const struct radv_physical_device *pdevice,
-			  gl_shader_stage stage)
-{
-	if (stage == MESA_SHADER_COMPUTE)
-		return pdevice->cs_wave_size;
-	else if (stage == MESA_SHADER_FRAGMENT)
-		return pdevice->ps_wave_size;
-	return pdevice->ge_wave_size;
-}
-
 static void radv_postprocess_config(const struct radv_physical_device *pdevice,
 				    const struct ac_shader_config *config_in,
 				    const struct radv_shader_variant_info *info,
@@ -685,7 +674,6 @@ static void radv_postprocess_config(const struct radv_physical_device *pdevice,
 				    struct ac_shader_config *config_out)
 {
 	bool scratch_enabled = config_in->scratch_bytes_per_wave > 0;
-	uint8_t wave_size = radv_get_shader_wave_size(pdevice, stage);
 	unsigned vgpr_comp_cnt = 0;
 	unsigned num_input_vgprs = info->num_input_vgprs;
 
@@ -756,7 +744,7 @@ static void radv_postprocess_config(const struct radv_physical_device *pdevice,
 			    S_00B12C_SO_EN(!!info->info.so.num_outputs);
 
 	config_out->rsrc1 = S_00B848_VGPRS((num_vgprs - 1) /
-					   (wave_size == 32 ? 8 : 4)) |
+					   (info->info.wave_size == 32 ? 8 : 4)) |
 			    S_00B848_DX10_CLAMP(1) |
 			    S_00B848_FLOAT_MODE(config_out->float_mode);
 
@@ -821,10 +809,12 @@ static void radv_postprocess_config(const struct radv_physical_device *pdevice,
 			 * If PrimID is disabled. InstanceID / StepRate1 is loaded instead.
 			 * StepRate0 is set to 1. so that VGPR3 doesn't have to be loaded.
 			 */
-			if (info->vs.export_prim_id) {
+			if (info->info.vs.needs_instance_id && pdevice->rad_info.chip_class >= GFX10) {
+				vgpr_comp_cnt = 3;
+			} else if (info->vs.export_prim_id) {
 				vgpr_comp_cnt = 2;
 			} else if (info->info.vs.needs_instance_id) {
-				vgpr_comp_cnt = pdevice->rad_info.chip_class >= GFX10 ? 3 : 1;
+				vgpr_comp_cnt = 1;
 			} else {
 				vgpr_comp_cnt = 0;
 			}
@@ -952,15 +942,8 @@ static void radv_init_llvm_target()
 	 *
 	 * "mesa" is the prefix for error messages.
 	 */
-	if (HAVE_LLVM >= 0x0800) {
-		const char *argv[2] = { "mesa", "-simplifycfg-sink-common=false" };
-		LLVMParseCommandLineOptions(2, argv, NULL);
-
-	} else {
-		const char *argv[3] = { "mesa", "-simplifycfg-sink-common=false",
-					"-amdgpu-skip-threshold=1" };
-		LLVMParseCommandLineOptions(3, argv, NULL);
-	}
+	const char *argv[2] = { "mesa", "-simplifycfg-sink-common=false" };
+	LLVMParseCommandLineOptions(2, argv, NULL);
 }
 
 static once_flag radv_init_llvm_target_once_flag = ONCE_FLAG_INIT;
@@ -972,7 +955,8 @@ static void radv_init_llvm_once(void)
 
 struct radv_shader_variant *
 radv_shader_variant_create(struct radv_device *device,
-			   const struct radv_shader_binary *binary)
+			   const struct radv_shader_binary *binary,
+			   bool keep_shader_info)
 {
 	struct ac_shader_config config = {0};
 	struct ac_rtld_binary rtld_binary = {0};
@@ -1023,14 +1007,10 @@ radv_shader_variant_create(struct radv_device *device,
 				sym->size -= 32;
 		}
 
-		uint8_t wave_size =
-			radv_get_shader_wave_size(device->physical_device,
-						  binary->stage);
-
 		struct ac_rtld_open_info open_info = {
 			.info = &device->physical_device->rad_info,
 			.shader_type = binary->stage,
-			.wave_size = wave_size,
+			.wave_size = binary->variant_info.info.wave_size,
 			.num_parts = 1,
 			.elf_ptrs = &elf_data,
 			.elf_sizes = &elf_size,
@@ -1081,7 +1061,7 @@ radv_shader_variant_create(struct radv_device *device,
 			return NULL;
 		}
 
-		if (device->keep_shader_info ||
+		if (keep_shader_info ||
 		    (device->instance->debug_flags & RADV_DEBUG_DUMP_SHADERS)) {
 			const char *disasm_data;
 			size_t disasm_size;
@@ -1113,6 +1093,29 @@ radv_shader_variant_create(struct radv_device *device,
 	return variant;
 }
 
+static char *
+radv_dump_nir_shaders(struct nir_shader * const *shaders,
+                      int shader_count)
+{
+	char *data = NULL;
+	char *ret = NULL;
+	size_t size = 0;
+	FILE *f = open_memstream(&data, &size);
+	if (f) {
+		for (int i = 0; i < shader_count; ++i)
+			nir_print_shader(shaders[i], f);
+		fclose(f);
+	}
+
+	ret = malloc(size + 1);
+	if (ret) {
+		memcpy(ret, data, size);
+		ret[size] = 0;
+	}
+	free(data);
+	return ret;
+}
+
 static struct radv_shader_variant *
 shader_variant_compile(struct radv_device *device,
 		       struct radv_shader_module *module,
@@ -1121,6 +1124,7 @@ shader_variant_compile(struct radv_device *device,
 		       gl_shader_stage stage,
 		       struct radv_nir_compiler_options *options,
 		       bool gs_copy_shader,
+		       bool keep_shader_info,
 		       struct radv_shader_binary **binary_out)
 {
 	enum radeon_family chip_family = device->physical_device->rad_info.family;
@@ -1138,13 +1142,20 @@ shader_variant_compile(struct radv_device *device,
 	options->dump_shader = radv_can_dump_shader(device, module, gs_copy_shader);
 	options->dump_preoptir = options->dump_shader &&
 				 device->instance->debug_flags & RADV_DEBUG_PREOPTIR;
-	options->record_llvm_ir = device->keep_shader_info;
+	options->record_llvm_ir = keep_shader_info;
 	options->check_ir = device->instance->debug_flags & RADV_DEBUG_CHECKIR;
 	options->tess_offchip_block_dw_size = device->tess_offchip_block_dw_size;
 	options->address32_hi = device->physical_device->rad_info.address32_hi;
-	options->cs_wave_size = device->physical_device->cs_wave_size;
-	options->ps_wave_size = device->physical_device->ps_wave_size;
-	options->ge_wave_size = device->physical_device->ge_wave_size;
+
+	if ((stage == MESA_SHADER_GEOMETRY && !options->key.vs_common_out.as_ngg) ||
+	    gs_copy_shader)
+		options->wave_size = 64;
+	else if (stage == MESA_SHADER_COMPUTE)
+		options->wave_size = device->physical_device->cs_wave_size;
+	else if (stage == MESA_SHADER_FRAGMENT)
+		options->wave_size = device->physical_device->ps_wave_size;
+	else
+		options->wave_size = device->physical_device->ge_wave_size;
 
 	if (options->supports_spill)
 		tm_options |= AC_TM_SUPPORTS_SPILL;
@@ -1160,7 +1171,7 @@ shader_variant_compile(struct radv_device *device,
 	radv_init_llvm_compiler(&ac_llvm,
 				thread_compiler,
 				chip_family, tm_options,
-				radv_get_shader_wave_size(device->physical_device, stage));
+				options->wave_size);
 	if (gs_copy_shader) {
 		assert(shader_count == 1);
 		radv_compile_gs_copy_shader(&ac_llvm, *shaders, &binary,
@@ -1173,7 +1184,8 @@ shader_variant_compile(struct radv_device *device,
 
 	radv_destroy_llvm_compiler(&ac_llvm, thread_compiler);
 
-	struct radv_shader_variant *variant = radv_shader_variant_create(device, binary);
+	struct radv_shader_variant *variant = radv_shader_variant_create(device, binary,
+									 keep_shader_info);
 	if (!variant) {
 		free(binary);
 		return NULL;
@@ -1184,9 +1196,9 @@ shader_variant_compile(struct radv_device *device,
 	}
 
 
-	if (device->keep_shader_info) {
+	if (keep_shader_info) {
+		variant->nir_string = radv_dump_nir_shaders(shaders, shader_count);
 		if (!gs_copy_shader && !module->nir) {
-			variant->nir = *shaders;
 			variant->spirv = (uint32_t *)module->data;
 			variant->spirv_size = module->size;
 		}
@@ -1207,6 +1219,7 @@ radv_shader_variant_compile(struct radv_device *device,
 			   int shader_count,
 			   struct radv_pipeline_layout *layout,
 			   const struct radv_shader_variant_key *key,
+			   bool keep_shader_info,
 			   struct radv_shader_binary **binary_out)
 {
 	struct radv_nir_compiler_options options = {0};
@@ -1220,13 +1233,14 @@ radv_shader_variant_compile(struct radv_device *device,
 	options.robust_buffer_access = device->robust_buffer_access;
 
 	return shader_variant_compile(device, module, shaders, shader_count, shaders[shader_count - 1]->info.stage,
-				     &options, false, binary_out);
+				     &options, false, keep_shader_info, binary_out);
 }
 
 struct radv_shader_variant *
 radv_create_gs_copy_shader(struct radv_device *device,
 			   struct nir_shader *shader,
 			   struct radv_shader_binary **binary_out,
+			   bool keep_shader_info,
 			   bool multiview)
 {
 	struct radv_nir_compiler_options options = {0};
@@ -1234,7 +1248,7 @@ radv_create_gs_copy_shader(struct radv_device *device,
 	options.key.has_multiview_view_index = multiview;
 
 	return shader_variant_compile(device, NULL, &shader, 1, MESA_SHADER_VERTEX,
-				     &options, true, binary_out);
+				     &options, true, keep_shader_info, binary_out);
 }
 
 void
@@ -1248,7 +1262,7 @@ radv_shader_variant_destroy(struct radv_device *device,
 	list_del(&variant->slab_list);
 	mtx_unlock(&device->shader_slab_mutex);
 
-	ralloc_free(variant->nir);
+	free(variant->nir_string);
 	free(variant->disasm_string);
 	free(variant->llvm_ir_string);
 	free(variant);
@@ -1288,22 +1302,39 @@ radv_get_shader_name(struct radv_shader_variant_info *info,
 	};
 }
 
-static void
-generate_shader_stats(struct radv_device *device,
-		      struct radv_shader_variant *variant,
-		      gl_shader_stage stage,
-		      struct _mesa_string_buffer *buf)
+unsigned
+radv_get_max_workgroup_size(enum chip_class chip_class,
+                            gl_shader_stage stage,
+                            const unsigned *sizes)
+{
+	switch (stage) {
+	case MESA_SHADER_TESS_CTRL:
+		return chip_class >= GFX7 ? 128 : 64;
+	case MESA_SHADER_GEOMETRY:
+		return chip_class >= GFX9 ? 128 : 64;
+	case MESA_SHADER_COMPUTE:
+		break;
+	default:
+		return 0;
+	}
+
+	unsigned max_workgroup_size = sizes[0] * sizes[1] * sizes[2];
+	return max_workgroup_size;
+}
+
+unsigned
+radv_get_max_waves(struct radv_device *device,
+                   struct radv_shader_variant *variant,
+                   gl_shader_stage stage)
 {
 	enum chip_class chip_class = device->physical_device->rad_info.chip_class;
 	unsigned lds_increment = chip_class >= GFX7 ? 512 : 256;
-	uint8_t wave_size = radv_get_shader_wave_size(device->physical_device, stage);
-	struct ac_shader_config *conf;
+	uint8_t wave_size = variant->info.info.wave_size;
+	struct ac_shader_config *conf = &variant->config;
 	unsigned max_simd_waves;
 	unsigned lds_per_wave = 0;
 
 	max_simd_waves = ac_get_max_simd_waves(device->physical_device->rad_info.family);
-
-	conf = &variant->config;
 
 	if (stage == MESA_SHADER_FRAGMENT) {
 		lds_per_wave = conf->lds_size * lds_increment +
@@ -1311,7 +1342,7 @@ generate_shader_stats(struct radv_device *device,
 				     lds_increment);
 	} else if (stage == MESA_SHADER_COMPUTE) {
 		unsigned max_workgroup_size =
-			radv_nir_get_max_workgroup_size(chip_class, stage, variant->nir);
+			radv_get_max_workgroup_size(chip_class, stage, variant->info.cs.block_size);
 		lds_per_wave = (conf->lds_size * lds_increment) /
 			       DIV_ROUND_UP(max_workgroup_size, wave_size);
 	}
@@ -1331,6 +1362,18 @@ generate_shader_stats(struct radv_device *device,
 	 */
 	if (lds_per_wave)
 		max_simd_waves = MIN2(max_simd_waves, 16384 / lds_per_wave);
+
+	return max_simd_waves;
+}
+
+static void
+generate_shader_stats(struct radv_device *device,
+		      struct radv_shader_variant *variant,
+		      gl_shader_stage stage,
+		      struct _mesa_string_buffer *buf)
+{
+	struct ac_shader_config *conf = &variant->config;
+	unsigned max_simd_waves = radv_get_max_waves(device, variant, stage);
 
 	if (stage == MESA_SHADER_FRAGMENT) {
 		_mesa_string_buffer_printf(buf, "*** SHADER CONFIG ***\n"
@@ -1408,7 +1451,7 @@ radv_GetShaderInfoAMD(VkDevice _device,
 			statistics.numAvailableSgprs = statistics.numPhysicalSgprs;
 
 			if (stage == MESA_SHADER_COMPUTE) {
-				unsigned *local_size = variant->nir->info.cs.local_size;
+				unsigned *local_size = variant->info.cs.block_size;
 				unsigned workgroup_size = local_size[0] * local_size[1] * local_size[2];
 
 				statistics.numAvailableVgprs = statistics.numPhysicalVgprs /

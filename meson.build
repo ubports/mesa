@@ -26,7 +26,7 @@ project(
   ).stdout(),
   license : 'MIT',
   meson_version : '>= 0.46',
-  default_options : ['buildtype=debugoptimized', 'b_ndebug=if-release', 'c_std=c99', 'cpp_std=c++11']
+  default_options : ['buildtype=debugoptimized', 'b_ndebug=if-release', 'c_std=c99', 'cpp_std=c++14']
 )
 
 cc = meson.get_compiler('c')
@@ -61,6 +61,8 @@ if with_tools.contains('all')
     'freedreno',
     'glsl',
     'intel',
+    'intel-ui',
+    'lima',
     'nir',
     'nouveau',
     'xvmc',
@@ -158,7 +160,7 @@ if gallium_drivers.contains('auto')
     elif ['arm', 'aarch64'].contains(host_machine.cpu_family())
       gallium_drivers = [
         'kmsro', 'v3d', 'vc4', 'freedreno', 'etnaviv', 'nouveau',
-        'tegra', 'virgl', 'lima', 'swrast'
+        'tegra', 'virgl', 'lima', 'panfrost', 'swrast'
       ]
     else
       error('Unknown architecture @0@. Please pass -Dgallium-drivers to set driver options. Patches gladly accepted to fix this.'.format(
@@ -375,7 +377,11 @@ if with_egl and not (with_platform_drm or with_platform_surfaceless or with_plat
   endif
 endif
 
-pre_args += '-DGLX_USE_TLS'
+# Android uses emutls for versions <= P/28. For USE_ELF_TLS we need ELF TLS.
+if not with_platform_android or get_option('platform-sdk-version') >= 29
+  pre_args += '-DUSE_ELF_TLS'
+endif
+
 if with_glx != 'disabled'
   if not (with_platform_x11 and with_any_opengl)
     error('Cannot build GLX support without X11 platform support and at least one OpenGL API')
@@ -773,6 +779,11 @@ if cc.get_id() == 'gcc' and cc.version().version_compare('< 4.4.6')
   error('When using GCC, version 4.4.6 or later is required.')
 endif
 
+# Support systems without ETIME (e.g. FreeBSD)
+if cc.get_define('ETIME', prefix : '#include <errno.h>') == ''
+  pre_args += '-DETIME=ETIMEDOUT'
+endif
+
 # Define DEBUG for debug builds only (debugoptimized is not included on this one)
 if get_option('buildtype') == 'debug'
   pre_args += '-DDEBUG'
@@ -1024,7 +1035,7 @@ elif cc.has_header_symbol('sys/mkdev.h', 'major')
   pre_args += '-DMAJOR_IN_MKDEV'
 endif
 
-foreach h : ['xlocale.h', 'sys/sysctl.h', 'linux/futex.h', 'endian.h', 'dlfcn.h', 'execinfo.h', 'sys/shm.h']
+foreach h : ['xlocale.h', 'sys/sysctl.h', 'linux/futex.h', 'endian.h', 'dlfcn.h', 'execinfo.h', 'sys/shm.h', 'cet.h']
   if cc.compiles('#include <@0@>'.format(h), name : '@0@'.format(h))
     pre_args += '-DHAVE_@0@'.format(h.to_upper().underscorify())
   endif
@@ -1133,6 +1144,12 @@ if dep_thread.found() and host_machine.system() != 'windows'
       args : '-D_GNU_SOURCE')
     pre_args += '-DHAVE_PTHREAD_SETAFFINITY'
   endif
+  if cc.has_function(
+      'pthread_setaffinity_np',
+      dependencies : dep_thread,
+      prefix : '#include <pthread_np.h>')
+    pre_args += '-DPTHREAD_SETAFFINITY_IN_NP_HEADER'
+  endif
 endif
 dep_expat = dependency('expat')
 # this only exists on linux so either this is linux and it will be found, or
@@ -1226,7 +1243,7 @@ if with_gallium_opencl
 endif
 
 if with_amd_vk or with_gallium_radeonsi
-  _llvm_version = '>= 7.0.0'
+  _llvm_version = '>= 8.0.0'
 elif with_gallium_swr
   _llvm_version = '>= 6.0.0'
 elif with_gallium_opencl or with_gallium_r600
@@ -1325,9 +1342,6 @@ else
 endif
 
 if with_osmesa != 'none'
-  if with_osmesa == 'classic' and not with_dri_swrast
-    error('OSMesa classic requires dri (classic) swrast.')
-  endif
   if with_osmesa == 'gallium' and not with_gallium_softpipe
     error('OSMesa gallium requires gallium softpipe or llvmpipe.')
   endif

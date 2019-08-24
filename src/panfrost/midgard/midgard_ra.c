@@ -26,6 +26,7 @@
 #include "midgard_ops.h"
 #include "util/register_allocate.h"
 #include "util/u_math.h"
+#include "util/u_memory.h"
 
 /* For work registers, we can subdivide in various ways. So we create
  * classes for the various sizes and conflict accordingly, keeping in
@@ -137,12 +138,14 @@ default_phys_reg(int reg)
  * register corresponds to */
 
 static struct phys_reg
-index_to_reg(compiler_context *ctx, struct ra_graph *g, int reg)
+index_to_reg(compiler_context *ctx, struct ra_graph *g, unsigned reg)
 {
         /* Check for special cases */
-        if (reg >= SSA_FIXED_MINIMUM)
+        if ((reg == ~0) && g)
+                return default_phys_reg(REGISTER_UNUSED);
+        else if (reg >= SSA_FIXED_MINIMUM)
                 return default_phys_reg(SSA_REG_FROM_FIXED(reg));
-        else if ((reg < 0) || !g)
+        else if (!g)
                 return default_phys_reg(REGISTER_UNUSED);
 
         /* Special cases aside, we pick the underlying register */
@@ -300,7 +303,7 @@ static void
 set_class(unsigned *classes, unsigned node, unsigned class)
 {
         /* Check that we're even a node */
-        if ((node < 0) || (node >= SSA_FIXED_MINIMUM))
+        if (node >= SSA_FIXED_MINIMUM)
                 return;
 
         /* First 4 are work, next 4 are load/store.. */
@@ -320,7 +323,7 @@ set_class(unsigned *classes, unsigned node, unsigned class)
 static void
 force_vec4(unsigned *classes, unsigned node)
 {
-        if ((node < 0) || (node >= SSA_FIXED_MINIMUM))
+        if (node >= SSA_FIXED_MINIMUM)
                 return;
 
         /* Force vec4 = 3 */
@@ -334,7 +337,7 @@ static bool
 check_read_class(unsigned *classes, unsigned tag, unsigned node)
 {
         /* Non-nodes are implicitly ok */
-        if ((node < 0) || (node >= SSA_FIXED_MINIMUM))
+        if (node >= SSA_FIXED_MINIMUM)
                 return true;
 
         unsigned current_class = classes[node] >> 2;
@@ -357,7 +360,7 @@ static bool
 check_write_class(unsigned *classes, unsigned tag, unsigned node)
 {
         /* Non-nodes are implicitly ok */
-        if ((node < 0) || (node >= SSA_FIXED_MINIMUM))
+        if (node >= SSA_FIXED_MINIMUM)
                 return true;
 
         unsigned current_class = classes[node] >> 2;
@@ -382,7 +385,7 @@ check_write_class(unsigned *classes, unsigned tag, unsigned node)
 static void
 mark_node_class (unsigned *bitfield, unsigned node)
 {
-        if ((node >= 0) && (node < SSA_FIXED_MINIMUM))
+        if (node < SSA_FIXED_MINIMUM)
                 BITSET_SET(bitfield, node);
 }
 
@@ -497,16 +500,15 @@ mir_lower_special_reads(compiler_context *ctx)
                                         midgard_instruction *use = mir_next_op(pre_use);
                                         assert(use);
                                         mir_insert_instruction_before(use, m);
+                                        mir_rewrite_index_dst_single(pre_use, i, idx);
                                 } else {
+                                        idx = spill_idx++;
+                                        m = v_mov(i, blank_alu_src, idx);
+                                        m.mask = mir_mask_of_read_components(pre_use, i);
                                         mir_insert_instruction_before(pre_use, m);
+                                        mir_rewrite_index_src_single(pre_use, i, idx);
                                 }
                         }
-
-                        /* Rewrite to use */
-                        if (hazard_write)
-                                mir_rewrite_index_dst_tag(ctx, i, idx, classes[j]);
-                        else
-                                mir_rewrite_index_src_tag(ctx, i, idx, classes[j]);
                 }
         }
 
@@ -515,6 +517,167 @@ mir_lower_special_reads(compiler_context *ctx)
         free(ldst);
         free(texr);
         free(texw);
+}
+
+/* Routines for liveness analysis */
+
+static void
+liveness_gen(uint8_t *live, unsigned node, unsigned max, unsigned mask)
+{
+        if (node >= max)
+                return;
+
+        live[node] |= mask;
+}
+
+static void
+liveness_kill(uint8_t *live, unsigned node, unsigned max, unsigned mask)
+{
+        if (node >= max)
+                return;
+
+        live[node] &= ~mask;
+}
+
+/* Updates live_in for a single instruction */
+
+static void
+liveness_ins_update(uint8_t *live, midgard_instruction *ins, unsigned max)
+{
+        /* live_in[s] = GEN[s] + (live_out[s] - KILL[s]) */
+
+        liveness_kill(live, ins->ssa_args.dest, max, ins->mask);
+
+        mir_foreach_src(ins, src) {
+                unsigned node = ins->ssa_args.src[src];
+                unsigned mask = mir_mask_of_read_components(ins, node);
+
+                liveness_gen(live, node, max, mask);
+        }
+}
+
+/* live_out[s] = sum { p in succ[s] } ( live_in[p] ) */
+
+static void
+liveness_block_live_out(compiler_context *ctx, midgard_block *blk)
+{
+        mir_foreach_successor(blk, succ) {
+                for (unsigned i = 0; i < ctx->temp_count; ++i)
+                        blk->live_out[i] |= succ->live_in[i];
+        }
+}
+
+/* Liveness analysis is a backwards-may dataflow analysis pass. Within a block,
+ * we compute live_out from live_in. The intrablock pass is linear-time. It
+ * returns whether progress was made. */
+
+static bool
+liveness_block_update(compiler_context *ctx, midgard_block *blk)
+{
+        bool progress = false;
+
+        liveness_block_live_out(ctx, blk);
+
+        uint8_t *live = mem_dup(blk->live_out, ctx->temp_count);
+
+        mir_foreach_instr_in_block_rev(blk, ins)
+                liveness_ins_update(live, ins, ctx->temp_count);
+
+        /* To figure out progress, diff live_in */
+
+        for (unsigned i = 0; (i < ctx->temp_count) && !progress; ++i)
+                progress |= (blk->live_in[i] != live[i]);
+
+        free(blk->live_in);
+        blk->live_in = live;
+
+        return progress;
+}
+
+/* Globally, liveness analysis uses a fixed-point algorithm based on a
+ * worklist. We initialize a work list with the exit block. We iterate the work
+ * list to compute live_in from live_out for each block on the work list,
+ * adding the predecessors of the block to the work list if we made progress.
+ */
+
+static void
+mir_compute_liveness(
+                compiler_context *ctx,
+                struct ra_graph *g)
+{
+        /* List of midgard_block */
+        struct set *work_list;
+
+        work_list = _mesa_set_create(ctx,
+                        _mesa_hash_pointer,
+                        _mesa_key_pointer_equal);
+
+        /* Allocate */
+
+        mir_foreach_block(ctx, block) {
+                block->live_in = calloc(ctx->temp_count, 1);
+                block->live_out = calloc(ctx->temp_count, 1);
+        }
+
+        /* Initialize the work list with the exit block */
+        struct set_entry *cur;
+
+        midgard_block *exit = mir_exit_block(ctx);
+        cur = _mesa_set_add(work_list, exit);
+
+        /* Iterate the work list */
+
+        do {
+                /* Pop off a block */
+                midgard_block *blk = (struct midgard_block *) cur->key;
+                _mesa_set_remove(work_list, cur);
+
+                /* Update its liveness information */
+                bool progress = liveness_block_update(ctx, blk);
+
+                /* If we made progress, we need to process the predecessors */
+
+                if (progress || (blk == exit)) {
+                        mir_foreach_predecessor(blk, pred)
+                                _mesa_set_add(work_list, pred);
+                }
+        } while((cur = _mesa_set_next_entry(work_list, NULL)) != NULL);
+
+        /* Now that every block has live_in/live_out computed, we can determine
+         * interference by walking each block linearly. Take live_out at the
+         * end of each block and walk the block backwards. */
+
+        mir_foreach_block(ctx, blk) {
+                uint8_t *live = calloc(ctx->temp_count, 1);
+
+                mir_foreach_successor(blk, succ) {
+                        for (unsigned i = 0; i < ctx->temp_count; ++i)
+                                live[i] |= succ->live_in[i];
+                }
+
+                mir_foreach_instr_in_block_rev(blk, ins) {
+                        /* Mark all registers live after the instruction as
+                         * interfering with the destination */
+
+                        unsigned dest = ins->ssa_args.dest;
+
+                        if (dest < ctx->temp_count) {
+                                for (unsigned i = 0; i < ctx->temp_count; ++i)
+                                        if (live[i])
+                                                ra_add_node_interference(g, dest, i);
+                        }
+
+                        /* Update live_in */
+                        liveness_ins_update(live, ins, ctx->temp_count);
+                }
+
+                free(live);
+        }
+
+        mir_foreach_block(ctx, blk) {
+                free(blk->live_in);
+                free(blk->live_out);
+        }
 }
 
 /* This routine performs the actual register allocation. It should be succeeded
@@ -549,7 +712,6 @@ allocate_registers(compiler_context *ctx, bool *spilled)
         unsigned *found_class = calloc(sizeof(unsigned), ctx->temp_count);
 
         mir_foreach_instr_global(ctx, ins) {
-                if (ins->ssa_args.dest < 0) continue;
                 if (ins->ssa_args.dest >= SSA_FIXED_MINIMUM) continue;
 
                 /* 0 for x, 1 for xy, 2 for xyz, 3 for xyzw */
@@ -606,80 +768,7 @@ allocate_registers(compiler_context *ctx, bool *spilled)
                 ra_set_node_class(g, i, classes[class]);
         }
 
-        /* Determine liveness */
-
-        int *live_start = malloc(nodes * sizeof(int));
-        int *live_end = malloc(nodes * sizeof(int));
-
-        /* Initialize as non-existent */
-
-        for (int i = 0; i < nodes; ++i) {
-                live_start[i] = live_end[i] = -1;
-        }
-
-        int d = 0;
-
-        mir_foreach_block(ctx, block) {
-                mir_foreach_instr_in_block(block, ins) {
-                        if (ins->ssa_args.dest < SSA_FIXED_MINIMUM) {
-                                /* If this destination is not yet live, it is
-                                 * now since we just wrote it */
-
-                                int dest = ins->ssa_args.dest;
-
-                                if (dest >= 0 && live_start[dest] == -1)
-                                        live_start[dest] = d;
-                        }
-
-                        /* Since we just used a source, the source might be
-                         * dead now. Scan the rest of the block for
-                         * invocations, and if there are none, the source dies
-                         * */
-
-                        int sources[2] = {
-                                ins->ssa_args.src[0], ins->ssa_args.src[1]
-                        };
-
-                        for (int src = 0; src < 2; ++src) {
-                                int s = sources[src];
-
-                                if (s < 0) continue;
-
-                                if (s >= SSA_FIXED_MINIMUM) continue;
-
-                                if (!mir_is_live_after(ctx, block, ins, s)) {
-                                        live_end[s] = d;
-                                }
-                        }
-
-                        ++d;
-                }
-        }
-
-        /* If a node still hasn't been killed, kill it now */
-
-        for (int i = 0; i < nodes; ++i) {
-                /* live_start == -1 most likely indicates a pinned output */
-
-                if (live_end[i] == -1)
-                        live_end[i] = d;
-        }
-
-        /* Setup interference between nodes that are live at the same time */
-
-        for (int i = 0; i < nodes; ++i) {
-                for (int j = i + 1; j < nodes; ++j) {
-                        bool j_overlaps_i = live_start[j] < live_end[i];
-                        bool i_overlaps_j = live_end[j] < live_start[i];
-
-                        if (i_overlaps_j || j_overlaps_i)
-                                ra_add_node_interference(g, i, j);
-                }
-        }
-
-        /* Cleanup */
-        free(live_start);
-        free(live_end);
+        mir_compute_liveness(ctx, g);
 
         if (!ra_allocate(g)) {
                 *spilled = true;
@@ -753,30 +842,33 @@ install_registers_instr(
         }
 
         case TAG_LOAD_STORE_4: {
-                bool fixed = args.src[0] >= SSA_FIXED_MINIMUM;
-
                 /* Which physical register we read off depends on
                  * whether we are loading or storing -- think about the
                  * logical dataflow */
 
-                bool encodes_src =
-                        OP_IS_STORE(ins->load_store.op) &&
-                        ins->load_store.op != midgard_op_st_cubemap_coords;
+                bool encodes_src = OP_IS_STORE(ins->load_store.op);
 
-                if (OP_IS_STORE_R26(ins->load_store.op) && fixed) {
-                        ins->load_store.reg = SSA_REG_FROM_FIXED(args.src[0]);
-                } else if (OP_IS_STORE_VARY(ins->load_store.op)) {
+                if (encodes_src) {
                         struct phys_reg src = index_to_reg(ctx, g, args.src[0]);
                         assert(src.reg == 26 || src.reg == 27);
 
                         ins->load_store.reg = src.reg - 26;
 
-                        /* TODO: swizzle/mask */
-                } else {
-                        unsigned r = encodes_src ?
-                                     args.src[0] : args.dest;
+                        unsigned shift = __builtin_ctz(src.mask);
+                        unsigned adjusted_mask = src.mask >> shift;
+                        assert(((adjusted_mask + 1) & adjusted_mask) == 0);
 
-                        struct phys_reg src = index_to_reg(ctx, g, r);
+                        unsigned new_swizzle = 0;
+                        for (unsigned q = 0; q < 4; ++q) {
+                                unsigned c = (ins->load_store.swizzle >> (2*q)) & 3;
+                                new_swizzle |= (c + shift) << (2*q);
+                        }
+
+                        ins->load_store.swizzle = compose_swizzle(
+                                                          new_swizzle, src.mask,
+                                                          default_phys_reg(0), src);
+               } else {
+                        struct phys_reg src = index_to_reg(ctx, g, args.dest);
 
                         ins->load_store.reg = src.reg;
 
@@ -794,7 +886,7 @@ install_registers_instr(
                         encodes_src ? args.src[1] : args.src[0];
 
                 int src3 =
-                        encodes_src ? -1 : args.src[1];
+                        encodes_src ? args.src[2] : args.src[1];
 
                 if (src2 >= 0) {
                         struct phys_reg src = index_to_reg(ctx, g, src2);
@@ -837,7 +929,7 @@ install_registers_instr(
                         compose_writemask(ins->mask, dest);
 
                 /* If there is a register LOD/bias, use it */
-                if (args.src[1] > -1) {
+                if (args.src[1] != ~0) {
                         midgard_tex_register_select sel = {
                                 .select = lod.reg,
                                 .full = 1,

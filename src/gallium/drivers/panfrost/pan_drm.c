@@ -49,14 +49,14 @@ panfrost_drm_mmap_bo(struct panfrost_screen *screen, struct panfrost_bo *bo)
 
         ret = drmIoctl(screen->fd, DRM_IOCTL_PANFROST_MMAP_BO, &mmap_bo);
         if (ret) {
-                fprintf(stderr, "DRM_IOCTL_PANFROST_MMAP_BO failed: %d\n", ret);
+                fprintf(stderr, "DRM_IOCTL_PANFROST_MMAP_BO failed: %m\n");
                 assert(0);
         }
 
         bo->cpu = os_mmap(NULL, bo->size, PROT_READ | PROT_WRITE, MAP_SHARED,
                           screen->fd, mmap_bo.offset);
         if (bo->cpu == MAP_FAILED) {
-                fprintf(stderr, "mmap failed: %p\n", bo->cpu);
+                fprintf(stderr, "mmap failed: %p %m\n", bo->cpu);
                 assert(0);
         }
 
@@ -88,9 +88,22 @@ panfrost_drm_create_bo(struct panfrost_screen *screen, size_t size,
         /* Kernel will fail (confusingly) with EPERM otherwise */
         assert(size > 0);
 
+        /* To maximize BO cache usage, don't allocate tiny BOs */
+        size = MAX2(size, 4096);
+
+        /* GROWABLE BOs cannot be mmapped */
+        if (flags & PAN_ALLOCATE_GROWABLE)
+                assert(flags & PAN_ALLOCATE_INVISIBLE);
+
         unsigned translated_flags = 0;
 
-        /* TODO: translate flags to kernel flags, if the kernel supports */
+        if (screen->kernel_version->version_major > 1 ||
+            screen->kernel_version->version_minor >= 1) {
+                if (flags & PAN_ALLOCATE_GROWABLE)
+                        translated_flags |= PANFROST_BO_HEAP;
+                if (!(flags & PAN_ALLOCATE_EXECUTE))
+                        translated_flags |= PANFROST_BO_NOEXEC;
+        }
 
         struct drm_panfrost_create_bo create_bo = {
                 .size = size,
@@ -109,7 +122,7 @@ panfrost_drm_create_bo(struct panfrost_screen *screen, size_t size,
 
                 ret = drmIoctl(screen->fd, DRM_IOCTL_PANFROST_CREATE_BO, &create_bo);
                 if (ret) {
-                        fprintf(stderr, "DRM_IOCTL_PANFROST_CREATE_BO failed: %d\n", ret);
+                        fprintf(stderr, "DRM_IOCTL_PANFROST_CREATE_BO failed: %m\n");
                         assert(0);
                 }
 
@@ -120,6 +133,7 @@ panfrost_drm_create_bo(struct panfrost_screen *screen, size_t size,
                 bo->size = create_bo.size;
                 bo->gpu = create_bo.offset;
                 bo->gem_handle = create_bo.handle;
+                bo->flags = flags;
         }
 
         /* Only mmap now if we know we need to. For CPU-invisible buffers, we
@@ -140,14 +154,16 @@ panfrost_drm_create_bo(struct panfrost_screen *screen, size_t size,
 void
 panfrost_drm_release_bo(struct panfrost_screen *screen, struct panfrost_bo *bo, bool cacheable)
 {
-        struct drm_gem_close gem_close = { .handle = bo->gem_handle };
-        int ret;
-
         if (!bo)
                 return;
 
+        struct drm_gem_close gem_close = { .handle = bo->gem_handle };
+        int ret;
+
         /* Rather than freeing the BO now, we'll cache the BO for later
          * allocations if we're allowed to */
+
+        panfrost_drm_munmap_bo(screen, bo);
 
         if (cacheable) {
                 bool cached = panfrost_bo_cache_put(screen, bo);
@@ -158,11 +174,9 @@ panfrost_drm_release_bo(struct panfrost_screen *screen, struct panfrost_bo *bo, 
 
         /* Otherwise, if the BO wasn't cached, we'll legitimately free the BO */
 
-        panfrost_drm_munmap_bo(screen, bo);
-
         ret = drmIoctl(screen->fd, DRM_IOCTL_GEM_CLOSE, &gem_close);
         if (ret) {
-                fprintf(stderr, "DRM_IOCTL_GEM_CLOSE failed: %d\n", ret);
+                fprintf(stderr, "DRM_IOCTL_GEM_CLOSE failed: %m\n");
                 assert(0);
         }
 
@@ -285,7 +299,6 @@ panfrost_drm_submit_vs_fs_job(struct panfrost_context *ctx, bool has_draws, bool
         struct panfrost_job *job = panfrost_get_job_for_fbo(ctx);
 
         /* TODO: Add here the transient pools */
-        panfrost_job_add_bo(job, ctx->shaders.bo);
         panfrost_job_add_bo(job, ctx->scratchpad.bo);
         panfrost_job_add_bo(job, ctx->tiler_heap.bo);
         panfrost_job_add_bo(job, job->polygon_list);
@@ -319,7 +332,7 @@ panfrost_fence_create(struct panfrost_context *ctx)
          */
         drmSyncobjExportSyncFile(screen->fd, ctx->out_sync, &f->fd);
         if (f->fd == -1) {
-                fprintf(stderr, "export failed\n");
+                fprintf(stderr, "export failed: %m\n");
                 free(f);
                 return NULL;
         }
@@ -407,7 +420,7 @@ panfrost_drm_fence_finish(struct pipe_screen *pscreen,
                 return false;
         }
 
-        drmSyncobjImportSyncFile(screen->fd, syncobj, f->fd);
+        ret = drmSyncobjImportSyncFile(screen->fd, syncobj, f->fd);
         if (ret) {
                 fprintf(stderr, "Failed to import fence to syncobj: %m\n");
                 return false;

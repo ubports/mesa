@@ -170,6 +170,7 @@ struct gl_config
 
    GLint redBits, greenBits, blueBits, alphaBits;	/* bits per comp */
    GLuint redMask, greenMask, blueMask, alphaMask;
+   GLint redShift, greenShift, blueShift, alphaShift;
    GLint rgbBits;		/* total bits for rgb */
    GLint indexBits;		/* total bits for colorindex */
 
@@ -4135,6 +4136,8 @@ struct gl_constants
 
    /** GL_ARB_spirv_extensions */
    struct spirv_supported_extensions *SpirVExtensions;
+
+   char *VendorOverride;
 };
 
 
@@ -4289,6 +4292,7 @@ struct gl_extensions
    GLboolean EXT_semaphore;
    GLboolean EXT_semaphore_fd;
    GLboolean EXT_shader_image_load_formatted;
+   GLboolean EXT_shader_image_load_store;
    GLboolean EXT_shader_integer_mix;
    GLboolean EXT_shader_samples_identical;
    GLboolean EXT_sRGB;
@@ -5171,6 +5175,8 @@ struct gl_context
    struct hash_table_u64 *ResidentTextureHandles;
    struct hash_table_u64 *ResidentImageHandles;
    /*@}*/
+
+   bool shader_builtin_ref;
 };
 
 /**

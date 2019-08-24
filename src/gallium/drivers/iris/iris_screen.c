@@ -53,6 +53,7 @@
 #include "iris_screen.h"
 #include "intel/compiler/brw_compiler.h"
 #include "intel/common/gen_gem.h"
+#include "iris_monitor.h"
 
 static void
 iris_flush_frontbuffer(struct pipe_screen *_screen,
@@ -201,8 +202,7 @@ iris_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_SHADER_SAMPLES_IDENTICAL:
       return true;
    case PIPE_CAP_FBFETCH:
-      /* TODO: Support non-coherent FB fetch on Broadwell */
-      return devinfo->gen >= 9 ? BRW_MAX_DRAW_BUFFERS : 0;
+      return BRW_MAX_DRAW_BUFFERS;
    case PIPE_CAP_FBFETCH_COHERENT:
    case PIPE_CAP_CONSERVATIVE_RASTER_INNER_COVERAGE:
    case PIPE_CAP_POST_DEPTH_COVERAGE:
@@ -683,6 +683,8 @@ iris_screen_create(int fd, const struct pipe_screen_config *config)
    pscreen->flush_frontbuffer = iris_flush_frontbuffer;
    pscreen->get_timestamp = iris_get_timestamp;
    pscreen->query_memory_info = iris_query_memory_info;
+   pscreen->get_driver_query_group_info = iris_get_monitor_group_info;
+   pscreen->get_driver_query_info = iris_get_monitor_info;
 
    return pscreen;
 }

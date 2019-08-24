@@ -129,9 +129,7 @@ struct radv_nir_compiler_options {
 	enum chip_class chip_class;
 	uint32_t tess_offchip_block_dw_size;
 	uint32_t address32_hi;
-	uint8_t cs_wave_size;
-	uint8_t ps_wave_size;
-	uint8_t ge_wave_size;
+	uint8_t wave_size;
 };
 
 enum radv_ud_index {
@@ -182,6 +180,7 @@ struct radv_shader_info {
 	bool needs_multiview_view_index;
 	bool uses_invocation_id;
 	bool uses_prim_id;
+	uint8_t wave_size;
 	struct {
 		uint64_t ls_outputs_written;
 		uint8_t input_usage_mask[VERT_ATTRIB_MAX];
@@ -355,7 +354,7 @@ struct radv_shader_variant {
 	/* debug only */
 	uint32_t *spirv;
 	uint32_t spirv_size;
-	struct nir_shader *nir;
+	char *nir_string;
 	char *disasm_string;
 	char *llvm_ir_string;
 
@@ -395,7 +394,8 @@ radv_destroy_shader_slabs(struct radv_device *device);
 
 struct radv_shader_variant *
 radv_shader_variant_create(struct radv_device *device,
-			   const struct radv_shader_binary *binary);
+			   const struct radv_shader_binary *binary,
+			   bool keep_shader_info);
 struct radv_shader_variant *
 radv_shader_variant_compile(struct radv_device *device,
 			    struct radv_shader_module *module,
@@ -403,16 +403,28 @@ radv_shader_variant_compile(struct radv_device *device,
 			    int shader_count,
 			    struct radv_pipeline_layout *layout,
 			    const struct radv_shader_variant_key *key,
+			    bool keep_shader_info,
 			    struct radv_shader_binary **binary_out);
 
 struct radv_shader_variant *
 radv_create_gs_copy_shader(struct radv_device *device, struct nir_shader *nir,
 			   struct radv_shader_binary **binary_out,
-			   bool multiview);
+			   bool multiview,  bool keep_shader_info);
 
 void
 radv_shader_variant_destroy(struct radv_device *device,
 			    struct radv_shader_variant *variant);
+
+
+unsigned
+radv_get_max_waves(struct radv_device *device,
+                   struct radv_shader_variant *variant,
+                   gl_shader_stage stage);
+
+unsigned
+radv_get_max_workgroup_size(enum chip_class chip_class,
+                            gl_shader_stage stage,
+                            const unsigned *sizes);
 
 const char *
 radv_get_shader_name(struct radv_shader_variant_info *info,

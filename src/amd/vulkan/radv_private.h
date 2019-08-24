@@ -1098,6 +1098,7 @@ struct radv_attachment_state {
 	uint32_t                                     cleared_views;
 	VkClearValue                                 clear_value;
 	VkImageLayout                                current_layout;
+	bool                                         current_in_render_loop;
 	struct radv_sample_locations_state	     sample_location;
 
 	union {
@@ -1422,6 +1423,9 @@ struct radv_shader_module;
 #define RADV_HASH_SHADER_SISCHED             (1 << 1)
 #define RADV_HASH_SHADER_UNSAFE_MATH         (1 << 2)
 #define RADV_HASH_SHADER_NO_NGG              (1 << 3)
+#define RADV_HASH_SHADER_CS_WAVE32           (1 << 4)
+#define RADV_HASH_SHADER_PS_WAVE32           (1 << 5)
+#define RADV_HASH_SHADER_GE_WAVE32           (1 << 6)
 
 void
 radv_hash_shaders(unsigned char *hash,
@@ -1665,6 +1669,7 @@ struct radv_image {
  * the image. */
 bool radv_layout_has_htile(const struct radv_image *image,
                            VkImageLayout layout,
+                           bool in_render_loop,
                            unsigned queue_mask);
 
 /* Whether the image has a htile  that is known consistent with the contents of
@@ -1675,14 +1680,18 @@ bool radv_layout_has_htile(const struct radv_image *image,
  */
 bool radv_layout_is_htile_compressed(const struct radv_image *image,
                                      VkImageLayout layout,
+                                     bool in_render_loop,
                                      unsigned queue_mask);
 
 bool radv_layout_can_fast_clear(const struct radv_image *image,
 			        VkImageLayout layout,
+			        bool in_render_loop,
 			        unsigned queue_mask);
 
-bool radv_layout_dcc_compressed(const struct radv_image *image,
+bool radv_layout_dcc_compressed(const struct radv_device *device,
+				const struct radv_image *image,
 			        VkImageLayout layout,
+			        bool in_render_loop,
 			        unsigned queue_mask);
 
 /**
@@ -1877,9 +1886,14 @@ radv_image_from_gralloc(VkDevice device_h,
                        const VkAllocationCallbacks *alloc,
                        VkImage *out_image_h);
 
+struct radv_image_view_extra_create_info {
+	bool disable_compression;
+};
+
 void radv_image_view_init(struct radv_image_view *view,
 			  struct radv_device *device,
-			  const VkImageViewCreateInfo* pCreateInfo);
+			  const VkImageViewCreateInfo *pCreateInfo,
+			  const struct radv_image_view_extra_create_info* extra_create_info);
 
 VkFormat radv_get_aspect_format(struct radv_image *image, VkImageAspectFlags mask);
 
@@ -1971,6 +1985,7 @@ void radv_subpass_barrier(struct radv_cmd_buffer *cmd_buffer,
 struct radv_subpass_attachment {
 	uint32_t         attachment;
 	VkImageLayout    layout;
+	bool             in_render_loop;
 };
 
 struct radv_subpass {

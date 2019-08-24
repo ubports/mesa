@@ -283,6 +283,7 @@ struct iris_uncompiled_shader {
 
 enum iris_surface_group {
    IRIS_SURFACE_GROUP_RENDER_TARGET,
+   IRIS_SURFACE_GROUP_RENDER_TARGET_READ,
    IRIS_SURFACE_GROUP_CS_WORK_GROUPS,
    IRIS_SURFACE_GROUP_TEXTURE,
    IRIS_SURFACE_GROUP_IMAGE,
@@ -460,6 +461,11 @@ struct iris_vtable {
                                  struct iris_bo *bo, uint32_t offset,
                                  uint64_t imm);
 
+   void (*emit_mi_report_perf_count)(struct iris_batch *batch,
+                                     struct iris_bo *bo,
+                                     uint32_t offset_in_bytes,
+                                     uint32_t report_id);
+
    unsigned (*derived_program_state_size)(enum iris_program_cache_id id);
    void (*store_derived_program_state)(struct iris_context *ice,
                                        enum iris_program_cache_id cache_id,
@@ -601,6 +607,8 @@ struct iris_context {
       bool condition;
    } condition;
 
+   struct gen_perf_context *perf_ctx;
+
    struct {
       uint64_t dirty;
       uint64_t dirty_for_nos[IRIS_NOS_COUNT];
@@ -630,6 +638,8 @@ struct iris_context {
       enum pipe_prim_type prim_mode:8;
       bool prim_is_points_or_lines;
       uint8_t vertices_per_patch;
+
+      bool window_space_position;
 
       /** The last compute grid size */
       uint32_t last_grid[3];
@@ -724,6 +734,9 @@ struct iris_context {
 
       /** Records the size of variable-length state for INTEL_DEBUG=bat */
       struct hash_table_u64 *sizes;
+
+      /** Last rendering scale argument provided to genX(emit_hashing_mode). */
+      unsigned current_hash_scale;
    } state;
 };
 
@@ -884,6 +897,11 @@ void iris_render_cache_add_bo(struct iris_batch *batch,
                               enum isl_aux_usage aux_usage);
 void iris_cache_flush_for_depth(struct iris_batch *batch, struct iris_bo *bo);
 void iris_depth_cache_add_bo(struct iris_batch *batch, struct iris_bo *bo);
+int iris_get_driver_query_info(struct pipe_screen *pscreen, unsigned index,
+                               struct pipe_driver_query_info *info);
+int iris_get_driver_query_group_info(struct pipe_screen *pscreen,
+                                     unsigned index,
+                                     struct pipe_driver_query_group_info *info);
 
 /* iris_state.c */
 void gen9_toggle_preemption(struct iris_context *ice,

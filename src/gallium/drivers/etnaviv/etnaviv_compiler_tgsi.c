@@ -763,7 +763,7 @@ etna_native_to_dst(struct etna_native_reg native, unsigned comps)
    assert(native.valid && !native.is_tex && native.rgroup == INST_RGROUP_TEMP);
 
    struct etna_inst_dst rv = {
-      .comps = comps,
+      .write_mask = comps,
       .use = 1,
       .reg = native.id,
    };
@@ -892,7 +892,7 @@ convert_dst(struct etna_compile *c, const struct tgsi_full_dst_register *in)
 {
    struct etna_inst_dst rv = {
       /// XXX .amode
-      .comps = in->Register.WriteMask,
+      .write_mask = in->Register.WriteMask,
    };
 
    if (in->Register.File == TGSI_FILE_ADDRESS) {
@@ -2265,13 +2265,20 @@ etna_compile_check_limits(struct etna_compile *c)
 static void
 copy_uniform_state_to_shader(struct etna_compile *c, struct etna_shader_variant *sobj)
 {
-   uint32_t count = c->imm_size;
+   uint32_t count = c->imm_base + c->imm_size;
    struct etna_shader_uniform_info *uinfo = &sobj->uniforms;
 
-   uinfo->const_count = c->imm_base;
    uinfo->imm_count = count;
-   uinfo->imm_data = mem_dup(c->imm_data, count * sizeof(*c->imm_data));
-   uinfo->imm_contents = mem_dup(c->imm_contents, count * sizeof(*c->imm_contents));
+
+   uinfo->imm_data = malloc(count * sizeof(*c->imm_data));
+   for (unsigned i = 0; i < c->imm_base; i++)
+      uinfo->imm_data[i] = i;
+   memcpy(&uinfo->imm_data[c->imm_base], c->imm_data, c->imm_size * sizeof(*c->imm_data));
+
+   uinfo->imm_contents = malloc(count * sizeof(*c->imm_contents));
+   for (unsigned i = 0; i < c->imm_base; i++)
+      uinfo->imm_contents[i] = ETNA_IMMEDIATE_UNIFORM;
+   memcpy(&uinfo->imm_contents[c->imm_base], c->imm_contents, c->imm_size * sizeof(*c->imm_contents));
 
    etna_set_shader_uniforms_dirty_flags(sobj);
 }
@@ -2279,6 +2286,9 @@ copy_uniform_state_to_shader(struct etna_compile *c, struct etna_shader_variant 
 bool
 etna_compile_shader(struct etna_shader_variant *v)
 {
+   if (DBG_ENABLED(ETNA_DBG_NIR))
+      return etna_compile_shader_nir(v);
+
    /* Create scratch space that may be too large to fit on stack
     */
    bool ret;
@@ -2442,11 +2452,12 @@ etna_compile_shader(struct etna_shader_variant *v)
    etna_compile_fill_in_labels(c);
 
    /* fill in output structure */
-   v->processor = c->info.processor;
+   v->stage = c->info.processor == PIPE_SHADER_FRAGMENT ? MESA_SHADER_FRAGMENT : MESA_SHADER_VERTEX;
    v->code_size = c->inst_ptr * 4;
    v->code = mem_dup(c->code, c->inst_ptr * 16);
    v->num_loops = c->num_loops;
    v->num_temps = c->next_free_native;
+   v->vs_id_in_reg = -1;
    v->vs_pos_out_reg = -1;
    v->vs_pointsize_out_reg = -1;
    v->ps_color_out_reg = -1;
@@ -2476,7 +2487,7 @@ extern const char *tgsi_swizzle_names[];
 void
 etna_dump_shader(const struct etna_shader_variant *shader)
 {
-   if (shader->processor == PIPE_SHADER_VERTEX)
+   if (shader->stage == MESA_SHADER_VERTEX)
       printf("VERT\n");
    else
       printf("FRAG\n");
@@ -2486,31 +2497,31 @@ etna_dump_shader(const struct etna_shader_variant *shader)
 
    printf("num loops: %i\n", shader->num_loops);
    printf("num temps: %i\n", shader->num_temps);
-   printf("num const: %i\n", shader->uniforms.const_count);
    printf("immediates:\n");
    for (int idx = 0; idx < shader->uniforms.imm_count; ++idx) {
-      printf(" [%i].%s = %f (0x%08x)\n",
-             (idx + shader->uniforms.const_count) / 4,
+      printf(" [%i].%s = %f (0x%08x) (%d)\n",
+             idx / 4,
              tgsi_swizzle_names[idx % 4],
              *((float *)&shader->uniforms.imm_data[idx]),
-             shader->uniforms.imm_data[idx]);
+             shader->uniforms.imm_data[idx],
+             shader->uniforms.imm_contents[idx]);
    }
    printf("inputs:\n");
    for (int idx = 0; idx < shader->infile.num_reg; ++idx) {
       printf(" [%i] name=%s index=%i comps=%i\n", shader->infile.reg[idx].reg,
-             tgsi_semantic_names[shader->infile.reg[idx].semantic.Name],
-             shader->infile.reg[idx].semantic.Index,
-             shader->infile.reg[idx].num_components);
+               tgsi_semantic_names[shader->infile.reg[idx].semantic.Name],
+               shader->infile.reg[idx].semantic.Index,
+               shader->infile.reg[idx].num_components);
    }
    printf("outputs:\n");
    for (int idx = 0; idx < shader->outfile.num_reg; ++idx) {
       printf(" [%i] name=%s index=%i comps=%i\n", shader->outfile.reg[idx].reg,
-             tgsi_semantic_names[shader->outfile.reg[idx].semantic.Name],
-             shader->outfile.reg[idx].semantic.Index,
-             shader->outfile.reg[idx].num_components);
+               tgsi_semantic_names[shader->outfile.reg[idx].semantic.Name],
+               shader->outfile.reg[idx].semantic.Index,
+               shader->outfile.reg[idx].num_components);
    }
    printf("special:\n");
-   if (shader->processor == PIPE_SHADER_VERTEX) {
+   if (shader->stage == MESA_SHADER_VERTEX) {
       printf("  vs_pos_out_reg=%i\n", shader->vs_pos_out_reg);
       printf("  vs_pointsize_out_reg=%i\n", shader->vs_pointsize_out_reg);
       printf("  vs_load_balancing=0x%08x\n", shader->vs_load_balancing);

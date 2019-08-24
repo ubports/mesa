@@ -156,22 +156,34 @@ v3d_predraw_check_stage_inputs(struct pipe_context *pctx,
                     view->base.format != PIPE_FORMAT_X32_S8X24_UINT)
                         v3d_update_shadow_texture(pctx, &view->base);
 
-                v3d_flush_jobs_writing_resource(v3d, view->texture, false);
+                v3d_flush_jobs_writing_resource(v3d, view->texture,
+                                                V3D_FLUSH_DEFAULT);
         }
 
         /* Flush writes to UBOs. */
         foreach_bit(i, v3d->constbuf[s].enabled_mask) {
                 struct pipe_constant_buffer *cb = &v3d->constbuf[s].cb[i];
-                if (cb->buffer)
-                        v3d_flush_jobs_writing_resource(v3d, cb->buffer, false);
+                if (cb->buffer) {
+                        v3d_flush_jobs_writing_resource(v3d, cb->buffer,
+                                                        V3D_FLUSH_DEFAULT);
+                }
         }
 
-        /* Flush writes to our image views */
+        /* Flush reads/writes to our SSBOs */
+        foreach_bit(i, v3d->ssbo[s].enabled_mask) {
+                struct pipe_shader_buffer *sb = &v3d->ssbo[s].sb[i];
+                if (sb->buffer) {
+                        v3d_flush_jobs_reading_resource(v3d, sb->buffer,
+                                                        V3D_FLUSH_NOT_CURRENT_JOB);
+                }
+        }
+
+        /* Flush reads/writes to our image views */
         foreach_bit(i, v3d->shaderimg[s].enabled_mask) {
                 struct v3d_image_view *view = &v3d->shaderimg[s].si[i];
 
-                v3d_flush_jobs_writing_resource(v3d, view->base.resource,
-                                                false);
+                v3d_flush_jobs_reading_resource(v3d, view->base.resource,
+                                                V3D_FLUSH_NOT_CURRENT_JOB);
         }
 
         /* Flush writes to our vertex buffers (i.e. from transform feedback) */
@@ -180,7 +192,7 @@ v3d_predraw_check_stage_inputs(struct pipe_context *pctx,
                         struct pipe_vertex_buffer *vb = &v3d->vertexbuf.vb[i];
 
                         v3d_flush_jobs_writing_resource(v3d, vb->buffer.resource,
-                                                        false);
+                                                        V3D_FLUSH_DEFAULT);
                 }
         }
 }
@@ -200,7 +212,8 @@ v3d_predraw_check_outputs(struct pipe_context *pctx)
 
                         const struct pipe_stream_output_target *target =
                                 so->targets[i];
-                        v3d_flush_jobs_reading_resource(v3d, target->buffer);
+                        v3d_flush_jobs_reading_resource(v3d, target->buffer,
+                                                        V3D_FLUSH_DEFAULT);
                 }
         }
 }
@@ -545,29 +558,20 @@ v3d_emit_gl_shader_state(struct v3d_context *v3d,
 }
 
 /**
- * Computes the various transform feedback statistics, since they can't be
- * recorded by CL packets.
+ * Updates the number of primitvies generated from the number of vertices
+ * to draw. We do this here instead of using PRIMITIVE_COUNTS_FEEDBACK because
+ * using the GPU packet for this might require sync waits and this is trivial
+ * to handle in the CPU instead.
  */
 static void
-v3d_tf_statistics_record(struct v3d_context *v3d,
-                         const struct pipe_draw_info *info)
+v3d_update_primitives_generated_counter(struct v3d_context *v3d,
+                                        const struct pipe_draw_info *info)
 {
         if (!v3d->active_queries)
                 return;
 
         uint32_t prims = u_prims_for_vertices(info->mode, info->count);
         v3d->prims_generated += prims;
-
-        if (v3d->streamout.num_targets <= 0)
-                return;
-
-        /* XXX: Only count if we didn't overflow. */
-        v3d->tf_prims_generated += prims;
-        for (int i = 0; i < v3d->streamout.num_targets; i++) {
-                struct v3d_stream_output_target *target =
-                        v3d_stream_output_target(v3d->streamout.targets[i]);
-                target->recorded_vertex_count += info->count;
-        }
 }
 
 static void
@@ -660,10 +664,21 @@ v3d_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info)
 
         if (info->indirect) {
                 v3d_flush_jobs_writing_resource(v3d, info->indirect->buffer,
-                                                false);
+                                                V3D_FLUSH_DEFAULT);
         }
 
         v3d_predraw_check_outputs(pctx);
+
+        /* If transform feedback is active and we are switching primitive type
+         * we need to submit the job before drawing and update the vertex count
+         * written to TF based on the primitive type since we will need to
+         * know the exact vertex count if the application decides to call
+         * glDrawTransformFeedback() later.
+         */
+        if (v3d->streamout.num_targets > 0 &&
+            u_base_prim_type(info->mode) != u_base_prim_type(v3d->prim_mode)) {
+                v3d_tf_update_counters(v3d);
+        }
 
         struct v3d_job *job = v3d_get_job_for_fbo(v3d);
 
@@ -762,7 +777,7 @@ v3d_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info)
                 prim_tf_enable = (V3D_PRIM_POINTS_TF - V3D_PRIM_POINTS);
 #endif
 
-        v3d_tf_statistics_record(v3d, info);
+        v3d_update_primitives_generated_counter(v3d, info);
 
         /* Note that the primitive type fields match with OpenGL/gallium
          * definitions, up to but not including QUADS.

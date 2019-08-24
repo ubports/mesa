@@ -279,9 +279,10 @@ LLVMValueRef si_llvm_bound_index(struct si_shader_context *ctx,
 void si_llvm_context_init(struct si_shader_context *ctx,
 			  struct si_screen *sscreen,
 			  struct ac_llvm_compiler *compiler,
-			  unsigned wave_size);
-void si_llvm_context_set_tgsi(struct si_shader_context *ctx,
-			      struct si_shader *shader);
+			  unsigned wave_size,
+			  unsigned ballot_mask_bits);
+void si_llvm_context_set_ir(struct si_shader_context *ctx,
+			    struct si_shader *shader);
 
 void si_llvm_create_func(struct si_shader_context *ctx,
 			 const char *name,

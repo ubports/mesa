@@ -406,6 +406,9 @@ private:
 
    void resolve_inot_sources(const brw::fs_builder &bld, nir_alu_instr *instr,
                              fs_reg *op);
+   void lower_mul_dword_inst(fs_inst *inst, bblock_t *block);
+   void lower_mul_qword_inst(fs_inst *inst, bblock_t *block);
+   void lower_mulh_inst(fs_inst *inst, bblock_t *block);
 };
 
 /**
@@ -425,7 +428,8 @@ public:
    ~fs_generator();
 
    void enable_debug(const char *shader_name);
-   int generate_code(const cfg_t *cfg, int dispatch_width);
+   int generate_code(const cfg_t *cfg, int dispatch_width,
+                     struct brw_compile_stats *stats);
    const unsigned *get_assembly();
 
 private:

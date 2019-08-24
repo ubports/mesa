@@ -68,11 +68,11 @@ typedef struct midgard_branch {
 } midgard_branch;
 
 /* Instruction arguments represented as block-local SSA indices, rather than
- * registers. Negative values mean unused. */
+ * registers. ~0 means unused. */
 
 typedef struct {
-        int src[3];
-        int dest;
+        unsigned src[3];
+        unsigned dest;
 
         bool inline_constant;
 } ssa_args;
@@ -117,6 +117,9 @@ typedef struct midgard_instruction {
         bool writeout;
         bool prepacked_branch;
 
+        /* Kind of a hack, but hint against aggressive DCE */
+        bool dont_eliminate;
+
         /* Masks in a saneish format. One bit per channel, not packed fancy.
          * Use this instead of the op specific ones, and switch over at emit
          * time */
@@ -128,6 +131,14 @@ typedef struct midgard_instruction {
          * allows more optimizations */
 
         bool invert;
+
+        /* Hint for the register allocator not to spill the destination written
+         * from this instruction (because it is a spill/unspill node itself) */
+
+        bool no_spill;
+
+        /* Generic hint for intra-pass use */
+        bool hint;
 
         union {
                 midgard_load_store_word load_store;
@@ -149,6 +160,9 @@ typedef struct midgard_block {
         /* List of midgard_instructions emitted for the current block */
         struct list_head instructions;
 
+        /* Index of the block in source order */
+        unsigned source_id;
+
         bool is_scheduled;
 
         /* List of midgard_bundles emitted (after the scheduler has run) */
@@ -159,8 +173,10 @@ typedef struct midgard_block {
 
         /* Succeeding blocks. The compiler should not necessarily rely on
          * source-order traversal */
-        struct midgard_block *successors[4];
+        struct midgard_block *successors[2];
         unsigned nr_successors;
+
+        struct set *predecessors;
 
         /* The successors pointer form a graph, and in the case of
          * complex control flow, this graph has a cycles. To aid
@@ -168,6 +184,14 @@ typedef struct midgard_block {
          * boolean for passes to use as they see fit, provided they
          * clean up later */
         bool visited;
+
+        /* In liveness analysis, these are live masks (per-component) for
+         * indices for the block. Scalar compilers have the luxury of using
+         * simple bit fields, but for us, liveness is a vector idea. We use
+         * 8-bit to allow finegrained tracking up to vec8. If you're
+         * implementing vec16 on Panfrost... I'm sorry. */
+        uint8_t *live_in;
+        uint8_t *live_out;
 } midgard_block;
 
 typedef struct midgard_bundle {
@@ -216,6 +240,9 @@ typedef struct compiler_context {
         int block_count;
         struct list_head blocks;
 
+        /* TODO merge with block_count? */
+        unsigned block_source_count;
+
         /* List of midgard_instructions emitted for the current block */
         midgard_block *current_block;
 
@@ -257,9 +284,6 @@ typedef struct compiler_context {
         /* Alpha ref value passed in */
         float alpha_ref;
 
-        /* The index corresponding to the fragment output */
-        unsigned fragment_output;
-
         /* The mapping of sysvals to uniforms, the count, and the off-by-one inverse */
         unsigned sysvals[MAX_SYSVAL_COUNT];
         unsigned sysval_count;
@@ -278,10 +302,12 @@ mir_upload_ins(struct midgard_instruction ins)
         return heap;
 }
 
-static inline void
+static inline midgard_instruction *
 emit_mir_instruction(struct compiler_context *ctx, struct midgard_instruction ins)
 {
-        list_addtail(&(mir_upload_ins(ins))->link, &ctx->current_block->instructions);
+        midgard_instruction *u = mir_upload_ins(ins);
+        list_addtail(&u->link, &ctx->current_block->instructions);
+        return u;
 }
 
 static inline struct midgard_instruction *
@@ -324,6 +350,8 @@ mir_next_op(struct midgard_instruction *ins)
 
 #define mir_foreach_instr_in_block(block, v) \
         list_for_each_entry(struct midgard_instruction, v, &block->instructions, link)
+#define mir_foreach_instr_in_block_rev(block, v) \
+        list_for_each_entry_rev(struct midgard_instruction, v, &block->instructions, link)
 
 #define mir_foreach_instr_in_block_safe(block, v) \
         list_for_each_entry_safe(struct midgard_instruction, v, &block->instructions, link)
@@ -348,6 +376,28 @@ mir_next_op(struct midgard_instruction *ins)
         mir_foreach_block(ctx, v_block) \
                 mir_foreach_instr_in_block_safe(v_block, v)
 
+#define mir_foreach_successor(blk, v) \
+        struct midgard_block *v; \
+        struct midgard_block **_v; \
+        for (_v = &blk->successors[0], \
+                v = *_v; \
+                v != NULL && _v < &blk->successors[2]; \
+                _v++, v = *_v) \
+
+/* Based on set_foreach, expanded with automatic type casts */
+
+#define mir_foreach_predecessor(blk, v) \
+        struct set_entry *_entry_##v; \
+        struct midgard_block *v; \
+        for (_entry_##v = _mesa_set_next_entry(blk->predecessors, NULL), \
+                v = (struct midgard_block *) (_entry_##v ? _entry_##v->key : NULL);  \
+                _entry_##v != NULL; \
+                _entry_##v = _mesa_set_next_entry(blk->predecessors, _entry_##v), \
+                v = (struct midgard_block *) (_entry_##v ? _entry_##v->key : NULL))
+
+#define mir_foreach_src(ins, v) \
+        for (unsigned v = 0; v < ARRAY_SIZE(ins->ssa_args.src); ++v)
+
 static inline midgard_instruction *
 mir_last_in_block(struct midgard_block *block)
 {
@@ -363,6 +413,19 @@ mir_get_block(compiler_context *ctx, int idx)
                 lst = lst->next;
 
         return (struct midgard_block *) lst;
+}
+
+static inline midgard_block *
+mir_exit_block(struct compiler_context *ctx)
+{
+        midgard_block *last = list_last_entry(&ctx->blocks,
+                        struct midgard_block, link);
+
+        /* The last block must be empty (the exit block) */
+        assert(list_empty(&last->instructions));
+        assert(last->nr_successors == 0);
+
+        return last;
 }
 
 static inline bool
@@ -423,6 +486,7 @@ void mir_rewrite_index(compiler_context *ctx, unsigned old, unsigned new);
 void mir_rewrite_index_src(compiler_context *ctx, unsigned old, unsigned new);
 void mir_rewrite_index_dst(compiler_context *ctx, unsigned old, unsigned new);
 void mir_rewrite_index_dst_tag(compiler_context *ctx, unsigned old, unsigned new, unsigned tag);
+void mir_rewrite_index_dst_single(midgard_instruction *ins, unsigned old, unsigned new);
 void mir_rewrite_index_src_single(midgard_instruction *ins, unsigned old, unsigned new);
 void mir_rewrite_index_src_tag(compiler_context *ctx, unsigned old, unsigned new, unsigned tag);
 void mir_rewrite_index_src_swizzle(compiler_context *ctx, unsigned old, unsigned new, unsigned swizzle);
@@ -431,6 +495,7 @@ bool mir_special_index(compiler_context *ctx, unsigned idx);
 unsigned mir_use_count(compiler_context *ctx, unsigned value);
 bool mir_is_written_before(compiler_context *ctx, midgard_instruction *ins, unsigned node);
 unsigned mir_mask_of_read_components(midgard_instruction *ins, unsigned node);
+unsigned mir_ubo_shift(midgard_load_store_op op);
 
 /* MIR printing */
 
@@ -469,7 +534,7 @@ v_mov(unsigned src, midgard_vector_alu_src mod, unsigned dest)
                 .type = TAG_ALU_4,
                 .mask = 0xF,
                 .ssa_args = {
-                        .src = { SSA_UNUSED_1, src, -1 },
+                        .src = { SSA_UNUSED, src, SSA_UNUSED },
                         .dest = dest,
                 },
                 .alu = {
@@ -526,13 +591,17 @@ void mir_create_pipeline_registers(compiler_context *ctx);
 void
 midgard_promote_uniforms(compiler_context *ctx, unsigned promoted_count);
 
-void
+midgard_instruction *
 emit_ubo_read(
         compiler_context *ctx,
+        nir_instr *instr,
         unsigned dest,
         unsigned offset,
         nir_src *indirect_offset,
         unsigned index);
+
+void
+emit_sysval_read(compiler_context *ctx, nir_instr *instr, signed dest_override, unsigned nr_components);
 
 void
 midgard_emit_derivatives(compiler_context *ctx, nir_alu_instr *instr);

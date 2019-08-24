@@ -33,10 +33,10 @@
 #include "util/u_video.h"
 #include "util/u_screen.h"
 #include "util/os_time.h"
+#include "util/u_process.h"
 #include "pipe/p_defines.h"
 #include "pipe/p_screen.h"
 #include "draw/draw_context.h"
-#include <xf86drm.h>
 
 #include <fcntl.h>
 
@@ -108,7 +108,6 @@ panfrost_get_param(struct pipe_screen *screen, enum pipe_cap param)
         case PIPE_CAP_QUERY_SO_OVERFLOW:
                 return 0;
 
-        case PIPE_CAP_TEXTURE_MIRROR_CLAMP:
         case PIPE_CAP_TEXTURE_SWIZZLE:
                 return 1;
 
@@ -121,6 +120,8 @@ panfrost_get_param(struct pipe_screen *screen, enum pipe_cap param)
         case PIPE_CAP_MAX_STREAM_OUTPUT_SEPARATE_COMPONENTS:
         case PIPE_CAP_MAX_STREAM_OUTPUT_INTERLEAVED_COMPONENTS:
                 return is_deqp ? 64 : 0;
+        case PIPE_CAP_STREAM_OUTPUT_INTERLEAVE_BUFFERS:
+                return 1;
 
         case PIPE_CAP_MAX_TEXTURE_ARRAY_LAYERS:
                 return is_deqp ? 256 : 0; /* for GL3 */
@@ -177,6 +178,11 @@ panfrost_get_param(struct pipe_screen *screen, enum pipe_cap param)
         case PIPE_CAP_TGSI_FS_FACE_IS_INTEGER_SYSVAL:
         case PIPE_CAP_TGSI_FS_POSITION_IS_SYSVAL:
                 return 0;
+
+        /* I really don't want to set this CAP but let's not swim against the
+         * tide.. */
+        case PIPE_CAP_TGSI_TEXCOORD:
+                return 1;
 
         case PIPE_CAP_SEAMLESS_CUBE_MAP:
         case PIPE_CAP_SEAMLESS_CUBE_MAP_PER_TEXTURE:
@@ -536,6 +542,7 @@ panfrost_destroy_screen(struct pipe_screen *pscreen)
 {
         struct panfrost_screen *screen = pan_screen(pscreen);
         panfrost_bo_cache_evict_all(screen);
+        drmFreeVersion(screen->kernel_version);
         ralloc_free(screen);
 }
 
@@ -583,9 +590,22 @@ panfrost_screen_get_compiler_options(struct pipe_screen *pscreen,
 struct pipe_screen *
 panfrost_create_screen(int fd, struct renderonly *ro)
 {
-        struct panfrost_screen *screen = rzalloc(NULL, struct panfrost_screen);
-
         pan_debug = debug_get_option_pan_debug();
+
+        /* Blacklist apps known to be buggy under Panfrost */
+        const char *proc = util_get_process_name();
+        const char *blacklist[] = {
+                "chromium",
+                "chrome",
+        };
+
+        for (unsigned i = 0; i < ARRAY_SIZE(blacklist); ++i) {
+                if ((strcmp(blacklist[i], proc) == 0))
+                        return NULL;
+        }
+
+        /* Create the screen */
+        struct panfrost_screen *screen = rzalloc(NULL, struct panfrost_screen);
 
         if (!screen)
                 return NULL;
@@ -603,6 +623,7 @@ panfrost_create_screen(int fd, struct renderonly *ro)
 
         screen->gpu_id = panfrost_drm_query_gpu_version(screen);
         screen->require_sfbd = screen->gpu_id < 0x0750; /* T760 is the first to support MFBD */
+        screen->kernel_version = drmGetVersion(fd);
 
         /* Check if we're loading against a supported GPU model. */
 
@@ -642,6 +663,7 @@ panfrost_create_screen(int fd, struct renderonly *ro)
         screen->base.get_compiler_options = panfrost_screen_get_compiler_options;
         screen->base.fence_reference = panfrost_fence_reference;
         screen->base.fence_finish = panfrost_fence_finish;
+        screen->base.set_damage_region = panfrost_resource_set_damage_region;
 
         screen->last_fragment_flushed = true;
         screen->last_job = NULL;

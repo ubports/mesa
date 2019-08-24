@@ -262,21 +262,11 @@ struct compiled_shader_state {
    uint32_t GL_VARYING_COMPONENT_USE[2];
    uint32_t GL_HALTI5_SH_SPECIALS;
    unsigned vs_inst_mem_size;
-   unsigned vs_uniforms_size;
    unsigned ps_inst_mem_size;
-   unsigned ps_uniforms_size;
    uint32_t *VS_INST_MEM;
-   uint32_t VS_UNIFORMS[ETNA_MAX_UNIFORMS * 4];
    uint32_t *PS_INST_MEM;
-   uint32_t PS_UNIFORMS[ETNA_MAX_UNIFORMS * 4];
    struct etna_reloc PS_INST_ADDR;
    struct etna_reloc VS_INST_ADDR;
-};
-
-/* state of some 3d and common registers relevant to etna driver */
-struct etna_3d_state {
-   uint32_t /*05000*/ VS_UNIFORMS[VIVS_VS_UNIFORMS__LEN];
-   uint32_t /*07000*/ PS_UNIFORMS[VIVS_PS_UNIFORMS__LEN];
 };
 
 /* Helpers to assist creating and setting bitarrays (eg, for varyings).

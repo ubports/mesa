@@ -33,6 +33,7 @@
 
 #include <stdio.h>
 #include <errno.h>
+#include "perf/gen_perf.h"
 #include "pipe/p_defines.h"
 #include "pipe/p_state.h"
 #include "pipe/p_context.h"
@@ -42,6 +43,7 @@
 #include "iris_context.h"
 #include "iris_defines.h"
 #include "iris_fence.h"
+#include "iris_monitor.h"
 #include "iris_resource.h"
 #include "iris_screen.h"
 
@@ -65,6 +67,8 @@ struct iris_query {
    struct iris_syncpt *syncpt;
 
    int batch_idx;
+
+   struct iris_monitor_object *monitor;
 };
 
 struct iris_query_snapshots {
@@ -436,6 +440,7 @@ iris_create_query(struct pipe_context *ctx,
 
    q->type = query_type;
    q->index = index;
+   q->monitor = NULL;
 
    if (q->type == PIPE_QUERY_PIPELINE_STATISTICS_SINGLE &&
        q->index == PIPE_STAT_QUERY_CS_INVOCATIONS)
@@ -445,12 +450,37 @@ iris_create_query(struct pipe_context *ctx,
    return (struct pipe_query *) q;
 }
 
+static struct pipe_query *
+iris_create_batch_query(struct pipe_context *ctx,
+                        unsigned num_queries,
+                        unsigned *query_types)
+{
+   struct iris_context *ice = (void *) ctx;
+   struct iris_query *q = calloc(1, sizeof(struct iris_query));
+   if (unlikely(!q))
+      return NULL;
+   q->type = PIPE_QUERY_DRIVER_SPECIFIC;
+   q->index = -1;
+   q->monitor = iris_create_monitor_object(ice, num_queries, query_types);
+   if (unlikely(!q->monitor)) {
+      free(q);
+      return NULL;
+   }
+
+   return (struct pipe_query *) q;
+}
+
 static void
 iris_destroy_query(struct pipe_context *ctx, struct pipe_query *p_query)
 {
    struct iris_query *query = (void *) p_query;
    struct iris_screen *screen = (void *) ctx->screen;
-   iris_syncpt_reference(screen, &query->syncpt, NULL);
+   if (query->monitor) {
+      iris_destroy_monitor_object(ctx, query->monitor);
+      query->monitor = NULL;
+   } else {
+      iris_syncpt_reference(screen, &query->syncpt, NULL);
+   }
    free(query);
 }
 
@@ -460,6 +490,10 @@ iris_begin_query(struct pipe_context *ctx, struct pipe_query *query)
 {
    struct iris_context *ice = (void *) ctx;
    struct iris_query *q = (void *) query;
+
+   if (q->monitor)
+      return iris_begin_monitor(ctx, q->monitor);
+
    void *ptr = NULL;
    uint32_t size;
 
@@ -505,6 +539,10 @@ iris_end_query(struct pipe_context *ctx, struct pipe_query *query)
 {
    struct iris_context *ice = (void *) ctx;
    struct iris_query *q = (void *) query;
+
+   if (q->monitor)
+      return iris_end_monitor(ctx, q->monitor);
+
    struct iris_batch *batch = &ice->batches[q->batch_idx];
 
    if (q->type == PIPE_QUERY_TIMESTAMP) {
@@ -556,6 +594,10 @@ iris_get_query_result(struct pipe_context *ctx,
 {
    struct iris_context *ice = (void *) ctx;
    struct iris_query *q = (void *) query;
+
+   if (q->monitor)
+      return iris_get_monitor_result(ctx, q->monitor, wait, result->batch);
+
    struct iris_screen *screen = (void *) ctx->screen;
    const struct gen_device_info *devinfo = &screen->devinfo;
 
@@ -809,6 +851,7 @@ genX(init_query)(struct iris_context *ice)
    struct pipe_context *ctx = &ice->ctx;
 
    ctx->create_query = iris_create_query;
+   ctx->create_batch_query = iris_create_batch_query;
    ctx->destroy_query = iris_destroy_query;
    ctx->begin_query = iris_begin_query;
    ctx->end_query = iris_end_query;

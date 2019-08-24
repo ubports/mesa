@@ -1098,6 +1098,18 @@ void anv_GetPhysicalDeviceFeatures2(
          break;
       }
 
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LINE_RASTERIZATION_FEATURES_EXT: {
+         VkPhysicalDeviceLineRasterizationFeaturesEXT *features =
+            (VkPhysicalDeviceLineRasterizationFeaturesEXT *)ext;
+         features->rectangularLines = true;
+         features->bresenhamLines = true;
+         features->smoothLines = true;
+         features->stippledRectangularLines = false;
+         features->stippledBresenhamLines = true;
+         features->stippledSmoothLines = false;
+         break;
+      }
+
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES: {
          VkPhysicalDeviceMultiviewFeatures *features =
             (VkPhysicalDeviceMultiviewFeatures *)ext;
@@ -1111,6 +1123,13 @@ void anv_GetPhysicalDeviceFeatures2(
          VkPhysicalDeviceImagelessFramebufferFeaturesKHR *features =
             (VkPhysicalDeviceImagelessFramebufferFeaturesKHR *)ext;
          features->imagelessFramebuffer = true;
+         break;
+      }
+
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR: {
+         VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR *features =
+            (VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR *)ext;
+         features->pipelineExecutableInfo = true;
          break;
       }
 
@@ -1151,6 +1170,14 @@ void anv_GetPhysicalDeviceFeatures2(
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES: {
          VkPhysicalDeviceShaderDrawParametersFeatures *features = (void *)ext;
          features->shaderDrawParameters = true;
+         break;
+      }
+
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT: {
+         VkPhysicalDeviceSubgroupSizeControlFeaturesEXT *features =
+            (VkPhysicalDeviceSubgroupSizeControlFeaturesEXT *)ext;
+         features->subgroupSizeControl = true;
+         features->computeFullSubgroups = true;
          break;
       }
 
@@ -1346,10 +1373,14 @@ void anv_GetPhysicalDeviceProperties(
       .maxCombinedClipAndCullDistances          = 8,
       .discreteQueuePriorities                  = 2,
       .pointSizeRange                           = { 0.125, 255.875 },
-      .lineWidthRange                           = { 0.0, 7.9921875 },
+      .lineWidthRange                           = {
+         0.0,
+         (devinfo->gen >= 9 || devinfo->is_cherryview) ?
+            2047.9921875 : 7.9921875,
+      },
       .pointSizeGranularity                     = (1.0 / 8.0),
       .lineWidthGranularity                     = (1.0 / 128.0),
-      .strictLines                              = false, /* FINISHME */
+      .strictLines                              = false,
       .standardSampleLocations                  = true,
       .optimalBufferCopyOffsetAlignment         = 128,
       .optimalBufferCopyRowPitchAlignment       = 128,
@@ -1506,6 +1537,25 @@ void anv_GetPhysicalDeviceProperties2(
          break;
       }
 
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LINE_RASTERIZATION_PROPERTIES_EXT: {
+         VkPhysicalDeviceLineRasterizationPropertiesEXT *props =
+            (VkPhysicalDeviceLineRasterizationPropertiesEXT *)ext;
+         /* In the Skylake PRM Vol. 7, subsection titled "GIQ (Diamond)
+          * Sampling Rules - Legacy Mode", it says the following:
+          *
+          *    "Note that the device divides a pixel into a 16x16 array of
+          *    subpixels, referenced by their upper left corners."
+          *
+          * This is the only known reference in the PRMs to the subpixel
+          * precision of line rasterization and a "16x16 array of subpixels"
+          * implies 4 subpixel precision bits.  Empirical testing has shown
+          * that 4 subpixel precision bits applies to all line rasterization
+          * types.
+          */
+         props->lineSubPixelPrecisionBits = 4;
+         break;
+      }
+
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES: {
          VkPhysicalDeviceMaintenance3Properties *props =
             (VkPhysicalDeviceMaintenance3Properties *)ext;
@@ -1541,6 +1591,16 @@ void anv_GetPhysicalDeviceProperties2(
          properties->pointClippingBehavior = VK_POINT_CLIPPING_BEHAVIOR_USER_CLIP_PLANES_ONLY;
          break;
       }
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wswitch"
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENTATION_PROPERTIES_ANDROID: {
+         VkPhysicalDevicePresentationPropertiesANDROID *props =
+            (VkPhysicalDevicePresentationPropertiesANDROID *)ext;
+         props->sharedImage = VK_FALSE;
+         break;
+      }
+#pragma GCC diagnostic pop
 
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_PROPERTIES: {
          VkPhysicalDeviceProtectedMemoryProperties *props =
@@ -2536,6 +2596,7 @@ void anv_DestroyDevice(
     * BO will go away in a couple of lines so we don't actually leak.
     */
    anv_state_pool_free(&device->dynamic_state_pool, device->border_colors);
+   anv_state_pool_free(&device->dynamic_state_pool, device->slice_hash);
 #endif
 
    anv_scratch_pool_finish(device, &device->scratch_pool);

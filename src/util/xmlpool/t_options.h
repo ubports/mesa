@@ -140,6 +140,11 @@ DRI_CONF_OPT_BEGIN_B(allow_glsl_layout_qualifier_on_function_parameters, def) \
         DRI_CONF_DESC(en,gettext("Allow layout qualifiers on function parameters.")) \
 DRI_CONF_OPT_END
 
+#define DRI_CONF_FORCE_GL_VENDOR(def) \
+DRI_CONF_OPT_BEGIN(force_gl_vendor, string, def) \
+        DRI_CONF_DESC(en,gettext("Allow GPU vendor to be overridden.")) \
+DRI_CONF_OPT_END
+
 #define DRI_CONF_FORCE_COMPAT_PROFILE(def) \
 DRI_CONF_OPT_BEGIN_B(force_compat_profile, def) \
         DRI_CONF_DESC(en,gettext("Force an OpenGL compatibility context")) \
@@ -267,6 +272,11 @@ DRI_CONF_OPT_END
 #define DRI_CONF_ALLOW_RGB565_CONFIGS(def) \
 DRI_CONF_OPT_BEGIN_B(allow_rgb565_configs, def) \
 DRI_CONF_DESC(en,gettext("Allow exposure of visuals and fbconfigs with rgb565 formats")) \
+DRI_CONF_OPT_END
+
+#define DRI_CONF_ALLOW_FP16_CONFIGS(def) \
+DRI_CONF_OPT_BEGIN_B(allow_fp16_configs, def) \
+DRI_CONF_DESC(en,gettext("Allow exposure of visuals and fbconfigs with fp16 formats")) \
 DRI_CONF_OPT_END
 
 /**

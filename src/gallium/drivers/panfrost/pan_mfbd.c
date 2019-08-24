@@ -42,7 +42,8 @@ panfrost_invert_swizzle(const unsigned char *in, unsigned char *out)
                 unsigned char i = in[c];
 
                 /* Who cares? */
-                if (i < PIPE_SWIZZLE_X || i > PIPE_SWIZZLE_W)
+                assert(PIPE_SWIZZLE_X == 0);
+                if (i > PIPE_SWIZZLE_W)
                         continue;
 
                 /* Invert */
@@ -73,7 +74,7 @@ panfrost_mfbd_format(struct pipe_surface *surf)
                 .unk3 = 0x4,
                 .flags = 0x8,
                 .swizzle = panfrost_translate_swizzle_4(swizzle),
-                .unk4 = 0x8
+                .no_preload = true
         };
 
         if (desc->colorspace == UTIL_FORMAT_COLORSPACE_SRGB)
@@ -349,7 +350,7 @@ panfrost_mfbd_upload(
         struct bifrost_framebuffer *fb,
         struct bifrost_fb_extra *fbx,
         struct bifrost_render_target *rts,
-        unsigned cbufs)
+        unsigned rt_count)
 {
         off_t offset = 0;
 
@@ -361,7 +362,7 @@ panfrost_mfbd_upload(
         size_t total_sz =
                 sizeof(struct bifrost_framebuffer) +
                 (has_extra ? sizeof(struct bifrost_fb_extra) : 0) +
-                sizeof(struct bifrost_render_target) * cbufs;
+                sizeof(struct bifrost_render_target) * 4;
 
         struct panfrost_transfer m_f_trans =
                 panfrost_allocate_transient(ctx, total_sz);
@@ -373,12 +374,17 @@ panfrost_mfbd_upload(
         if (has_extra)
                 UPLOAD(m_f_trans, offset, fbx, total_sz);
 
-        for (unsigned c = 0; c < cbufs; ++c) {
+        for (unsigned c = 0; c < 4; ++c) {
                 UPLOAD(m_f_trans, offset, &rts[c], total_sz);
         }
 
         /* Return pointer suitable for the fragment section */
-        return m_f_trans.gpu | MALI_MFBD | (has_extra ? 2 : 0);
+        unsigned tag =
+                MALI_MFBD |
+                (has_extra ? MALI_MFBD_TAG_EXTRA : 0) |
+                (MALI_POSITIVE(rt_count) << 2);
+
+        return m_f_trans.gpu | tag;
 }
 
 #undef UPLOAD
@@ -424,7 +430,7 @@ panfrost_mfbd_fragment(struct panfrost_context *ctx, bool has_draws)
                 } else {
                         struct mali_rt_format null_rt = {
                                 .unk1 = 0x4000000,
-                                .unk4 = 0x8
+                                .no_preload = true
                         };
 
                         rts[cb].format = null_rt;
@@ -483,8 +489,5 @@ panfrost_mfbd_fragment(struct panfrost_context *ctx, bool has_draws)
                 }
         }
 
-        /* We always upload at least one (dummy) cbuf */
-        unsigned cbufs = MAX2(ctx->pipe_framebuffer.nr_cbufs, 1);
-
-        return panfrost_mfbd_upload(ctx, &fb, &fbx, rts, cbufs);
+        return panfrost_mfbd_upload(ctx, &fb, &fbx, rts, rt_descriptors);
 }

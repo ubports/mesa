@@ -228,7 +228,7 @@ panfrost_vertex_instanced(
 
                 /* Apply round-down algorithm? e <= 2^shift?. XXX: The blob
                  * seems to use a different condition */
-                if (e <= (1 << shift)) {
+                if (e <= (1ll << shift)) {
                         magic_divisor = m - 1;
                         extra_flags = 1;
                 }
@@ -292,7 +292,7 @@ panfrost_emit_vertex_data(struct panfrost_job *batch)
                  * will be adjusted back when we fixup the src_offset in
                  * mali_attr_meta */
 
-                mali_ptr raw_addr = panfrost_vertex_buffer_address(ctx, vbi);
+                mali_ptr raw_addr = rsrc->bo->gpu + buf->buffer_offset;
                 mali_ptr addr = raw_addr & ~63;
                 unsigned chopped_addr = raw_addr - addr;
 
@@ -302,7 +302,10 @@ panfrost_emit_vertex_data(struct panfrost_job *batch)
                 /* Set common fields */
                 attrs[k].elements = addr;
                 attrs[k].stride = buf->stride;
-                attrs[k].size = rsrc->base.width0;
+
+                /* Since we advanced the base pointer, we shrink the buffer
+                 * size */
+                attrs[k].size = rsrc->base.width0 - buf->buffer_offset;
 
                 /* We need to add the extra size we masked off (for
                  * correctness) so the data doesn't get clamped away */

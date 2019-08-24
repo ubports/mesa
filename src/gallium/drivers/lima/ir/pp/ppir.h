@@ -53,6 +53,7 @@ typedef enum {
    ppir_op_normalize3,
    ppir_op_normalize4,
 
+   ppir_op_sel_cond,
    ppir_op_select,
 
    ppir_op_sin,
@@ -112,6 +113,8 @@ typedef enum {
    ppir_op_discard,
    ppir_op_branch,
 
+   ppir_op_dummy,
+
    ppir_op_num,
 } ppir_op;
 
@@ -168,6 +171,7 @@ typedef enum {
 typedef struct ppir_reg {
    struct list_head list;
    int index;
+   int regalloc_index;
    int num_components;
    /* whether this reg has to start from the x component
     * of a full physical reg, this is true for reg used
@@ -187,6 +191,7 @@ typedef enum {
 
 typedef struct ppir_src {
    ppir_target type;
+   ppir_node *node;
 
    union {
       ppir_reg *ssa;
@@ -306,19 +311,31 @@ typedef struct ppir_block {
    struct list_head list;
    struct list_head node_list;
    struct list_head instr_list;
+
+   struct ppir_block *successors[2];
+
    struct ppir_compiler *comp;
 
    /* for scheduler */
    int sched_instr_index;
    int sched_instr_base;
+   int index;
+
+   /*  for liveness analysis */
+   BITSET_WORD *def;
+   BITSET_WORD *use;
+   BITSET_WORD *live_in;
+   BITSET_WORD *live_out;
 } ppir_block;
 
 typedef struct {
    ppir_node node;
    ppir_src src[2];
+   int num_src;
    bool cond_gt;
    bool cond_eq;
    bool cond_lt;
+   bool negate;
    ppir_block *target;
 } ppir_branch_node;
 
@@ -327,6 +344,7 @@ struct lima_fs_shader_state;
 
 typedef struct ppir_compiler {
    struct list_head block_list;
+   struct hash_table_u64 *blocks;
    int cur_index;
    int cur_instr_index;
 
@@ -345,7 +363,15 @@ typedef struct ppir_compiler {
    /* for regalloc spilling debug */
    int force_spilling;
 
+   /* shaderdb */
+   int num_loops;
+   int num_spills;
+   int num_fills;
+
    ppir_block *discard_block;
+   ppir_block *current_block;
+   ppir_block *loop_break_block;
+   ppir_block *loop_cont_block;
 } ppir_compiler;
 
 void *ppir_node_create(ppir_block *block, ppir_op op, int index, unsigned mask);
@@ -356,6 +382,8 @@ void ppir_node_print_prog(ppir_compiler *comp);
 void ppir_node_replace_child(ppir_node *parent, ppir_node *old_child, ppir_node *new_child);
 void ppir_node_replace_all_succ(ppir_node *dst, ppir_node *src);
 void ppir_node_replace_pred(ppir_dep *dep, ppir_node *new_pred);
+ppir_dep *ppir_dep_for_pred(ppir_node *node, ppir_node *pred);
+ppir_node *ppir_node_clone(ppir_block *block, ppir_node *node);
 
 static inline bool ppir_node_is_root(ppir_node *node)
 {
@@ -420,18 +448,101 @@ static inline ppir_dest *ppir_node_get_dest(ppir_node *node)
    }
 }
 
-static inline void ppir_node_target_assign(ppir_src *src, ppir_dest *dest)
+static inline int ppir_node_get_src_num(ppir_node *node)
 {
+   switch (node->type) {
+   case ppir_node_type_alu:
+      return ppir_node_to_alu(node)->num_src;
+   case ppir_node_type_branch:
+      return ppir_node_to_branch(node)->num_src;
+   case ppir_node_type_load_texture:
+   case ppir_node_type_load:
+   case ppir_node_type_store:
+      return 1;
+   default:
+      return 0;
+   }
+
+   return 0;
+}
+
+static inline ppir_src *ppir_node_get_src(ppir_node *node, int idx)
+{
+   if (idx < 0 || idx >= ppir_node_get_src_num(node))
+      return NULL;
+
+   switch (node->type) {
+   case ppir_node_type_alu:
+      return &ppir_node_to_alu(node)->src[idx];
+   case ppir_node_type_branch:
+      return &ppir_node_to_branch(node)->src[idx];
+   case ppir_node_type_load_texture:
+      return &ppir_node_to_load_texture(node)->src_coords;
+   case ppir_node_type_load:
+      return &ppir_node_to_load(node)->src;
+   case ppir_node_type_store:
+      return &ppir_node_to_store(node)->src;
+   default:
+      break;
+   }
+
+   return NULL;
+}
+
+static inline ppir_reg *ppir_src_get_reg(ppir_src *src)
+{
+   switch (src->type) {
+   case ppir_target_ssa:
+      return src->ssa;
+   case ppir_target_register:
+      return src->reg;
+   default:
+      return NULL;
+   }
+}
+
+static inline ppir_reg *ppir_dest_get_reg(ppir_dest *dest)
+{
+   switch (dest->type) {
+   case ppir_target_ssa:
+      return &dest->ssa;
+   case ppir_target_register:
+      return dest->reg;
+   default:
+      return NULL;
+   }
+}
+
+static inline ppir_src *ppir_node_get_src_for_pred(ppir_node *node, ppir_node *pred)
+{
+   for (int i = 0; i < ppir_node_get_src_num(node); i++) {
+      ppir_src *src = ppir_node_get_src(node, i);
+      if (src && src->node == pred)
+         return src;
+   }
+
+   return NULL;
+}
+
+static inline void ppir_node_target_assign(ppir_src *src, ppir_node *node)
+{
+   ppir_dest *dest = ppir_node_get_dest(node);
    src->type = dest->type;
    switch (src->type) {
    case ppir_target_ssa:
       src->ssa = &dest->ssa;
+      src->node = node;
       break;
    case ppir_target_register:
       src->reg = dest->reg;
+      /* Registers can be assigned from multiple nodes, so don't keep
+       * pointer to the node here
+       */
+      src->node = NULL;
       break;
    case ppir_target_pipeline:
       src->pipeline = dest->pipeline;
+      src->node = node;
       break;
    }
 }
@@ -451,9 +562,13 @@ static inline int ppir_target_get_src_reg_index(ppir_src *src)
 {
    switch (src->type) {
    case ppir_target_ssa:
-      return src->ssa->index;
+      if (src->ssa)
+         return src->ssa->index;
+      break;
    case ppir_target_register:
-      return src->reg->index;
+      if (src->reg)
+         return src->reg->index;
+      break;
    case ppir_target_pipeline:
       if (src->pipeline == ppir_pipeline_reg_discard)
          return 15 * 4;
@@ -536,5 +651,6 @@ bool ppir_node_to_instr(ppir_compiler *comp);
 bool ppir_schedule_prog(ppir_compiler *comp);
 bool ppir_regalloc_prog(ppir_compiler *comp);
 bool ppir_codegen_prog(ppir_compiler *comp);
+void ppir_liveness_analysis(ppir_compiler *comp);
 
 #endif

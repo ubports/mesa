@@ -51,9 +51,6 @@
 #include <time.h>
 
 #include "errno.h"
-#ifndef ETIME
-#define ETIME ETIMEDOUT
-#endif
 #include "common/gen_clflush.h"
 #include "dev/gen_debug.h"
 #include "common/gen_gem.h"
@@ -173,10 +170,27 @@ key_uint_equal(const void *a, const void *b)
 }
 
 static struct iris_bo *
-hash_find_bo(struct hash_table *ht, unsigned int key)
+find_and_ref_external_bo(struct hash_table *ht, unsigned int key)
 {
    struct hash_entry *entry = _mesa_hash_table_search(ht, &key);
-   return entry ? (struct iris_bo *) entry->data : NULL;
+   struct iris_bo *bo = entry ? entry->data : NULL;
+
+   if (bo) {
+      assert(bo->external);
+      assert(!bo->reusable);
+
+      /* Being non-reusable, the BO cannot be in the cache lists, but it
+       * may be in the zombie list if it had reached zero references, but
+       * we hadn't yet closed it...and then reimported the same BO.  If it
+       * is, then remove it since it's now been resurrected.
+       */
+      if (bo->head.prev || bo->head.next)
+         list_del(&bo->head);
+
+      iris_bo_reference(bo);
+   }
+
+   return bo;
 }
 
 /**
@@ -628,11 +642,9 @@ iris_bo_gem_create_from_name(struct iris_bufmgr *bufmgr,
     * provides a sufficiently fast match.
     */
    mtx_lock(&bufmgr->lock);
-   bo = hash_find_bo(bufmgr->name_table, handle);
-   if (bo) {
-      iris_bo_reference(bo);
+   bo = find_and_ref_external_bo(bufmgr->name_table, handle);
+   if (bo)
       goto out;
-   }
 
    struct drm_gem_open open_arg = { .name = handle };
    int ret = gen_ioctl(bufmgr->fd, DRM_IOCTL_GEM_OPEN, &open_arg);
@@ -646,11 +658,9 @@ iris_bo_gem_create_from_name(struct iris_bufmgr *bufmgr,
     * object from the kernel before by looking through the list
     * again for a matching gem_handle
     */
-   bo = hash_find_bo(bufmgr->handle_table, open_arg.handle);
-   if (bo) {
-      iris_bo_reference(bo);
+   bo = find_and_ref_external_bo(bufmgr->handle_table, open_arg.handle);
+   if (bo)
       goto out;
-   }
 
    bo = bo_calloc();
    if (!bo)
@@ -697,6 +707,18 @@ bo_close(struct iris_bo *bo)
 {
    struct iris_bufmgr *bufmgr = bo->bufmgr;
 
+   if (bo->external) {
+      struct hash_entry *entry;
+
+      if (bo->global_name) {
+         entry = _mesa_hash_table_search(bufmgr->name_table, &bo->global_name);
+         _mesa_hash_table_remove(bufmgr->name_table, entry);
+      }
+
+      entry = _mesa_hash_table_search(bufmgr->handle_table, &bo->gem_handle);
+      _mesa_hash_table_remove(bufmgr->handle_table, entry);
+   }
+
    /* Close this object */
    struct drm_gem_close close = { .handle = bo->gem_handle };
    int ret = gen_ioctl(bufmgr->fd, DRM_IOCTL_GEM_CLOSE, &close);
@@ -727,18 +749,6 @@ bo_free(struct iris_bo *bo)
    if (bo->map_gtt) {
       VG_NOACCESS(bo->map_gtt, bo->size);
       munmap(bo->map_gtt, bo->size);
-   }
-
-   if (bo->external) {
-      struct hash_entry *entry;
-
-      if (bo->global_name) {
-         entry = _mesa_hash_table_search(bufmgr->name_table, &bo->global_name);
-         _mesa_hash_table_remove(bufmgr->name_table, entry);
-      }
-
-      entry = _mesa_hash_table_search(bufmgr->handle_table, &bo->gem_handle);
-      _mesa_hash_table_remove(bufmgr->handle_table, entry);
    }
 
    if (bo->idle) {
@@ -1275,11 +1285,9 @@ iris_bo_import_dmabuf(struct iris_bufmgr *bufmgr, int prime_fd)
     * for named buffers, we must not create two bo's pointing at the same
     * kernel object
     */
-   bo = hash_find_bo(bufmgr->handle_table, handle);
-   if (bo) {
-      iris_bo_reference(bo);
+   bo = find_and_ref_external_bo(bufmgr->handle_table, handle);
+   if (bo)
       goto out;
-   }
 
    bo = bo_calloc();
    if (!bo)

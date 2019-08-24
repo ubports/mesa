@@ -964,6 +964,7 @@ brwCreateContext(gl_api api,
       *dri_ctx_error = __DRI_CTX_ERROR_NO_MEMORY;
       return false;
    }
+   brw->perf_ctx = gen_perf_new_context(brw);
 
    driContextPriv->driverPrivate = brw;
    brw->driContext = driContextPriv;
@@ -988,6 +989,13 @@ brwCreateContext(gl_api api,
 
    if (notify_reset)
       functions.GetGraphicsResetStatus = brw_get_graphics_reset_status;
+
+   brw_process_driconf_options(brw);
+
+   if (api == API_OPENGL_CORE &&
+       driQueryOptionb(&screen->optionCache, "force_compat_profile")) {
+      api = API_OPENGL_COMPAT;
+   }
 
    struct gl_context *ctx = &brw->ctx;
 
@@ -1022,8 +1030,6 @@ brwCreateContext(gl_api api,
    }
 
    _mesa_meta_init(ctx);
-
-   brw_process_driconf_options(brw);
 
    if (INTEL_DEBUG & DEBUG_PERF)
       brw->perf_debug = true;

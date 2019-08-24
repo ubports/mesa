@@ -827,6 +827,7 @@ static void atomic_emit(
 
 	args.data[num_data++] =
 		ac_to_integer(&ctx->ac, lp_build_emit_fetch(bld_base, inst, 2, 0));
+
 	args.cache_policy = get_cache_policy(ctx, inst, true, false, false);
 
 	if (inst->Src[0].Register.File == TGSI_FILE_BUFFER) {
@@ -839,8 +840,7 @@ static void atomic_emit(
 		vindex = args.coords[0]; /* for buffers only */
 	}
 
-	if (HAVE_LLVM >= 0x0800 &&
-	    inst->Src[0].Register.File != TGSI_FILE_BUFFER &&
+	if (inst->Src[0].Register.File != TGSI_FILE_BUFFER &&
 	    inst->Memory.Texture == TGSI_TEXTURE_BUFFER) {
 		LLVMValueRef buf_args[7];
 		unsigned num_args = 0;
@@ -865,9 +865,7 @@ static void atomic_emit(
 		return;
 	}
 
-	if (inst->Src[0].Register.File == TGSI_FILE_BUFFER ||
-	    (HAVE_LLVM < 0x0800 &&
-	     inst->Memory.Texture == TGSI_TEXTURE_BUFFER)) {
+	if (inst->Src[0].Register.File == TGSI_FILE_BUFFER) {
 		LLVMValueRef buf_args[7];
 		unsigned num_args = 0;
 
@@ -902,6 +900,12 @@ static void atomic_emit(
 			case TGSI_OPCODE_ATOMUMAX: args.atomic = ac_atomic_umax; break;
 			case TGSI_OPCODE_ATOMIMIN: args.atomic = ac_atomic_smin; break;
 			case TGSI_OPCODE_ATOMIMAX: args.atomic = ac_atomic_smax; break;
+			case TGSI_OPCODE_ATOMINC_WRAP:
+				args.atomic = ac_atomic_inc_wrap;
+				break;
+			case TGSI_OPCODE_ATOMDEC_WRAP:
+				args.atomic = ac_atomic_dec_wrap;
+				break;
 			default: unreachable("unhandled image atomic");
 			}
 		}
@@ -1821,4 +1825,8 @@ void si_shader_context_init_mem(struct si_shader_context *ctx)
 	bld_base->op_actions[TGSI_OPCODE_ATOMIMIN].intr_name = "smin";
 	bld_base->op_actions[TGSI_OPCODE_ATOMIMAX].emit = atomic_emit;
 	bld_base->op_actions[TGSI_OPCODE_ATOMIMAX].intr_name = "smax";
+	bld_base->op_actions[TGSI_OPCODE_ATOMINC_WRAP].emit = atomic_emit;
+	bld_base->op_actions[TGSI_OPCODE_ATOMINC_WRAP].intr_name = "inc";
+	bld_base->op_actions[TGSI_OPCODE_ATOMDEC_WRAP].emit = atomic_emit;
+	bld_base->op_actions[TGSI_OPCODE_ATOMDEC_WRAP].intr_name = "dec";
 }

@@ -391,15 +391,14 @@ midgard_writeout;
 typedef enum {
         midgard_op_ld_st_noop   = 0x03,
 
-        /* Unclear why this is on the L/S unit, but (with an address of 0,
-         * appropriate swizzle, magic constant 0x24, and xy mask?) moves fp32 cube
-         * map coordinates in r27 to its cube map texture coordinate
-         * destination (e.g r29). 0x4 magic for lding from fp16 instead */
+        /* Unclear why this is on the L/S unit, but moves fp32 cube map
+         * coordinates in r27 to its cube map texture coordinate destination
+         * (e.g r29). */
 
-        midgard_op_st_cubemap_coords = 0x0E,
+        midgard_op_ld_cubemap_coords = 0x0E,
 
-        /* Used in OpenCL. Probably can ld other things as well */
-        midgard_op_ld_global_id = 0x10,
+        /* Loads a global/local/group ID, depending on arguments */
+        midgard_op_ld_compute_id = 0x10,
 
         /* The L/S unit can do perspective division a clock faster than the ALU
          * if you're lucky. Put the vec4 in r27, and call with 0x24 as the
@@ -441,10 +440,20 @@ typedef enum {
         midgard_op_ld_vary_32i = 0x9B,
         midgard_op_ld_color_buffer_16 = 0x9D,
 
-        midgard_op_ld_uniform_16 = 0xAC,
-        midgard_op_ld_uniform_32i = 0xA8,
+        /* The distinction between these ops is the alignment requirement /
+         * accompanying shift. Thus, the offset to ld_ubo_int4 is in 16-byte
+         * units and can load 128-bit. The offset to ld_ubo_short4 is in 8-byte
+         * units; ld_ubo_char4 in 4-byte units. ld_ubo_char/ld_ubo_char2 are
+         * purely theoretical (never seen in the wild) since int8/int16/fp16
+         * UBOs don't really exist. The ops are still listed to maintain
+         * symmetry with generic I/O ops. */
 
-        midgard_op_ld_uniform_32 = 0xB0,
+        midgard_op_ld_ubo_char   = 0xA0, /* theoretical */
+        midgard_op_ld_ubo_char2  = 0xA4, /* theoretical */
+        midgard_op_ld_ubo_char4  = 0xA8,
+        midgard_op_ld_ubo_short4 = 0xAC,
+        midgard_op_ld_ubo_int4   = 0xB0,
+
         midgard_op_ld_color_buffer_8 = 0xBA,
 
         midgard_op_st_char = 0xC0,
@@ -508,7 +517,14 @@ __attribute__((__packed__))
         /* Register select between r26/r27 */
         unsigned select : 1;
 
-        unsigned unknown : 5;
+        unsigned unknown : 2;
+
+        /* Like any good Arm instruction set, load/store arguments can be
+         * implicitly left-shifted... but only the second argument. Zero for no
+         * shifting, up to <<7 possible though. This is useful for indexing.
+         *
+         * For the first argument, it's unknown what these bits mean */
+        unsigned shift : 3;
 }
 midgard_ldst_register_select;
 
@@ -612,7 +628,13 @@ __attribute__((__packed__))
         unsigned last  : 1;
 
         enum mali_texture_type format : 2;
-        unsigned zero : 2;
+
+        /* Are sampler_handle/texture_handler respectively set by registers? If
+         * true, the lower 8-bits of the respective field is a register word.
+         * If false, they are an immediate */
+
+        unsigned sampler_register : 1;
+        unsigned texture_register : 1;
 
         /* Is a register used to specify the
          * LOD/bias/offset? If set, use the `bias` field as
@@ -676,6 +698,10 @@ __attribute__((__packed__))
 
         unsigned bias : 8;
         signed bias_int  : 8;
+
+        /* If sampler/texture_register is set, the bottom 8-bits are
+         * midgard_tex_register_select and the top 8-bits are zero. If they are
+         * clear, they are immediate texture indices */
 
         unsigned sampler_handle : 16;
         unsigned texture_handle : 16;

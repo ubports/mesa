@@ -66,6 +66,8 @@ enum {
         PAN_SYSVAL_VIEWPORT_SCALE = 1,
         PAN_SYSVAL_VIEWPORT_OFFSET = 2,
         PAN_SYSVAL_TEXTURE_SIZE = 3,
+        PAN_SYSVAL_SSBO = 4,
+        PAN_SYSVAL_NUM_WORK_GROUPS = 5,
 } pan_sysval;
 
 #define PAN_TXS_SYSVAL_ID(texidx, dim, is_array)          \

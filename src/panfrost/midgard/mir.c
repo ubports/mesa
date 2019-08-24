@@ -32,6 +32,12 @@ void mir_rewrite_index_src_single(midgard_instruction *ins, unsigned old, unsign
         }
 }
 
+void mir_rewrite_index_dst_single(midgard_instruction *ins, unsigned old, unsigned new)
+{
+        if (ins->ssa_args.dest == old)
+                ins->ssa_args.dest = new;
+}
+
 static unsigned
 mir_get_swizzle(midgard_instruction *ins, unsigned idx)
 {
@@ -181,8 +187,7 @@ void
 mir_rewrite_index_dst(compiler_context *ctx, unsigned old, unsigned new)
 {
         mir_foreach_instr_global(ctx, ins) {
-                if (ins->ssa_args.dest == old)
-                        ins->ssa_args.dest = new;
+                mir_rewrite_index_dst_single(ins, old, new);
         }
 }
 
@@ -322,7 +327,7 @@ mir_special_index(compiler_context *ctx, unsigned idx)
 bool
 mir_is_written_before(compiler_context *ctx, midgard_instruction *ins, unsigned node)
 {
-        if ((node < 0) || (node >= SSA_FIXED_MINIMUM))
+        if (node >= SSA_FIXED_MINIMUM)
                 return true;
 
         mir_foreach_instr_global(ctx, q) {
@@ -345,35 +350,104 @@ mir_is_written_before(compiler_context *ctx, midgard_instruction *ins, unsigned 
  */
 
 static unsigned
-mir_mask_of_read_components_single(unsigned src, unsigned outmask)
+mir_mask_of_read_components_single(unsigned swizzle, unsigned outmask)
 {
-        midgard_vector_alu_src s = vector_alu_from_unsigned(src);
         unsigned mask = 0;
 
         for (unsigned c = 0; c < 4; ++c) {
                 if (!(outmask & (1 << c))) continue;
 
-                unsigned comp = (s.swizzle >> (2*c)) & 3;
+                unsigned comp = (swizzle >> (2*c)) & 3;
                 mask |= (1 << comp);
         }
 
         return mask;
 }
 
+static unsigned
+mir_source_count(midgard_instruction *ins)
+{
+        if (ins->type == TAG_ALU_4) {
+                /* ALU is always binary */
+                return 2;
+        } else if (ins->type == TAG_LOAD_STORE_4) {
+                bool load = !OP_IS_STORE(ins->load_store.op);
+                return (load ? 2 : 3);
+        } else if (ins->type == TAG_TEXTURE_4) {
+                /* Coords, bias.. TODO: Offsets? */
+                return 2;
+        } else {
+                unreachable("Invalid instruction type");
+        }
+}
+
+static unsigned
+mir_component_count_implicit(midgard_instruction *ins, unsigned i)
+{
+        if (ins->type == TAG_LOAD_STORE_4) {
+                switch (ins->load_store.op) {
+                        /* Address implicitly 64-bit */
+                case midgard_op_ld_int4:
+                        return (i == 0) ? 1 : 0;
+
+                case midgard_op_st_int4:
+                        return (i == 1) ? 1 : 0;
+
+                default:
+                        return 0;
+                }
+        }
+
+        return 0;
+}
+
 unsigned
 mir_mask_of_read_components(midgard_instruction *ins, unsigned node)
 {
-        assert(ins->type == TAG_ALU_4);
-
         unsigned mask = 0;
 
-        if (ins->ssa_args.src[0] == node)
-                mask |= mir_mask_of_read_components_single(ins->alu.src1, ins->mask);
+        for (unsigned i = 0; i < mir_source_count(ins); ++i) {
+                if (ins->ssa_args.src[i] != node) continue;
 
-        if (ins->ssa_args.src[1] == node)
-                mask |= mir_mask_of_read_components_single(ins->alu.src2, ins->mask);
+                unsigned swizzle = mir_get_swizzle(ins, i);
+                unsigned m = mir_mask_of_read_components_single(swizzle, ins->mask);
 
-        assert(ins->ssa_args.src[2] == -1);
+                /* Sometimes multi-arg ops are passed implicitly */
+                unsigned implicit = mir_component_count_implicit(ins, i);
+                assert(implicit < 2);
+
+                /* Extend the mask */
+                if (implicit == 1) {
+                        /* Ensure it's a single bit currently */
+                        assert((m >> __builtin_ctz(m)) == 0x1);
+
+                        /* Set the next bit to extend one*/
+                        m |= (m << 1);
+                }
+
+                mask |= m;
+        }
 
         return mask;
 }
+
+unsigned
+mir_ubo_shift(midgard_load_store_op op)
+{
+        switch (op) {
+        case midgard_op_ld_ubo_char:
+                return 0;
+        case midgard_op_ld_ubo_char2:
+                return 1;
+        case midgard_op_ld_ubo_char4:
+                return 2;
+        case midgard_op_ld_ubo_short4:
+                return 3;
+        case midgard_op_ld_ubo_int4:
+                return 4;
+        default:
+                unreachable("Invalid op");
+        }
+}
+
+

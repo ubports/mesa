@@ -761,43 +761,6 @@ droid_swap_buffers(_EGLDriver *drv, _EGLDisplay *disp, _EGLSurface *draw)
    return EGL_TRUE;
 }
 
-#if ANDROID_API_LEVEL >= 23
-static EGLBoolean
-droid_set_damage_region(_EGLDriver *drv,
-                        _EGLDisplay *disp,
-                        _EGLSurface *draw, const EGLint* rects, EGLint n_rects)
-{
-   struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
-   struct dri2_egl_surface *dri2_surf = dri2_egl_surface(draw);
-   android_native_rect_t* droid_rects = NULL;
-   int ret;
-
-   if (n_rects == 0)
-      return EGL_TRUE;
-
-   droid_rects = malloc(n_rects * sizeof(android_native_rect_t));
-   if (droid_rects == NULL)
-     return _eglError(EGL_BAD_ALLOC, "eglSetDamageRegionKHR");
-
-   for (EGLint num_drects = 0; num_drects < n_rects; num_drects++) {
-      EGLint i = num_drects * 4;
-      droid_rects[num_drects].left = rects[i];
-      droid_rects[num_drects].bottom = rects[i + 1];
-      droid_rects[num_drects].right = rects[i] + rects[i + 2];
-      droid_rects[num_drects].top = rects[i + 1] + rects[i + 3];
-   }
-
-   /*
-    * XXX/TODO: Need to check for other return values
-    */
-
-   ret = native_window_set_surface_damage(dri2_surf->window, droid_rects, n_rects);
-   free(droid_rects);
-
-   return ret == 0 ? EGL_TRUE : EGL_FALSE;
-}
-#endif
-
 static _EGLImage *
 droid_create_image_from_prime_fds_yuv(_EGLDisplay *disp, _EGLContext *ctx,
                                      struct ANativeWindowBuffer *buf,
@@ -1188,12 +1151,13 @@ droid_add_configs_for_visuals(_EGLDriver *drv, _EGLDisplay *disp)
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
    static const struct {
       int format;
-      unsigned int rgba_masks[4];
+      int rgba_shifts[4];
+      unsigned int rgba_sizes[4];
    } visuals[] = {
-      { HAL_PIXEL_FORMAT_RGBA_8888, { 0x000000ff, 0x0000ff00, 0x00ff0000, 0xff000000 } },
-      { HAL_PIXEL_FORMAT_RGBX_8888, { 0x000000ff, 0x0000ff00, 0x00ff0000, 0x00000000 } },
-      { HAL_PIXEL_FORMAT_RGB_565,   { 0x0000f800, 0x000007e0, 0x0000001f, 0x00000000 } },
-      { HAL_PIXEL_FORMAT_BGRA_8888, { 0x00ff0000, 0x0000ff00, 0x000000ff, 0xff000000 } },
+      { HAL_PIXEL_FORMAT_RGBA_8888, { 0, 8, 16, 24 }, { 8, 8, 8, 8 } },
+      { HAL_PIXEL_FORMAT_RGBX_8888, { 0, 8, 16, -1 }, { 8, 8, 8, 0 } },
+      { HAL_PIXEL_FORMAT_RGB_565,   { 11, 5, 0, -1 }, { 5, 6, 5, 0 } },
+      { HAL_PIXEL_FORMAT_BGRA_8888, { 16, 8, 0, 24 }, { 8, 8, 8, 8 } },
    };
 
    unsigned int format_count[ARRAY_SIZE(visuals)] = { 0 };
@@ -1232,7 +1196,7 @@ droid_add_configs_for_visuals(_EGLDriver *drv, _EGLDisplay *disp)
          struct dri2_egl_config *dri2_conf =
             dri2_add_config(disp, dri2_dpy->driver_configs[j],
                             config_count + 1, surface_type, config_attrs,
-                            visuals[i].rgba_masks);
+                            visuals[i].rgba_shifts, visuals[i].rgba_sizes);
          if (dri2_conf) {
             if (dri2_conf->base.ConfigID == config_count + 1)
                config_count++;
@@ -1262,11 +1226,6 @@ static const struct dri2_egl_display_vtbl droid_display_vtbl = {
    .swap_buffers_with_damage = dri2_fallback_swap_buffers_with_damage, /* Android implements the function */
    .swap_buffers_region = dri2_fallback_swap_buffers_region,
    .swap_interval = droid_swap_interval,
-#if ANDROID_API_LEVEL >= 23
-   .set_damage_region = droid_set_damage_region,
-#else
-   .set_damage_region = dri2_fallback_set_damage_region,
-#endif
    .post_sub_buffer = dri2_fallback_post_sub_buffer,
    .copy_buffers = dri2_fallback_copy_buffers,
    .query_buffer_age = droid_query_buffer_age,
@@ -1649,9 +1608,6 @@ dri2_initialize_android(_EGLDriver *drv, _EGLDisplay *disp)
    disp->Extensions.ANDROID_image_native_buffer = EGL_TRUE;
    disp->Extensions.ANDROID_recordable = EGL_TRUE;
    disp->Extensions.EXT_buffer_age = EGL_TRUE;
-#if ANDROID_API_LEVEL >= 23
-   disp->Extensions.KHR_partial_update = EGL_TRUE;
-#endif
    disp->Extensions.KHR_image = EGL_TRUE;
 #if ANDROID_API_LEVEL >= 24
    if (dri2_dpy->mutable_render_buffer &&

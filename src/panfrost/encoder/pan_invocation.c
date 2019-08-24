@@ -25,7 +25,9 @@
  *
  */
 
-#include "pan_context.h"
+#include <assert.h>
+#include "util/u_math.h"
+#include "pan_encoder.h"
 
 /* Compute shaders are invoked with a gl_NumWorkGroups X/Y/Z triplet. Vertex
  * shaders, it turns out, are invoked with the same mechanism, with the triplet
@@ -45,7 +47,8 @@ panfrost_pack_work_groups_compute(
         unsigned num_z,
         unsigned size_x,
         unsigned size_y,
-        unsigned size_z)
+        unsigned size_z,
+        bool quirk_graphics)
 {
         /* First of all, all 6 values are off-by-one (strictly positive).
          * Account for that, first by ensuring all values are strictly positive
@@ -96,8 +99,24 @@ panfrost_pack_work_groups_compute(
         out->workgroups_y_shift = shifts[4];
         out->workgroups_z_shift = shifts[5];
 
-        /* Special fields */
-        out->workgroups_x_shift_2 = MAX2(out->workgroups_x_shift, 2);
+        /* Quirk: for non-instanced graphics, the blob sets workgroups_z_shift
+         * = 32. This doesn't appear to matter to the hardware, but it's good
+         * to be bit-identical. */
+
+        if (quirk_graphics && (num_z <= 1))
+                out->workgroups_z_shift = 32;
+
+        /* Quirk: for graphics, workgroups_x_shift_2 must be at least 2,
+         * whereas for OpenCL it is simply equal to workgroups_x_shift. For GL
+         * compute, it seems it might *always* be 2, but this is suspicious and
+         * needs further investigation. (I'm probably just using GL wrong). */
+
+        if (quirk_graphics)
+                out->workgroups_x_shift_2 = MAX2(out->workgroups_x_shift, 2);
+        else
+                out->workgroups_x_shift_2 = out->workgroups_x_shift;
+
+        /* TODO: Compute workgroups_x_shift_3 */
         out->workgroups_x_shift_3 = out->workgroups_x_shift_2;
 }
 
@@ -113,7 +132,7 @@ panfrost_pack_work_groups_fused(
         unsigned size_y,
         unsigned size_z)
 {
-        panfrost_pack_work_groups_compute(vertex, num_x, num_y, num_z, size_x, size_y, size_z);
+        panfrost_pack_work_groups_compute(vertex, num_x, num_y, num_z, size_x, size_y, size_z, true);
 
         /* Copy results over */
         tiler->invocation_count = vertex->invocation_count;

@@ -458,8 +458,6 @@ INLINE int32_t CompleteDrawContextInl(SWR_CONTEXT* pContext, uint32_t workerId, 
     {
         ExecuteCallbacks(pContext, workerId, pDC);
 
-        // Report accumulated memory access stats
-        AR_EVENT(MemoryStatsEndEvent(pDC->drawId));
 
         // Cleanup memory allocations
         pDC->pArena->Reset(true);
@@ -1218,7 +1216,7 @@ void CreateThreadPool(SWR_CONTEXT* pContext, THREAD_POOL* pPool)
             pPool->pThreadData[i].pWorkerPrivateData = pWorkerData;
             if (pContext->workerPrivateState.pfnInitWorkerData)
             {
-                pContext->workerPrivateState.pfnInitWorkerData(pWorkerData, i);
+                pContext->workerPrivateState.pfnInitWorkerData(pContext, pWorkerData, i);
             }
             pWorkerData = PtrAdd(pWorkerData, perWorkerSize);
         }
@@ -1398,7 +1396,7 @@ void DestroyThreadPool(SWR_CONTEXT* pContext, THREAD_POOL* pPool)
         if (pContext->workerPrivateState.pfnFinishWorkerData)
         {
             pContext->workerPrivateState.pfnFinishWorkerData(
-                pPool->pThreadData[t].pWorkerPrivateData, t);
+                pContext, pPool->pThreadData[t].pWorkerPrivateData, t);
         }
     }
 

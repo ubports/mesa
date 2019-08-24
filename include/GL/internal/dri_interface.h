@@ -85,6 +85,7 @@ typedef struct __DRI2throttleExtensionRec	__DRI2throttleExtension;
 typedef struct __DRI2fenceExtensionRec          __DRI2fenceExtension;
 typedef struct __DRI2interopExtensionRec	__DRI2interopExtension;
 typedef struct __DRI2blobExtensionRec           __DRI2blobExtension;
+typedef struct __DRI2bufferDamageExtensionRec   __DRI2bufferDamageExtension;
 
 typedef struct __DRIimageLoaderExtensionRec     __DRIimageLoaderExtension;
 typedef struct __DRIimageDriverExtensionRec     __DRIimageDriverExtension;
@@ -488,6 +489,48 @@ struct __DRI2interopExtensionRec {
                         struct mesa_glinterop_export_out *out);
 };
 
+
+/**
+ * Extension for limiting window system back buffer rendering to user-defined
+ * scissor region.
+ */
+
+#define __DRI2_BUFFER_DAMAGE "DRI2_BufferDamage"
+#define __DRI2_BUFFER_DAMAGE_VERSION 1
+
+struct __DRI2bufferDamageExtensionRec {
+   __DRIextension base;
+
+   /**
+    * Provides an array of rectangles representing an overriding scissor region
+    * for rendering operations performed to the specified drawable. These
+    * rectangles do not replace client API scissor regions or draw
+    * co-ordinates, but instead inform the driver of the overall bounds of all
+    * operations which will be issued before the next flush.
+    *
+    * Any rendering operations writing pixels outside this region to the
+    * drawable will have an undefined effect on the entire drawable.
+    *
+    * This entrypoint may only be called after the drawable has either been
+    * newly created or flushed, and before any rendering operations which write
+    * pixels to the drawable. Calling this entrypoint at any other time will
+    * have an undefined effect on the entire drawable.
+    *
+    * Calling this entrypoint with @nrects 0 and @rects NULL will reset the
+    * region to the buffer's full size. This entrypoint may be called once to
+    * reset the region, followed by a second call with a populated region,
+    * before a rendering call is made.
+    *
+    * Used to implement EGL_KHR_partial_update.
+    *
+    * \param drawable affected drawable
+    * \param nrects   number of rectangles provided
+    * \param rects    the array of rectangles, lower-left origin
+    */
+   void (*set_damage_region)(__DRIdrawable *drawable, unsigned int nrects,
+                             int *rects);
+};
+
 /*@}*/
 
 /**
@@ -766,7 +809,11 @@ struct __DRIuseInvalidateExtensionRec {
 #define __DRI_ATTRIB_YINVERTED			47
 #define __DRI_ATTRIB_FRAMEBUFFER_SRGB_CAPABLE	48
 #define __DRI_ATTRIB_MUTABLE_RENDER_BUFFER	49 /* EGL_MUTABLE_RENDER_BUFFER_BIT_KHR */
-#define __DRI_ATTRIB_MAX			50
+#define __DRI_ATTRIB_RED_SHIFT			50
+#define __DRI_ATTRIB_GREEN_SHIFT		51
+#define __DRI_ATTRIB_BLUE_SHIFT			52
+#define __DRI_ATTRIB_ALPHA_SHIFT		53
+#define __DRI_ATTRIB_MAX			54
 
 /* __DRI_ATTRIB_RENDER_TYPE */
 #define __DRI_ATTRIB_RGBA_BIT			0x01	
@@ -1053,6 +1100,7 @@ enum dri_loader_cap {
     * only BGRA ordering can be exposed.
     */
    DRI_LOADER_CAP_RGBA_ORDERING,
+   DRI_LOADER_CAP_FP16,
 };
 
 struct __DRIdri2LoaderExtensionRec {
@@ -1293,6 +1341,8 @@ struct __DRIdri2ExtensionRec {
 #define __DRI_IMAGE_FORMAT_ABGR2101010  0x1011
 #define __DRI_IMAGE_FORMAT_SABGR8       0x1012
 #define __DRI_IMAGE_FORMAT_UYVY         0x1013
+#define __DRI_IMAGE_FORMAT_XBGR16161616F 0x1014
+#define __DRI_IMAGE_FORMAT_ABGR16161616F 0x1015
 
 #define __DRI_IMAGE_USE_SHARE		0x0001
 #define __DRI_IMAGE_USE_SCANOUT		0x0002
@@ -1338,6 +1388,8 @@ struct __DRIdri2ExtensionRec {
 #define __DRI_IMAGE_FOURCC_RGBX1010102	0x30335852
 #define __DRI_IMAGE_FOURCC_BGRA1010102	0x30334142
 #define __DRI_IMAGE_FOURCC_BGRX1010102	0x30335842
+#define __DRI_IMAGE_FOURCC_ABGR16161616F 0x48344241
+#define __DRI_IMAGE_FOURCC_XBGR16161616F 0x48344258
 #define __DRI_IMAGE_FOURCC_YUV410	0x39565559
 #define __DRI_IMAGE_FOURCC_YUV411	0x31315559
 #define __DRI_IMAGE_FOURCC_YUV420	0x32315559

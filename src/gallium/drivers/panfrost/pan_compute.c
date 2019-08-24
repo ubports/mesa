@@ -53,7 +53,7 @@ panfrost_create_compute_state(
 
         panfrost_shader_compile(ctx, v->tripipe,
                         cso->ir_type, cso->prog,
-                        MESA_SHADER_COMPUTE, v);
+                        MESA_SHADER_COMPUTE, v, NULL);
 
 
 
@@ -87,6 +87,8 @@ panfrost_launch_grid(struct pipe_context *pipe,
 {
         struct panfrost_context *ctx = pan_context(pipe);
 
+        ctx->compute_grid = info;
+
         struct mali_job_descriptor_header job = {
                 .job_type = JOB_TYPE_COMPUTE,
                 .job_descriptor_size = 1,
@@ -117,7 +119,7 @@ panfrost_launch_grid(struct pipe_context *pipe,
 
         panfrost_pack_work_groups_compute(&payload->prefix,
                         info->grid[0], info->grid[1], info->grid[2],
-                        info->block[0], info->block[1], info->block[2]);
+                        info->block[0], info->block[1], info->block[2], false);
 
         /* Upload the payload */
 
@@ -130,6 +132,8 @@ panfrost_launch_grid(struct pipe_context *pipe,
 
         /* Queue the job */
         panfrost_scoreboard_queue_compute_job(batch, transfer);
+
+        panfrost_flush(pipe, NULL, PIPE_FLUSH_END_OF_FRAME);
 }
 
 void

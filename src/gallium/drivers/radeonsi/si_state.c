@@ -82,11 +82,9 @@ static void si_emit_cb_render_state(struct si_context *sctx)
 	struct si_state_blend *blend = sctx->queued.named.blend;
 	/* CB_COLORn_INFO.FORMAT=INVALID should disable unbound colorbuffers,
 	 * but you never know. */
-	uint32_t cb_target_mask = sctx->framebuffer.colorbuf_enabled_4bit;
+	uint32_t cb_target_mask = sctx->framebuffer.colorbuf_enabled_4bit &
+				  blend->cb_target_mask;
 	unsigned i;
-
-	if (blend)
-		cb_target_mask &= blend->cb_target_mask;
 
 	/* Avoid a hang that happens when dual source blending is enabled
 	 * but there is not enough color outputs. This is undefined behavior,
@@ -94,7 +92,7 @@ static void si_emit_cb_render_state(struct si_context *sctx)
 	 *
 	 * Reproducible with Unigine Heaven 4.0 and drirc missing.
 	 */
-	if (blend && blend->dual_src_blend &&
+	if (blend->dual_src_blend &&
 	    sctx->ps_shader.cso &&
 	    (sctx->ps_shader.cso->info.colors_written & 0x3) != 0x3)
 		cb_target_mask = 0;
@@ -115,12 +113,11 @@ static void si_emit_cb_render_state(struct si_context *sctx)
 				   SI_TRACKED_CB_TARGET_MASK, cb_target_mask);
 
 	if (sctx->chip_class >= GFX8) {
-		/* DCC MSAA workaround for blending.
+		/* DCC MSAA workaround.
 		 * Alternatively, we can set CB_COLORi_DCC_CONTROL.OVERWRITE_-
 		 * COMBINER_DISABLE, but that would be more complicated.
 		 */
-		bool oc_disable = blend &&
-				  blend->blend_enable_4bit & cb_target_mask &&
+		bool oc_disable = blend->dcc_msaa_corruption_4bit & cb_target_mask &&
 				  sctx->framebuffer.nr_samples >= 2;
 		unsigned watermark = sctx->framebuffer.dcc_overwrite_combiner_watermark;
 
@@ -477,6 +474,8 @@ static void *si_create_blend_state_mode(struct pipe_context *ctx,
 	struct si_pm4_state *pm4 = &blend->pm4;
 	uint32_t sx_mrt_blend_opt[8] = {0};
 	uint32_t color_control = 0;
+	bool logicop_enable = state->logicop_enable &&
+			      state->logicop_func != PIPE_LOGICOP_COPY;
 
 	if (!blend)
 		return NULL;
@@ -484,9 +483,9 @@ static void *si_create_blend_state_mode(struct pipe_context *ctx,
 	blend->alpha_to_coverage = state->alpha_to_coverage;
 	blend->alpha_to_one = state->alpha_to_one;
 	blend->dual_src_blend = util_blend_state_is_dual(state, 0);
-	blend->logicop_enable = state->logicop_enable;
+	blend->logicop_enable = logicop_enable;
 
-	if (state->logicop_enable) {
+	if (logicop_enable) {
 		color_control |= S_028808_ROP3(state->logicop_func | (state->logicop_func << 4));
 	} else {
 		color_control |= S_028808_ROP3(0xcc);
@@ -619,6 +618,9 @@ static void *si_create_blend_state_mode(struct pipe_context *ctx,
 
 		blend->blend_enable_4bit |= 0xfu << (i * 4);
 
+		if (sctx->family <= CHIP_NAVI14)
+			blend->dcc_msaa_corruption_4bit |= 0xfu << (i * 4);
+
 		/* This is only important for formats without alpha. */
 		if (srcRGB == PIPE_BLENDFACTOR_SRC_ALPHA ||
 		    dstRGB == PIPE_BLENDFACTOR_SRC_ALPHA ||
@@ -628,6 +630,9 @@ static void *si_create_blend_state_mode(struct pipe_context *ctx,
 		    dstRGB == PIPE_BLENDFACTOR_INV_SRC_ALPHA)
 			blend->need_src_alpha_4bit |= 0xfu << (i * 4);
 	}
+
+	if (sctx->family <= CHIP_NAVI14 && logicop_enable)
+		blend->dcc_msaa_corruption_4bit |= blend->cb_target_enabled_4bit;
 
 	if (blend->cb_target_mask) {
 		color_control |= S_028808_MODE(mode);
@@ -652,7 +657,7 @@ static void *si_create_blend_state_mode(struct pipe_context *ctx,
 				       sx_mrt_blend_opt[i]);
 
 		/* RB+ doesn't work with dual source blending, logic op, and RESOLVE. */
-		if (blend->dual_src_blend || state->logicop_enable ||
+		if (blend->dual_src_blend || logicop_enable ||
 		    mode == V_028808_CB_RESOLVE)
 			color_control |= S_028808_DISABLE_DUAL_QUAD(1);
 	}
@@ -673,21 +678,19 @@ static void si_bind_blend_state(struct pipe_context *ctx, void *state)
 	struct si_state_blend *old_blend = sctx->queued.named.blend;
 	struct si_state_blend *blend = (struct si_state_blend *)state;
 
-	if (!state)
-		return;
+	if (!blend)
+		blend = (struct si_state_blend *)sctx->noop_blend;
 
-	si_pm4_bind_state(sctx, blend, state);
+	si_pm4_bind_state(sctx, blend, blend);
 
-	if (!old_blend ||
-	    old_blend->cb_target_mask != blend->cb_target_mask ||
+	if (old_blend->cb_target_mask != blend->cb_target_mask ||
 	    old_blend->dual_src_blend != blend->dual_src_blend ||
 	    (old_blend->blend_enable_4bit != blend->blend_enable_4bit &&
 	     sctx->framebuffer.nr_samples >= 2 &&
 	     sctx->screen->dcc_msaa_allowed))
 		si_mark_atom_dirty(sctx, &sctx->atoms.s.cb_render_state);
 
-	if (!old_blend ||
-	    old_blend->cb_target_mask != blend->cb_target_mask ||
+	if (old_blend->cb_target_mask != blend->cb_target_mask ||
 	    old_blend->alpha_to_coverage != blend->alpha_to_coverage ||
 	    old_blend->alpha_to_one != blend->alpha_to_one ||
 	    old_blend->dual_src_blend != blend->dual_src_blend ||
@@ -696,15 +699,13 @@ static void si_bind_blend_state(struct pipe_context *ctx, void *state)
 		sctx->do_update_shaders = true;
 
 	if (sctx->screen->dpbb_allowed &&
-	    (!old_blend ||
-	     old_blend->alpha_to_coverage != blend->alpha_to_coverage ||
+	    (old_blend->alpha_to_coverage != blend->alpha_to_coverage ||
 	     old_blend->blend_enable_4bit != blend->blend_enable_4bit ||
 	     old_blend->cb_target_enabled_4bit != blend->cb_target_enabled_4bit))
 		si_mark_atom_dirty(sctx, &sctx->atoms.s.dpbb_state);
 
 	if (sctx->screen->has_out_of_order_rast &&
-	    (!old_blend ||
-	     (old_blend->blend_enable_4bit != blend->blend_enable_4bit ||
+	    ((old_blend->blend_enable_4bit != blend->blend_enable_4bit ||
 	      old_blend->cb_target_enabled_4bit != blend->cb_target_enabled_4bit ||
 	      old_blend->commutative_4bit != blend->commutative_4bit ||
 	      old_blend->logicop_enable != blend->logicop_enable)))
@@ -823,7 +824,7 @@ static void si_update_poly_offset_state(struct si_context *sctx)
 {
 	struct si_state_rasterizer *rs = sctx->queued.named.rasterizer;
 
-	if (!rs || !rs->uses_poly_offset || !sctx->framebuffer.state.zsbuf) {
+	if (!rs->uses_poly_offset || !sctx->framebuffer.state.zsbuf) {
 		si_pm4_bind_state(sctx, poly_offset, NULL);
 		return;
 	}
@@ -1026,10 +1027,10 @@ static void si_bind_rs_state(struct pipe_context *ctx, void *state)
 		(struct si_state_rasterizer*)sctx->queued.named.rasterizer;
 	struct si_state_rasterizer *rs = (struct si_state_rasterizer *)state;
 
-	if (!state)
-		return;
+	if (!rs)
+		rs = (struct si_state_rasterizer *)sctx->discard_rasterizer_state;
 
-	if (!old_rs || old_rs->multisample_enable != rs->multisample_enable) {
+	if (old_rs->multisample_enable != rs->multisample_enable) {
 		si_mark_atom_dirty(sctx, &sctx->atoms.s.db_render_state);
 
 		/* Update the small primitive filter workaround if necessary. */
@@ -1044,30 +1045,25 @@ static void si_bind_rs_state(struct pipe_context *ctx, void *state)
 	si_pm4_bind_state(sctx, rasterizer, rs);
 	si_update_poly_offset_state(sctx);
 
-	if (!old_rs ||
-	    old_rs->scissor_enable != rs->scissor_enable)
+	if (old_rs->scissor_enable != rs->scissor_enable)
 		si_mark_atom_dirty(sctx, &sctx->atoms.s.scissors);
 
-	if (!old_rs ||
-	    old_rs->line_width != rs->line_width ||
+	if (old_rs->line_width != rs->line_width ||
 	    old_rs->max_point_size != rs->max_point_size ||
 	    old_rs->half_pixel_center != rs->half_pixel_center)
 		si_mark_atom_dirty(sctx, &sctx->atoms.s.guardband);
 
-	if (!old_rs ||
-	    old_rs->clip_halfz != rs->clip_halfz)
+	if (old_rs->clip_halfz != rs->clip_halfz)
 		si_mark_atom_dirty(sctx, &sctx->atoms.s.viewports);
 
-	if (!old_rs ||
-	    old_rs->clip_plane_enable != rs->clip_plane_enable ||
+	if (old_rs->clip_plane_enable != rs->clip_plane_enable ||
 	    old_rs->pa_cl_clip_cntl != rs->pa_cl_clip_cntl)
 		si_mark_atom_dirty(sctx, &sctx->atoms.s.clip_regs);
 
 	sctx->ia_multi_vgt_param_key.u.line_stipple_enabled =
 		rs->line_stipple_enable;
 
-	if (!old_rs ||
-	    old_rs->clip_plane_enable != rs->clip_plane_enable ||
+	if (old_rs->clip_plane_enable != rs->clip_plane_enable ||
 	    old_rs->rasterizer_discard != rs->rasterizer_discard ||
 	    old_rs->sprite_coord_enable != rs->sprite_coord_enable ||
 	    old_rs->flatshade != rs->flatshade ||
@@ -1302,8 +1298,8 @@ static void si_bind_dsa_state(struct pipe_context *ctx, void *state)
 	struct si_state_dsa *old_dsa = sctx->queued.named.dsa;
         struct si_state_dsa *dsa = state;
 
-        if (!state)
-                return;
+        if (!dsa)
+                dsa = (struct si_state_dsa *)sctx->noop_dsa;
 
 	si_pm4_bind_state(sctx, dsa, dsa);
 
@@ -1313,19 +1309,17 @@ static void si_bind_dsa_state(struct pipe_context *ctx, void *state)
 		si_mark_atom_dirty(sctx, &sctx->atoms.s.stencil_ref);
 	}
 
-	if (!old_dsa || old_dsa->alpha_func != dsa->alpha_func)
+	if (old_dsa->alpha_func != dsa->alpha_func)
 		sctx->do_update_shaders = true;
 
 	if (sctx->screen->dpbb_allowed &&
-	    (!old_dsa ||
-	     (old_dsa->depth_enabled != dsa->depth_enabled ||
+	    ((old_dsa->depth_enabled != dsa->depth_enabled ||
 	      old_dsa->stencil_enabled != dsa->stencil_enabled ||
 	      old_dsa->db_can_write != dsa->db_can_write)))
 		si_mark_atom_dirty(sctx, &sctx->atoms.s.dpbb_state);
 
 	if (sctx->screen->has_out_of_order_rast &&
-	    (!old_dsa ||
-	     memcmp(old_dsa->order_invariance, dsa->order_invariance,
+	    (memcmp(old_dsa->order_invariance, dsa->order_invariance,
 		    sizeof(old_dsa->order_invariance))))
 		si_mark_atom_dirty(sctx, &sctx->atoms.s.msaa_config);
 }
@@ -3535,11 +3529,7 @@ static bool si_out_of_order_rasterization(struct si_context *sctx)
 
 	unsigned colormask = sctx->framebuffer.colorbuf_enabled_4bit;
 
-	if (blend) {
-		colormask &= blend->cb_target_enabled_4bit;
-	} else {
-		colormask = 0;
-	}
+	colormask &= blend->cb_target_enabled_4bit;
 
 	/* Conservative: No logic op. */
 	if (colormask && blend->logicop_enable)
@@ -3811,14 +3801,7 @@ si_make_buffer_descriptor(struct si_screen *screen, struct si_resource *buf,
 	 * - For VMEM and inst.IDXEN == 0 or STRIDE == 0, it's in byte units.
 	 * - For VMEM and inst.IDXEN == 1 and STRIDE != 0, it's in units of STRIDE.
 	 */
-	if (screen->info.chip_class == GFX9 && HAVE_LLVM < 0x0800)
-		/* When vindex == 0, LLVM < 8.0 sets IDXEN = 0, thus changing units
-		 * from STRIDE to bytes. This works around it by setting
-		 * NUM_RECORDS to at least the size of one element, so that
-		 * the first element is readable when IDXEN == 0.
-		 */
-		num_records = num_records ? MAX2(num_records, stride) : 0;
-	else if (screen->info.chip_class == GFX8)
+	if (screen->info.chip_class == GFX8)
 		num_records *= stride;
 
 	state[4] = 0;
@@ -5413,10 +5396,13 @@ static void si_init_config(struct si_context *sctx)
 	if (!pm4)
 		return;
 
-	si_pm4_cmd_begin(pm4, PKT3_CONTEXT_CONTROL);
-	si_pm4_cmd_add(pm4, CONTEXT_CONTROL_LOAD_ENABLE(1));
-	si_pm4_cmd_add(pm4, CONTEXT_CONTROL_SHADOW_ENABLE(1));
-	si_pm4_cmd_end(pm4, false);
+	/* Since amdgpu version 3.6.0, CONTEXT_CONTROL is emitted by the kernel */
+	if (!sscreen->info.is_amdgpu || sscreen->info.drm_minor < 6) {
+		si_pm4_cmd_begin(pm4, PKT3_CONTEXT_CONTROL);
+		si_pm4_cmd_add(pm4, CONTEXT_CONTROL_LOAD_ENABLE(1));
+		si_pm4_cmd_add(pm4, CONTEXT_CONTROL_SHADOW_ENABLE(1));
+		si_pm4_cmd_end(pm4, false);
+	}
 
 	if (has_clear_state) {
 		si_pm4_cmd_begin(pm4, PKT3_CLEAR_STATE);
@@ -5555,6 +5541,7 @@ static void si_init_config(struct si_context *sctx)
 			late_alloc_limit = (num_cu_per_sh - 2) * 4;
 		}
 
+		unsigned late_alloc_limit_gs = late_alloc_limit;
 		unsigned cu_mask_vs = 0xffff;
 		unsigned cu_mask_gs = 0xffff;
 
@@ -5566,6 +5553,14 @@ static void si_init_config(struct si_context *sctx)
 			} else {
 				cu_mask_vs = 0xfffe; /* 1 CU disabled */
 			}
+		}
+
+		/* Don't use late alloc for NGG on Navi14 due to a hw bug.
+		 * If NGG is never used, enable all CUs.
+		 */
+		if (!sscreen->use_ngg || sctx->family == CHIP_NAVI14) {
+			late_alloc_limit_gs = 0;
+			cu_mask_gs = 0xffff;
 		}
 
 		/* VS can't execute on one CU if the limit is > 2. */
@@ -5581,7 +5576,7 @@ static void si_init_config(struct si_context *sctx)
 		if (sctx->chip_class >= GFX10) {
 			si_pm4_set_reg(pm4, R_00B204_SPI_SHADER_PGM_RSRC4_GS,
 				       S_00B204_CU_EN(0xffff) |
-				       S_00B204_SPI_SHADER_LATE_ALLOC_GS_GFX10(late_alloc_limit));
+				       S_00B204_SPI_SHADER_LATE_ALLOC_GS_GFX10(late_alloc_limit_gs));
 		}
 
 		si_pm4_set_reg(pm4, R_00B01C_SPI_SHADER_PGM_RSRC3_PS,
@@ -5601,8 +5596,11 @@ static void si_init_config(struct si_context *sctx)
 		si_pm4_set_reg(pm4, R_028C50_PA_SC_NGG_MODE_CNTL,
 			       S_028C50_MAX_DEALLOCS_IN_WAVE(512));
 		si_pm4_set_reg(pm4, R_028C58_VGT_VERTEX_REUSE_BLOCK_CNTL, 14);
-		si_pm4_set_reg(pm4, R_02835C_PA_SC_TILE_STEERING_OVERRIDE,
-			       sscreen->info.pa_sc_tile_steering_override);
+
+		if (!has_clear_state) {
+			si_pm4_set_reg(pm4, R_02835C_PA_SC_TILE_STEERING_OVERRIDE,
+				       sscreen->info.pa_sc_tile_steering_override);
+		}
 
 		si_pm4_set_reg(pm4, R_02807C_DB_RMI_L2_CACHE_CONTROL,
 			       S_02807C_Z_WR_POLICY(V_02807C_CACHE_STREAM_WR) |
@@ -5629,6 +5627,18 @@ static void si_init_config(struct si_context *sctx)
 			       S_00B0C0_NUMBER_OF_REQUESTS_PER_CU(4 - 1));
 		si_pm4_set_reg(pm4, R_00B1C0_SPI_SHADER_REQ_CTRL_VS, 0);
 
+		if (sctx->family == CHIP_NAVI10 ||
+		    sctx->family == CHIP_NAVI12 ||
+		    sctx->family == CHIP_NAVI14) {
+			/* SQ_NON_EVENT must be emitted before GE_PC_ALLOC is written. */
+			si_pm4_cmd_begin(pm4, PKT3_EVENT_WRITE);
+			si_pm4_cmd_add(pm4, EVENT_TYPE(V_028A90_SQ_NON_EVENT) | EVENT_INDEX(0));
+			si_pm4_cmd_end(pm4, false);
+		}
+		/* TODO: For culling, replace 128 with 256. */
+		si_pm4_set_reg(pm4, R_030980_GE_PC_ALLOC,
+			       S_030980_OVERSUB_EN(1) |
+			       S_030980_NUM_PC_LINES(128 * sscreen->info.max_se - 1));
 	}
 
 	if (sctx->chip_class >= GFX8) {
@@ -5674,6 +5684,7 @@ static void si_init_config(struct si_context *sctx)
 			break;
 		case CHIP_RAVEN:
 		case CHIP_RAVEN2:
+		case CHIP_RENOIR:
 		case CHIP_NAVI10:
 		case CHIP_NAVI12:
 			pc_lines = 1024;
@@ -5692,7 +5703,7 @@ static void si_init_config(struct si_context *sctx)
 		}
 
 		si_pm4_set_reg(pm4, R_028C48_PA_SC_BINNER_CNTL_1,
-			       S_028C48_MAX_ALLOC_COUNT(max_alloc_count) |
+			       S_028C48_MAX_ALLOC_COUNT(max_alloc_count - 1) |
 			       S_028C48_MAX_PRIM_PER_BATCH(1023));
 		si_pm4_set_reg(pm4, R_028C4C_PA_SC_CONSERVATIVE_RASTERIZATION_CNTL,
 			       S_028C4C_NULL_SQUAD_AA_MASK_ENABLE(1));

@@ -32,8 +32,13 @@
  * registers */
 
 static void
-mir_print_source(int source)
+mir_print_index(int source)
 {
+        if (source == ~0) {
+                printf("_");
+                return;
+        }
+
         if (source >= SSA_FIXED_MINIMUM) {
                 /* Specific register */
                 int reg = SSA_REG_FROM_FIXED(source);
@@ -48,6 +53,42 @@ mir_print_source(int source)
         }
 }
 
+static const char components[16] = "xyzwefghijklmnop";
+
+static void
+mir_print_mask(unsigned mask)
+{
+        printf(".");
+
+        for (unsigned i = 0; i < 16; ++i) {
+                if (mask & (1 << i))
+                        putchar(components[i]);
+        }
+}
+
+static const char *
+mir_get_unit(unsigned unit)
+{
+        switch (unit) {
+        case ALU_ENAB_VEC_MUL:
+                return "vmul";
+        case ALU_ENAB_SCAL_ADD:
+                return "sadd";
+        case ALU_ENAB_VEC_ADD:
+                return "vadd";
+        case ALU_ENAB_SCAL_MUL:
+                return "smul";
+        case ALU_ENAB_VEC_LUT:
+                return "lut";
+        case ALU_ENAB_BR_COMPACT:
+                return "br";
+        case ALU_ENAB_BRANCH:
+                return "brx";
+        default:
+                return "???";
+        }
+}
+
 void
 mir_print_instruction(midgard_instruction *ins)
 {
@@ -59,7 +100,7 @@ mir_print_instruction(midgard_instruction *ins)
                 const char *name = alu_opcode_props[op].name;
 
                 if (ins->unit)
-                        printf("%d.", ins->unit);
+                        printf("%s.", mir_get_unit(ins->unit));
 
                 printf("%s", name ? name : "??");
                 break;
@@ -88,21 +129,30 @@ mir_print_instruction(midgard_instruction *ins)
 
         ssa_args *args = &ins->ssa_args;
 
-        printf(" %d, ", args->dest);
+        printf(" ");
+        mir_print_index(args->dest);
 
-        mir_print_source(args->src[0]);
+        if (ins->mask != 0xF)
+                mir_print_mask(ins->mask);
+
+        printf(", ");
+
+        mir_print_index(args->src[0]);
         printf(", ");
 
         if (args->inline_constant)
                 printf("#%d", ins->inline_constant);
         else
-                mir_print_source(args->src[1]);
+                mir_print_index(args->src[1]);
 
         printf(", ");
-        mir_print_source(args->src[2]);
+        mir_print_index(args->src[2]);
 
         if (ins->has_constants)
                 printf(" <%f, %f, %f, %f>", ins->constants[0], ins->constants[1], ins->constants[2], ins->constants[3]);
+
+        if (ins->no_spill)
+                printf(" /* no spill */");
 
         printf("\n");
 }
@@ -112,7 +162,7 @@ mir_print_instruction(midgard_instruction *ins)
 void
 mir_print_block(midgard_block *block)
 {
-        printf("%p: {\n", block);
+        printf("block%d: {\n", block->source_id);
 
         mir_foreach_instr_in_block(block, ins) {
                 mir_print_instruction(ins);
@@ -123,10 +173,15 @@ mir_print_block(midgard_block *block)
         if (block->nr_successors) {
                 printf(" -> ");
                 for (unsigned i = 0; i < block->nr_successors; ++i) {
-                        printf("%p%s", block->successors[i],
+                        printf("block%d%s", block->successors[i]->source_id,
                                         (i + 1) != block->nr_successors ? ", " : "");
                 }
         }
+
+        printf(" from { ");
+        mir_foreach_predecessor(block, pred)
+                printf("block%d ", pred->source_id);
+        printf("}");
 
         printf("\n\n");
 }

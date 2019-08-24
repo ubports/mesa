@@ -170,6 +170,16 @@ namespace SwrJit
         return ConstantInt::get(IRB()->getInt1Ty(), (pred ? 1 : 0));
     }
 
+    Value* Builder::VIMMED1(uint64_t i)
+    {
+        return ConstantVector::getSplat(mVWidth, cast<ConstantInt>(C(i)));
+    }
+
+    Value* Builder::VIMMED1_16(uint64_t i)
+    {
+        return ConstantVector::getSplat(mVWidth16, cast<ConstantInt>(C(i)));
+    }
+
     Value* Builder::VIMMED1(int i)
     {
         return ConstantVector::getSplat(mVWidth, cast<ConstantInt>(C(i)));
@@ -774,14 +784,15 @@ namespace SwrJit
     {
         SWR_ASSERT((numIntBits + numFracBits) <= 32, "Can only handle 32-bit fixed-point values");
         Value* fixed = nullptr;
-#if 0
-        // This doesn't work for negative numbers!!
+
+#if 0   // This doesn't work for negative numbers!!
         {
             fixed = FP_TO_SI(VROUND(FMUL(vFloat, VIMMED1(float(1 << numFracBits))),
                                     C(_MM_FROUND_TO_NEAREST_INT)),
                              mSimdInt32Ty);
         }
-#else
+        else
+#endif
         {
             // Do round to nearest int on fractional bits first
             // Not entirely perfect for negative numbers, but close enough
@@ -804,7 +815,7 @@ namespace SwrJit
 
             fixed = ASHR(vFixed, vExtraBits, name);
         }
-#endif
+
         return fixed;
     }
 
@@ -845,8 +856,7 @@ namespace SwrJit
     {
         SWR_ASSERT((numIntBits + numFracBits) <= 32, "Can only handle 32-bit fixed-point values");
         Value* fixed = nullptr;
-#if 1
-        // KNOB_SIM_FAST_MATH?  Below works correctly from a precision
+#if 1   // KNOB_SIM_FAST_MATH?  Below works correctly from a precision
         // standpoint...
         {
             fixed = FP_TO_UI(VROUND(FMUL(vFloat, VIMMED1(float(1 << numFracBits))),

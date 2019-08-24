@@ -145,7 +145,6 @@ enum {
 
 	/* Shader compiler options the shader cache should be aware of: */
 	DBG_FS_CORRECT_DERIVS_AFTER_KILL,
-	DBG_UNSAFE_MATH,
 	DBG_SI_SCHED,
 	DBG_GISEL,
 	DBG_W32_GE,
@@ -505,6 +504,8 @@ struct si_screen {
 	bool				dpbb_allowed;
 	bool				dfsm_allowed;
 	bool				llvm_has_working_vgpr_indexing;
+	bool				use_ngg;
+	bool				use_ngg_streamout;
 
 	struct {
 #define OPT_BOOL(name, dflt, description) bool name:1;
@@ -886,6 +887,9 @@ struct si_context {
 	void (*emit_cache_flush)(struct si_context *ctx);
 
 	struct blitter_context		*blitter;
+	void				*noop_blend;
+	void				*noop_dsa;
+	void				*discard_rasterizer_state;
 	void				*custom_dsa_flush;
 	void				*custom_blend_resolve;
 	void				*custom_blend_fmask_decompress;

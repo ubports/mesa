@@ -88,6 +88,7 @@ DRI_CONF_BEGIN
       DRI_CONF_ALLOW_GLSL_BUILTIN_VARIABLE_REDECLARATION("false")
       DRI_CONF_ALLOW_GLSL_CROSS_STAGE_INTERPOLATION_MISMATCH("false")
       DRI_CONF_ALLOW_HIGHER_COMPAT_VERSION("false")
+      DRI_CONF_FORCE_COMPAT_PROFILE("false")
       DRI_CONF_FORCE_GLSL_ABS_SQRT("false")
 
       DRI_CONF_OPT_BEGIN_B(shader_precompile, "true")
@@ -99,6 +100,7 @@ DRI_CONF_BEGIN
       DRI_CONF_GLSL_ZERO_INIT("false")
       DRI_CONF_ALLOW_RGB10_CONFIGS("false")
       DRI_CONF_ALLOW_RGB565_CONFIGS("true")
+      DRI_CONF_ALLOW_FP16_CONFIGS("false")
    DRI_CONF_SECTION_END
 DRI_CONF_END
 };
@@ -188,6 +190,12 @@ static const struct __DRI2flushExtensionRec intelFlushExtension = {
 };
 
 static const struct intel_image_format intel_image_formats[] = {
+   { __DRI_IMAGE_FOURCC_ABGR16161616F, __DRI_IMAGE_COMPONENTS_RGBA, 1,
+     { { 0, 0, 0, __DRI_IMAGE_FORMAT_ABGR16161616F, 8 } } },
+
+   { __DRI_IMAGE_FOURCC_XBGR16161616F, __DRI_IMAGE_COMPONENTS_RGB, 1,
+     { { 0, 0, 0, __DRI_IMAGE_FORMAT_XBGR16161616F, 8 } } },
+
    { __DRI_IMAGE_FOURCC_ARGB2101010, __DRI_IMAGE_COMPONENTS_RGBA, 1,
      { { 0, 0, 0, __DRI_IMAGE_FORMAT_ARGB2101010, 4 } } },
 
@@ -420,7 +428,7 @@ intel_image_format_lookup(int fourcc)
    return NULL;
 }
 
-static boolean
+static bool
 intel_image_get_fourcc(__DRIimage *image, int *fourcc)
 {
    if (image->planar_format) {
@@ -746,7 +754,9 @@ intel_create_image_common(__DRIscreen *dri_screen,
                       .samples = 1,
                       .usage = ISL_SURF_USAGE_RENDER_TARGET_BIT |
                                ISL_SURF_USAGE_TEXTURE_BIT |
-                               ISL_SURF_USAGE_STORAGE_BIT,
+                               ISL_SURF_USAGE_STORAGE_BIT |
+                               ((use & __DRI_IMAGE_USE_SCANOUT) ?
+                                ISL_SURF_USAGE_DISPLAY_BIT : 0),
                       .tiling_flags = (1 << mod_info->tiling));
    assert(ok);
    if (!ok) {
@@ -1733,7 +1743,11 @@ intelCreateBuffer(__DRIscreen *dri_screen,
       fb->Visual.samples = num_samples;
    }
 
-   if (mesaVis->redBits == 10 && mesaVis->alphaBits > 0) {
+   if (mesaVis->redBits == 16 && mesaVis->alphaBits > 0 && mesaVis->floatMode) {
+      rgbFormat = MESA_FORMAT_RGBA_FLOAT16;
+   } else if (mesaVis->redBits == 16 && mesaVis->floatMode) {
+      rgbFormat = MESA_FORMAT_RGBX_FLOAT16;
+   } else if (mesaVis->redBits == 10 && mesaVis->alphaBits > 0) {
       rgbFormat = mesaVis->redMask == 0x3ff00000 ? MESA_FORMAT_B10G10R10A2_UNORM
                                                  : MESA_FORMAT_R10G10B10A2_UNORM;
    } else if (mesaVis->redBits == 10) {
@@ -2147,6 +2161,45 @@ intel_loader_get_cap(const __DRIscreen *dri_screen, enum dri_loader_cap cap)
    return 0;
 }
 
+static bool
+intel_allowed_format(__DRIscreen *dri_screen, mesa_format format)
+{
+   struct intel_screen *screen = dri_screen->driverPrivate;
+
+   /* Expose only BGRA ordering if the loader doesn't support RGBA ordering. */
+   bool allow_rgba_ordering = intel_loader_get_cap(dri_screen, DRI_LOADER_CAP_RGBA_ORDERING);
+   if (!allow_rgba_ordering &&
+       (format == MESA_FORMAT_R8G8B8A8_UNORM ||
+        format == MESA_FORMAT_R8G8B8X8_UNORM ||
+        format == MESA_FORMAT_R8G8B8A8_SRGB))
+      return false;
+
+    /* Shall we expose 10 bpc formats? */
+   bool allow_rgb10_configs = driQueryOptionb(&screen->optionCache,
+                                              "allow_rgb10_configs");
+   if (!allow_rgb10_configs &&
+       (format == MESA_FORMAT_B10G10R10A2_UNORM ||
+        format == MESA_FORMAT_B10G10R10X2_UNORM))
+      return false;
+
+   /* Shall we expose 565 formats? */
+   bool allow_rgb565_configs = driQueryOptionb(&screen->optionCache,
+                                               "allow_rgb565_configs");
+   if (!allow_rgb565_configs && format == MESA_FORMAT_B5G6R5_UNORM)
+      return false;
+
+   /* Shall we expose fp16 formats? */
+   bool allow_fp16_configs = driQueryOptionb(&screen->optionCache,
+                                             "allow_fp16_configs");
+   allow_fp16_configs &= intel_loader_get_cap(dri_screen, DRI_LOADER_CAP_FP16);
+   if (!allow_fp16_configs &&
+       (format == MESA_FORMAT_RGBA_FLOAT16 ||
+        format == MESA_FORMAT_RGBX_FLOAT16))
+      return false;
+
+   return true;
+}
+
 static __DRIconfig**
 intel_screen_make_configs(__DRIscreen *dri_screen)
 {
@@ -2160,6 +2213,9 @@ intel_screen_make_configs(__DRIscreen *dri_screen)
       /* For 10 bpc, 30 bit depth framebuffers. */
       MESA_FORMAT_B10G10R10A2_UNORM,
       MESA_FORMAT_B10G10R10X2_UNORM,
+
+      MESA_FORMAT_RGBA_FLOAT16,
+      MESA_FORMAT_RGBX_FLOAT16,
 
       /* The 32-bit RGBA format must not precede the 32-bit BGRA format.
        * Likewise for RGBX and BGRX.  Otherwise, the GLX client and the GLX
@@ -2197,19 +2253,7 @@ intel_screen_make_configs(__DRIscreen *dri_screen)
    uint8_t depth_bits[4], stencil_bits[4];
    __DRIconfig **configs = NULL;
 
-   /* Expose only BGRA ordering if the loader doesn't support RGBA ordering. */
-   unsigned num_formats;
-   if (intel_loader_get_cap(dri_screen, DRI_LOADER_CAP_RGBA_ORDERING))
-      num_formats = ARRAY_SIZE(formats);
-   else
-      num_formats = ARRAY_SIZE(formats) - 3; /* all - RGBA_ORDERING formats */
-
-   /* Shall we expose 10 bpc formats? */
-   bool allow_rgb10_configs = driQueryOptionb(&screen->optionCache,
-                                              "allow_rgb10_configs");
-   /* Shall we expose 565 formats? */
-   bool allow_rgb565_configs = driQueryOptionb(&screen->optionCache,
-                                               "allow_rgb565_configs");
+   unsigned num_formats = ARRAY_SIZE(formats);
 
    /* Generate singlesample configs, each without accumulation buffer
     * and with EGL_MUTABLE_RENDER_BUFFER_BIT_KHR.
@@ -2218,12 +2262,7 @@ intel_screen_make_configs(__DRIscreen *dri_screen)
       __DRIconfig **new_configs;
       int num_depth_stencil_bits = 2;
 
-      if (!allow_rgb10_configs &&
-          (formats[i] == MESA_FORMAT_B10G10R10A2_UNORM ||
-           formats[i] == MESA_FORMAT_B10G10R10X2_UNORM))
-         continue;
-
-      if (!allow_rgb565_configs && formats[i] == MESA_FORMAT_B5G6R5_UNORM)
+      if (!intel_allowed_format(dri_screen, formats[i]))
          continue;
 
       /* Starting with DRI2 protocol version 1.1 we can request a depth/stencil
@@ -2263,12 +2302,7 @@ intel_screen_make_configs(__DRIscreen *dri_screen)
    for (unsigned i = 0; i < num_formats; i++) {
       __DRIconfig **new_configs;
 
-      if (!allow_rgb10_configs &&
-          (formats[i] == MESA_FORMAT_B10G10R10A2_UNORM ||
-          formats[i] == MESA_FORMAT_B10G10R10X2_UNORM))
-         continue;
-
-      if (!allow_rgb565_configs && formats[i] == MESA_FORMAT_B5G6R5_UNORM)
+      if (!intel_allowed_format(dri_screen, formats[i]))
          continue;
 
       if (formats[i] == MESA_FORMAT_B5G6R5_UNORM) {
@@ -2304,12 +2338,7 @@ intel_screen_make_configs(__DRIscreen *dri_screen)
       if (devinfo->gen < 6)
          break;
 
-      if (!allow_rgb10_configs &&
-          (formats[i] == MESA_FORMAT_B10G10R10A2_UNORM ||
-          formats[i] == MESA_FORMAT_B10G10R10X2_UNORM))
-         continue;
-
-      if (!allow_rgb565_configs && formats[i] == MESA_FORMAT_B5G6R5_UNORM)
+      if (!intel_allowed_format(dri_screen, formats[i]))
          continue;
 
       __DRIconfig **new_configs;
@@ -2377,7 +2406,7 @@ set_max_gl_versions(struct intel_screen *screen)
    case 10:
    case 9:
    case 8:
-      dri_screen->max_gl_core_version = 45;
+      dri_screen->max_gl_core_version = 46;
       dri_screen->max_gl_compat_version = 30;
       dri_screen->max_gl_es1_version = 11;
       dri_screen->max_gl_es2_version = has_astc ? 32 : 31;

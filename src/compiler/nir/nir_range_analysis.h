@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 Collabora, Ltd.
+ * Copyright © 2018 Intel Corporation
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -16,29 +16,32 @@
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
  * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- *
- * Authors:
- *   Alyssa Rosenzweig <alyssa.rosenzweig@collabora.com>
- *
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
  */
+#ifndef _NIR_RANGE_ANALYSIS_H_
+#define _NIR_RANGE_ANALYSIS_H_
 
-#ifndef __PAN_TILER_H__
-#define __PAN_TILER_H__
+enum PACKED ssa_ranges {
+   unknown = 0,
+   lt_zero,
+   le_zero,
+   gt_zero,
+   ge_zero,
+   ne_zero,
+   eq_zero,
+   last_range = eq_zero
+};
 
-unsigned
-panfrost_tiler_header_size(unsigned width, unsigned height, uint8_t mask);
+struct ssa_result_range {
+   enum ssa_ranges range;
 
-unsigned
-panfrost_tiler_body_size(unsigned width, unsigned height, uint8_t mask);
+   /** A floating-point value that can only have integer values. */
+   bool is_integral;
+};
 
-unsigned
-panfrost_choose_hierarchy_mask(
-        unsigned width, unsigned height,
-        unsigned vertex_count);
+extern struct ssa_result_range
+nir_analyze_range(const nir_alu_instr *instr, unsigned src);
 
-#endif
-
-
+#endif /* _NIR_RANGE_ANALYSIS_H_ */

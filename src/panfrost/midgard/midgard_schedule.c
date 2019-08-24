@@ -64,31 +64,33 @@ is_single_component_mask(unsigned mask)
 static bool
 can_run_concurrent_ssa(midgard_instruction *first, midgard_instruction *second)
 {
+        /* Writeout has its own rules anyway */
+        if (first->compact_branch || second->compact_branch)
+                return true;
+
         /* Each instruction reads some registers and writes to a register. See
          * where the first writes */
 
-        /* Figure out where exactly we wrote to */
         int source = first->ssa_args.dest;
         int source_mask = first->mask;
 
         /* As long as the second doesn't read from the first, we're okay */
-        if (second->ssa_args.src[0] == source) {
-                if (first->type == TAG_ALU_4) {
-                        /* Figure out which components we just read from */
+        for (unsigned i = 0; i < ARRAY_SIZE(second->ssa_args.src); ++i) {
+                if (second->ssa_args.src[i] != source)
+                        continue;
 
-                        int q = second->alu.src1;
-                        midgard_vector_alu_src *m = (midgard_vector_alu_src *) &q;
-
-                        /* Check if there are components in common, and fail if so */
-                        if (swizzle_to_access_mask(m->swizzle) & source_mask)
-                                return false;
-                } else
+                if (first->type != TAG_ALU_4)
                         return false;
 
-        }
+                /* Figure out which components we just read from */
 
-        if (second->ssa_args.src[1] == source)
-                return false;
+                int q = (i == 0) ? second->alu.src1 : second->alu.src2;
+                midgard_vector_alu_src *m = (midgard_vector_alu_src *) &q;
+
+                /* Check if there are components in common, and fail if so */
+                if (swizzle_to_access_mask(m->swizzle) & source_mask)
+                        return false;
+        }
 
         /* Otherwise, it's safe in that regard. Another data hazard is both
          * writing to the same place, of course */
@@ -137,7 +139,10 @@ can_writeout_fragment(compiler_context *ctx, midgard_instruction **bundle, unsig
         uint8_t r0_written_mask = 0x0;
 
         /* Simultaneously we scan for the set of dependencies */
-        BITSET_WORD *dependencies = calloc(sizeof(BITSET_WORD), BITSET_WORDS(node_count));
+
+        size_t sz = sizeof(BITSET_WORD) * BITSET_WORDS(node_count);
+        BITSET_WORD *dependencies = alloca(sz);
+        memset(dependencies, 0, sz);
 
         for (unsigned i = 0; i < count; ++i) {
                 midgard_instruction *ins = bundle[i];
@@ -157,15 +162,15 @@ can_writeout_fragment(compiler_context *ctx, midgard_instruction **bundle, unsig
                 unsigned src1 = ins->ssa_args.src[1];
 
                 if (!mir_is_written_before(ctx, bundle[0], src0))
-                        src0 = -1;
+                        src0 = ~0;
 
                 if (!mir_is_written_before(ctx, bundle[0], src1))
-                        src1 = -1;
+                        src1 = ~0;
 
-                if ((src0 > 0) && (src0 < node_count))
+                if (src0 < node_count)
                         BITSET_SET(dependencies, src0);
 
-                if ((src1 > 0) && (src1 < node_count))
+                if (src1 < node_count)
                         BITSET_SET(dependencies, src1);
 
                 /* Requirement 2 */
@@ -623,18 +628,15 @@ midgard_pair_load_store(compiler_context *ctx, midgard_block *block)
 
                                 if (c->type != TAG_LOAD_STORE_4) continue;
 
-                                /* Stores cannot be reordered, since they have
-                                 * dependencies. For the same reason, indirect
-                                 * loads cannot be reordered as their index is
-                                 * loaded in r27.w */
+                                /* We can only reorder if there are no sources */
 
-                                if (OP_IS_STORE(c->load_store.op)) continue;
+                                bool deps = false;
 
-                                /* It appears the 0x8 bit is set whenever a
-                                 * load is direct, unset when it is indirect.
-                                 * Skip indirect loads. */
+                                for (unsigned s = 0; s < ARRAY_SIZE(ins->ssa_args.src); ++s)
+                                        deps |= (c->ssa_args.src[s] != ~0);
 
-                                if (!(c->load_store.arg_2 & 0x8)) continue;
+                                if (deps)
+                                        continue;
 
                                 /* We found one! Move it up to pair and remove it from the old location */
 
@@ -653,7 +655,7 @@ midgard_pair_load_store(compiler_context *ctx, midgard_block *block)
 static unsigned
 find_or_allocate_temp(compiler_context *ctx, unsigned hash)
 {
-        if ((hash < 0) || (hash >= SSA_FIXED_MINIMUM))
+        if (hash >= SSA_FIXED_MINIMUM)
                 return hash;
 
         unsigned temp = (uintptr_t) _mesa_hash_table_u64_search(
@@ -704,8 +706,8 @@ v_load_store_scratch(
                 .type = TAG_LOAD_STORE_4,
                 .mask = mask,
                 .ssa_args = {
-                        .dest = -1,
-                        .src = { -1, -1, -1 },
+                        .dest = ~0,
+                        .src = { ~0, ~0, ~0 },
                 },
                 .load_store = {
                         .op = is_store ? midgard_op_st_int4 : midgard_op_ld_int4,
@@ -718,13 +720,16 @@ v_load_store_scratch(
                         /* Splattered across, TODO combine logically */
                         .varying_parameters = (byte & 0x1FF) << 1,
                         .address = (byte >> 9)
-                }
+                },
+
+                /* If we spill an unspill, RA goes into an infinite loop */
+                .no_spill = true
         };
 
        if (is_store) {
                 /* r0 = r26, r1 = r27 */
                 assert(srcdest == SSA_FIXED_REGISTER(26) || srcdest == SSA_FIXED_REGISTER(27));
-                ins.ssa_args.src[0] = (srcdest == SSA_FIXED_REGISTER(27)) ? SSA_FIXED_REGISTER(1) : SSA_FIXED_REGISTER(0);
+                ins.ssa_args.src[0] = srcdest;
         } else {
                 ins.ssa_args.dest = srcdest;
         }
@@ -753,11 +758,10 @@ static void mir_spill_register(
         }
 
         mir_foreach_instr_global(ctx, ins) {
-                if (ins->type != TAG_LOAD_STORE_4)  continue;
-                if (ins->load_store.op != midgard_op_ld_int4) continue;
-                if (ins->load_store.arg_1 != 0xEA) continue;
-                if (ins->load_store.arg_2 != 0x1E) continue;
-                ra_set_node_spill_cost(g, ins->ssa_args.dest, -1.0);
+                if (ins->no_spill &&
+                    ins->ssa_args.dest >= 0 &&
+                    ins->ssa_args.dest < ctx->temp_count)
+                        ra_set_node_spill_cost(g, ins->ssa_args.dest, -1.0);
         }
 
         int spill_node = ra_get_best_spill_node(g);
@@ -777,31 +781,43 @@ static void mir_spill_register(
 
         /* Allocate TLS slot (maybe) */
         unsigned spill_slot = !is_special ? (*spill_count)++ : 0;
-        midgard_instruction *spill_move = NULL;
 
         /* For TLS, replace all stores to the spilled node. For
          * special reads, just keep as-is; the class will be demoted
          * implicitly. For special writes, spill to a work register */
 
         if (!is_special || is_special_w) {
+                if (is_special_w)
+                        spill_slot = spill_index++;
+
                 mir_foreach_instr_global_safe(ctx, ins) {
                         if (ins->ssa_args.dest != spill_node) continue;
 
                         midgard_instruction st;
 
                         if (is_special_w) {
-                                spill_slot = spill_index++;
                                 st = v_mov(spill_node, blank_alu_src, spill_slot);
+                                st.no_spill = true;
                         } else {
                                 ins->ssa_args.dest = SSA_FIXED_REGISTER(26);
                                 st = v_load_store_scratch(ins->ssa_args.dest, spill_slot, true, ins->mask);
                         }
 
-                        spill_move = mir_insert_instruction_before(mir_next_op(ins), st);
+                        /* Hint: don't rewrite this node */
+                        st.hint = true;
+
+                        mir_insert_instruction_before(mir_next_op(ins), st);
 
                         if (!is_special)
                                 ctx->spills++;
                 }
+        }
+
+        /* For special reads, figure out how many components we need */
+        unsigned read_mask = 0;
+
+        mir_foreach_instr_global_safe(ctx, ins) {
+                read_mask |= mir_mask_of_read_components(ins, spill_node);
         }
 
         /* Insert a load from TLS before the first consecutive
@@ -818,8 +834,9 @@ static void mir_spill_register(
                 unsigned consecutive_index = 0;
 
                 mir_foreach_instr_in_block(block, ins) {
-                        /* We can't rewrite the move used to spill in the first place */
-                        if (ins == spill_move) continue;
+                        /* We can't rewrite the moves used to spill in the
+                         * first place. These moves are hinted. */
+                        if (ins->hint) continue;
 
                         if (!mir_has_arg(ins, spill_node)) {
                                 consecutive_skip = false;
@@ -846,10 +863,16 @@ static void mir_spill_register(
                                 if (is_special) {
                                         /* Move */
                                         st = v_mov(spill_node, blank_alu_src, consecutive_index);
+                                        st.no_spill = true;
                                 } else {
                                         /* TLS load */
                                         st = v_load_store_scratch(consecutive_index, spill_slot, false, 0xF);
                                 }
+
+                                /* Mask the load based on the component count
+                                 * actually needed to prvent RA loops */
+
+                                st.mask = read_mask;
 
                                 mir_insert_instruction_before(before, st);
                                // consecutive_skip = true;
@@ -865,6 +888,12 @@ static void mir_spill_register(
                         if (!is_special)
                                 ctx->fills++;
                 }
+        }
+
+        /* Reset hints */
+
+        mir_foreach_instr_global(ctx, ins) {
+                ins->hint = false;
         }
 }
 
