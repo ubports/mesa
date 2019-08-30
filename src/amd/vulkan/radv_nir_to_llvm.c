@@ -49,6 +49,7 @@ struct radv_shader_context {
 	struct ac_llvm_context ac;
 	const struct radv_nir_compiler_options *options;
 	struct radv_shader_variant_info *shader_info;
+	const struct nir_shader *shader;
 	struct ac_shader_abi abi;
 
 	unsigned max_workgroup_size;
@@ -86,9 +87,6 @@ struct radv_shader_context {
 	LLVMValueRef hs_ring_tess_offchip;
 	LLVMValueRef hs_ring_tess_factor;
 
-	LLVMValueRef persp_sample, persp_center, persp_centroid;
-	LLVMValueRef linear_sample, linear_center, linear_centroid;
-
 	/* Streamout */
 	LLVMValueRef streamout_buffers;
 	LLVMValueRef streamout_write_idx;
@@ -98,9 +96,7 @@ struct radv_shader_context {
 	gl_shader_stage stage;
 
 	LLVMValueRef inputs[RADEON_LLVM_MAX_INPUTS * 4];
-	uint64_t float16_shaded_mask;
 
-	uint64_t input_mask;
 	uint64_t output_mask;
 
 	bool is_gs_copy_shader;
@@ -109,14 +105,7 @@ struct radv_shader_context {
 	LLVMValueRef gs_generated_prims[4];
 	LLVMValueRef gs_ngg_emit;
 	LLVMValueRef gs_ngg_scratch;
-	unsigned gs_max_out_vertices;
-	unsigned gs_output_prim;
 
-	unsigned tes_primitive_mode;
-
-	uint32_t tcs_patch_outputs_read;
-	uint64_t tcs_outputs_read;
-	uint32_t tcs_vertices_per_patch;
 	uint32_t tcs_num_inputs;
 	uint32_t tcs_num_patches;
 	uint32_t max_gsvs_emit_size;
@@ -147,98 +136,6 @@ radv_shader_context_from_abi(struct ac_shader_abi *abi)
 	return container_of(abi, ctx, abi);
 }
 
-struct ac_build_if_state
-{
-	struct radv_shader_context *ctx;
-	LLVMValueRef condition;
-	LLVMBasicBlockRef entry_block;
-	LLVMBasicBlockRef true_block;
-	LLVMBasicBlockRef false_block;
-	LLVMBasicBlockRef merge_block;
-};
-
-static LLVMBasicBlockRef
-ac_build_insert_new_block(struct radv_shader_context *ctx, const char *name)
-{
-	LLVMBasicBlockRef current_block;
-	LLVMBasicBlockRef next_block;
-	LLVMBasicBlockRef new_block;
-
-	/* get current basic block */
-	current_block = LLVMGetInsertBlock(ctx->ac.builder);
-
-	/* chqeck if there's another block after this one */
-	next_block = LLVMGetNextBasicBlock(current_block);
-	if (next_block) {
-		/* insert the new block before the next block */
-		new_block = LLVMInsertBasicBlockInContext(ctx->context, next_block, name);
-	}
-	else {
-		/* append new block after current block */
-		LLVMValueRef function = LLVMGetBasicBlockParent(current_block);
-		new_block = LLVMAppendBasicBlockInContext(ctx->context, function, name);
-	}
-	return new_block;
-}
-
-static void
-ac_nir_build_if(struct ac_build_if_state *ifthen,
-		struct radv_shader_context *ctx,
-		LLVMValueRef condition)
-{
-	LLVMBasicBlockRef block = LLVMGetInsertBlock(ctx->ac.builder);
-
-	memset(ifthen, 0, sizeof *ifthen);
-	ifthen->ctx = ctx;
-	ifthen->condition = condition;
-	ifthen->entry_block = block;
-
-	/* create endif/merge basic block for the phi functions */
-	ifthen->merge_block = ac_build_insert_new_block(ctx, "endif-block");
-
-	/* create/insert true_block before merge_block */
-	ifthen->true_block =
-		LLVMInsertBasicBlockInContext(ctx->context,
-					      ifthen->merge_block,
-					      "if-true-block");
-
-	/* successive code goes into the true block */
-	LLVMPositionBuilderAtEnd(ctx->ac.builder, ifthen->true_block);
-}
-
-/**
- * End a conditional.
- */
-static void
-ac_nir_build_endif(struct ac_build_if_state *ifthen)
-{
-	LLVMBuilderRef builder = ifthen->ctx->ac.builder;
-
-	/* Insert branch to the merge block from current block */
-	LLVMBuildBr(builder, ifthen->merge_block);
-
-	/*
-	 * Now patch in the various branch instructions.
-	 */
-
-	/* Insert the conditional branch instruction at the end of entry_block */
-	LLVMPositionBuilderAtEnd(builder, ifthen->entry_block);
-	if (ifthen->false_block) {
-		/* we have an else clause */
-		LLVMBuildCondBr(builder, ifthen->condition,
-				ifthen->true_block, ifthen->false_block);
-	}
-	else {
-		/* no else clause */
-		LLVMBuildCondBr(builder, ifthen->condition,
-				ifthen->true_block, ifthen->merge_block);
-	}
-
-	/* Resume building code at end of the ifthen->merge_block */
-	LLVMPositionBuilderAtEnd(builder, ifthen->merge_block);
-}
-
-
 static LLVMValueRef get_rel_patch_id(struct radv_shader_context *ctx)
 {
 	switch (ctx->stage) {
@@ -256,13 +153,13 @@ static unsigned
 get_tcs_num_patches(struct radv_shader_context *ctx)
 {
 	unsigned num_tcs_input_cp = ctx->options->key.tcs.input_vertices;
-	unsigned num_tcs_output_cp = ctx->tcs_vertices_per_patch;
+	unsigned num_tcs_output_cp = ctx->shader->info.tess.tcs_vertices_out;
 	uint32_t input_vertex_size = ctx->tcs_num_inputs * 16;
 	uint32_t input_patch_size = ctx->options->key.tcs.input_vertices * input_vertex_size;
 	uint32_t num_tcs_outputs = util_last_bit64(ctx->shader_info->info.tcs.outputs_written);
 	uint32_t num_tcs_patch_outputs = util_last_bit64(ctx->shader_info->info.tcs.patch_outputs_written);
 	uint32_t output_vertex_size = num_tcs_outputs * 16;
-	uint32_t pervertex_output_patch_size = ctx->tcs_vertices_per_patch * output_vertex_size;
+	uint32_t pervertex_output_patch_size = ctx->shader->info.tess.tcs_vertices_out * output_vertex_size;
 	uint32_t output_patch_size = pervertex_output_patch_size + num_tcs_patch_outputs * 16;
 	unsigned num_patches;
 	unsigned hardware_lds_size;
@@ -314,7 +211,7 @@ calculate_tess_lds_size(struct radv_shader_context *ctx)
 	unsigned num_patches;
 	unsigned lds_size;
 
-	num_tcs_output_cp = ctx->tcs_vertices_per_patch;
+	num_tcs_output_cp = ctx->shader->info.tess.tcs_vertices_out;
 	num_tcs_outputs = util_last_bit64(ctx->shader_info->info.tcs.outputs_written);
 	num_tcs_patch_outputs = util_last_bit64(ctx->shader_info->info.tcs.patch_outputs_written);
 
@@ -370,7 +267,7 @@ get_tcs_out_patch_stride(struct radv_shader_context *ctx)
 	uint32_t num_tcs_outputs = util_last_bit64(ctx->shader_info->info.tcs.outputs_written);
 	uint32_t num_tcs_patch_outputs = util_last_bit64(ctx->shader_info->info.tcs.patch_outputs_written);
 	uint32_t output_vertex_size = num_tcs_outputs * 16;
-	uint32_t pervertex_output_patch_size = ctx->tcs_vertices_per_patch * output_vertex_size;
+	uint32_t pervertex_output_patch_size = ctx->shader->info.tess.tcs_vertices_out * output_vertex_size;
 	uint32_t output_patch_size = pervertex_output_patch_size + num_tcs_patch_outputs * 16;
 	output_patch_size /= 4;
 	return LLVMConstInt(ctx->ac.i32, output_patch_size, false);
@@ -409,7 +306,7 @@ get_tcs_out_patch0_patch_data_offset(struct radv_shader_context *ctx)
 
 	uint32_t num_tcs_outputs = util_last_bit64(ctx->shader_info->info.tcs.outputs_written);
 	uint32_t output_vertex_size = num_tcs_outputs * 16;
-	uint32_t pervertex_output_patch_size = ctx->tcs_vertices_per_patch * output_vertex_size;
+	uint32_t pervertex_output_patch_size = ctx->shader->info.tess.tcs_vertices_out * output_vertex_size;
 	unsigned num_patches = ctx->tcs_num_patches;
 
 	output_patch0_offset *= num_patches;
@@ -1232,13 +1129,13 @@ static void create_function(struct radv_shader_context *ctx,
 					   &desc_sets);
 
 		add_arg(&args, ARG_SGPR, ctx->ac.i32, &ctx->abi.prim_mask);
-		add_arg(&args, ARG_VGPR, ctx->ac.v2i32, &ctx->persp_sample);
-		add_arg(&args, ARG_VGPR, ctx->ac.v2i32, &ctx->persp_center);
-		add_arg(&args, ARG_VGPR, ctx->ac.v2i32, &ctx->persp_centroid);
+		add_arg(&args, ARG_VGPR, ctx->ac.v2i32, &ctx->abi.persp_sample);
+		add_arg(&args, ARG_VGPR, ctx->ac.v2i32, &ctx->abi.persp_center);
+		add_arg(&args, ARG_VGPR, ctx->ac.v2i32, &ctx->abi.persp_centroid);
 		add_arg(&args, ARG_VGPR, ctx->ac.v3i32, NULL); /* persp pull model */
-		add_arg(&args, ARG_VGPR, ctx->ac.v2i32, &ctx->linear_sample);
-		add_arg(&args, ARG_VGPR, ctx->ac.v2i32, &ctx->linear_center);
-		add_arg(&args, ARG_VGPR, ctx->ac.v2i32, &ctx->linear_centroid);
+		add_arg(&args, ARG_VGPR, ctx->ac.v2i32, &ctx->abi.linear_sample);
+		add_arg(&args, ARG_VGPR, ctx->ac.v2i32, &ctx->abi.linear_center);
+		add_arg(&args, ARG_VGPR, ctx->ac.v2i32, &ctx->abi.linear_centroid);
 		add_arg(&args, ARG_VGPR, ctx->ac.f32, NULL);  /* line stipple tex */
 		add_arg(&args, ARG_VGPR, ctx->ac.f32, &ctx->abi.frag_pos[0]);
 		add_arg(&args, ARG_VGPR, ctx->ac.f32, &ctx->abi.frag_pos[1]);
@@ -1430,7 +1327,7 @@ static LLVMValueRef get_non_vertex_index_offset(struct radv_shader_context *ctx)
 		num_tcs_outputs = ctx->options->key.tes.tcs_num_outputs;
 
 	uint32_t output_vertex_size = num_tcs_outputs * 16;
-	uint32_t pervertex_output_patch_size = ctx->tcs_vertices_per_patch * output_vertex_size;
+	uint32_t pervertex_output_patch_size = ctx->shader->info.tess.tcs_vertices_out * output_vertex_size;
 
 	return LLVMConstInt(ctx->ac.i32, pervertex_output_patch_size * num_patches, false);
 }
@@ -1440,7 +1337,7 @@ static LLVMValueRef calc_param_stride(struct radv_shader_context *ctx,
 {
 	LLVMValueRef param_stride;
 	if (vertex_index)
-		param_stride = LLVMConstInt(ctx->ac.i32, ctx->tcs_vertices_per_patch * ctx->tcs_num_patches, false);
+		param_stride = LLVMConstInt(ctx->ac.i32, ctx->shader->info.tess.tcs_vertices_out * ctx->tcs_num_patches, false);
 	else
 		param_stride = LLVMConstInt(ctx->ac.i32, ctx->tcs_num_patches, false);
 	return param_stride;
@@ -1453,7 +1350,7 @@ static LLVMValueRef get_tcs_tes_buffer_address(struct radv_shader_context *ctx,
 	LLVMValueRef base_addr;
 	LLVMValueRef param_stride, constant16;
 	LLVMValueRef rel_patch_id = get_rel_patch_id(ctx);
-	LLVMValueRef vertices_per_patch = LLVMConstInt(ctx->ac.i32, ctx->tcs_vertices_per_patch, false);
+	LLVMValueRef vertices_per_patch = LLVMConstInt(ctx->ac.i32, ctx->shader->info.tess.tcs_vertices_out, false);
 	constant16 = LLVMConstInt(ctx->ac.i32, 16, false);
 	param_stride = calc_param_stride(ctx, vertex_index);
 	if (vertex_index) {
@@ -1600,10 +1497,10 @@ store_tcs_output(struct ac_shader_abi *abi,
 	bool store_lds = true;
 
 	if (is_patch) {
-		if (!(ctx->tcs_patch_outputs_read & (1U << (location - VARYING_SLOT_PATCH0))))
+		if (!(ctx->shader->info.patch_outputs_read & (1U << (location - VARYING_SLOT_PATCH0))))
 			store_lds = false;
 	} else {
-		if (!(ctx->tcs_outputs_read & (1ULL << location)))
+		if (!(ctx->shader->info.outputs_read & (1ULL << location)))
 			store_lds = false;
 	}
 
@@ -1762,36 +1659,6 @@ static void radv_emit_kill(struct ac_shader_abi *abi, LLVMValueRef visible)
 	ac_build_kill_if_false(&ctx->ac, visible);
 }
 
-static LLVMValueRef lookup_interp_param(struct ac_shader_abi *abi,
-					enum glsl_interp_mode interp, unsigned location)
-{
-	struct radv_shader_context *ctx = radv_shader_context_from_abi(abi);
-
-	switch (interp) {
-	case INTERP_MODE_FLAT:
-	default:
-		return NULL;
-	case INTERP_MODE_SMOOTH:
-	case INTERP_MODE_NONE:
-		if (location == INTERP_CENTER)
-			return ctx->persp_center;
-		else if (location == INTERP_CENTROID)
-			return ctx->persp_centroid;
-		else if (location == INTERP_SAMPLE)
-			return ctx->persp_sample;
-		break;
-	case INTERP_MODE_NOPERSPECTIVE:
-		if (location == INTERP_CENTER)
-			return ctx->linear_center;
-		else if (location == INTERP_CENTROID)
-			return ctx->linear_centroid;
-		else if (location == INTERP_SAMPLE)
-			return ctx->linear_sample;
-		break;
-	}
-	return NULL;
-}
-
 static uint32_t
 radv_get_sample_pos_offset(uint32_t num_samples)
 {
@@ -1898,7 +1765,7 @@ visit_emit_vertex(struct ac_shader_abi *abi, unsigned stream, LLVMValueRef *addr
 	 * effects other than emitting vertices.
 	 */
 	can_emit = LLVMBuildICmp(ctx->ac.builder, LLVMIntULT, gs_next_vertex,
-				 LLVMConstInt(ctx->ac.i32, ctx->gs_max_out_vertices, false), "");
+				 LLVMConstInt(ctx->ac.i32, ctx->shader->info.gs.vertices_out, false), "");
 	ac_build_kill_if_false(&ctx->ac, can_emit);
 
 	for (unsigned i = 0; i < AC_LLVM_MAX_OUTPUTS; ++i) {
@@ -1921,7 +1788,7 @@ visit_emit_vertex(struct ac_shader_abi *abi, unsigned stream, LLVMValueRef *addr
 							     out_ptr[j], "");
 			LLVMValueRef voffset =
 				LLVMConstInt(ctx->ac.i32, offset *
-					     ctx->gs_max_out_vertices, false);
+					     ctx->shader->info.gs.vertices_out, false);
 
 			offset++;
 
@@ -1973,7 +1840,7 @@ load_tess_coord(struct ac_shader_abi *abi)
 		ctx->ac.f32_0,
 	};
 
-	if (ctx->tes_primitive_mode == GL_TRIANGLES)
+	if (ctx->shader->info.tess.primitive_mode == GL_TRIANGLES)
 		coord[2] = LLVMBuildFSub(ctx->ac.builder, ctx->ac.f32_1,
 					LLVMBuildFAdd(ctx->ac.builder, coord[0], coord[1], ""), "");
 
@@ -2382,8 +2249,8 @@ prepare_interp_optimize(struct radv_shader_context *ctx,
 
 	if (uses_center && uses_centroid) {
 		LLVMValueRef sel = LLVMBuildICmp(ctx->ac.builder, LLVMIntSLT, ctx->abi.prim_mask, ctx->ac.i32_0, "");
-		ctx->persp_centroid = LLVMBuildSelect(ctx->ac.builder, sel, ctx->persp_center, ctx->persp_centroid, "");
-		ctx->linear_centroid = LLVMBuildSelect(ctx->ac.builder, sel, ctx->linear_center, ctx->linear_centroid, "");
+		ctx->abi.persp_centroid = LLVMBuildSelect(ctx->ac.builder, sel, ctx->abi.persp_center, ctx->abi.persp_centroid, "");
+		ctx->abi.linear_centroid = LLVMBuildSelect(ctx->ac.builder, sel, ctx->abi.linear_center, ctx->abi.linear_centroid, "");
 	}
 }
 
@@ -2672,7 +2539,6 @@ radv_emit_stream_output(struct radv_shader_context *ctx,
 static void
 radv_emit_streamout(struct radv_shader_context *ctx, unsigned stream)
 {
-	struct ac_build_if_state if_ctx;
 	int i;
 
 	/* Get bits [22:16], i.e. (so_param >> 16) & 127; */
@@ -2692,7 +2558,7 @@ radv_emit_streamout(struct radv_shader_context *ctx, unsigned stream)
 	 * out-of-bounds buffer access. The hw tells us via the SGPR
 	 * (so_vtx_count) which threads are allowed to emit streamout data.
 	 */
-	ac_nir_build_if(&if_ctx, ctx, can_emit);
+	ac_build_ifcc(&ctx->ac, can_emit, 6501);
 	{
 		/* The buffer offset is computed as follows:
 		 *   ByteOffset = streamout_offset[buffer_id]*4 +
@@ -2754,7 +2620,7 @@ radv_emit_streamout(struct radv_shader_context *ctx, unsigned stream)
 						output, &shader_out);
 		}
 	}
-	ac_nir_build_endif(&if_ctx);
+	ac_build_endif(&ctx->ac, 6501);
 }
 
 static void
@@ -3212,7 +3078,7 @@ ngg_gs_vertex_ptr(struct radv_shader_context *ctx, LLVMValueRef vertexidx)
 	LLVMValueRef storage = ngg_gs_get_vertex_storage(ctx);
 
 	/* gs_max_out_vertices = 2^(write_stride_2exp) * some odd number */
-	unsigned write_stride_2exp = ffs(ctx->gs_max_out_vertices) - 1;
+	unsigned write_stride_2exp = ffs(ctx->shader->info.gs.vertices_out) - 1;
 	if (write_stride_2exp) {
 		LLVMValueRef row =
 			LLVMBuildLShr(builder, vertexidx,
@@ -3234,7 +3100,7 @@ ngg_gs_emit_vertex_ptr(struct radv_shader_context *ctx, LLVMValueRef gsthread,
 	LLVMBuilderRef builder = ctx->ac.builder;
 	LLVMValueRef tmp;
 
-	tmp = LLVMConstInt(ctx->ac.i32, ctx->gs_max_out_vertices, false);
+	tmp = LLVMConstInt(ctx->ac.i32, ctx->shader->info.gs.vertices_out, false);
 	tmp = LLVMBuildMul(builder, tmp, gsthread, "");
 	const LLVMValueRef vertexidx = LLVMBuildAdd(builder, tmp, emitidx, "");
 	return ngg_gs_vertex_ptr(ctx, vertexidx);
@@ -3307,7 +3173,6 @@ static void
 handle_ngg_outputs_post(struct radv_shader_context *ctx)
 {
 	LLVMBuilderRef builder = ctx->ac.builder;
-	struct ac_build_if_state if_state;
 	unsigned num_vertices = 3;
 	LLVMValueRef tmp;
 
@@ -3371,7 +3236,7 @@ handle_ngg_outputs_post(struct radv_shader_context *ctx)
 	 * TODO: culling depends on the primitive type, so can have some
 	 * interaction here.
 	 */
-	ac_nir_build_if(&if_state, ctx, is_gs_thread);
+	ac_build_ifcc(&ctx->ac, is_gs_thread, 6001);
 	{
 		struct ngg_prim prim = {};
 
@@ -3387,10 +3252,10 @@ handle_ngg_outputs_post(struct radv_shader_context *ctx)
 
 		build_export_prim(ctx, &prim);
 	}
-	ac_nir_build_endif(&if_state);
+	ac_build_endif(&ctx->ac, 6001);
 
 	/* Export per-vertex data (positions and parameters). */
-	ac_nir_build_if(&if_state, ctx, is_es_thread);
+	ac_build_ifcc(&ctx->ac, is_es_thread, 6002);
 	{
 		struct radv_vs_output_info *outinfo =
 			ctx->stage == MESA_SHADER_TESS_EVAL ? &ctx->shader_info->tes.outinfo : &ctx->shader_info->vs.outinfo;
@@ -3428,7 +3293,7 @@ handle_ngg_outputs_post(struct radv_shader_context *ctx)
 			outinfo->param_exports = param_count;
 		}
 	}
-	ac_nir_build_endif(&if_state);
+	ac_build_endif(&ctx->ac, 6002);
 }
 
 static void gfx10_ngg_gs_emit_prologue(struct radv_shader_context *ctx)
@@ -3487,7 +3352,7 @@ static void gfx10_ngg_gs_emit_epilogue_1(struct radv_shader_context *ctx)
 		const LLVMValueRef vertexidx =
 			LLVMBuildLoad(builder, ctx->gs_next_vertex[stream], "");
 		tmp = LLVMBuildICmp(builder, LLVMIntUGE, vertexidx,
-			LLVMConstInt(ctx->ac.i32, ctx->gs_max_out_vertices, false), "");
+			LLVMConstInt(ctx->ac.i32, ctx->shader->info.gs.vertices_out, false), "");
 		ac_build_ifcc(&ctx->ac, tmp, 5101);
 		ac_build_break(&ctx->ac);
 		ac_build_endif(&ctx->ac, 5101);
@@ -3510,7 +3375,7 @@ static void gfx10_ngg_gs_emit_epilogue_1(struct radv_shader_context *ctx)
 
 static void gfx10_ngg_gs_emit_epilogue_2(struct radv_shader_context *ctx)
 {
-	const unsigned verts_per_prim = si_conv_gl_prim_to_vertices(ctx->gs_output_prim);
+	const unsigned verts_per_prim = si_conv_gl_prim_to_vertices(ctx->shader->info.gs.output_primitive);
 	LLVMBuilderRef builder = ctx->ac.builder;
 	LLVMValueRef tmp, tmp2;
 
@@ -3749,7 +3614,7 @@ static void gfx10_ngg_gs_emit_vertex(struct radv_shader_context *ctx,
 	 */
 	const LLVMValueRef can_emit =
 		LLVMBuildICmp(builder, LLVMIntULT, vertexidx,
-			      LLVMConstInt(ctx->ac.i32, ctx->gs_max_out_vertices, false), "");
+			      LLVMConstInt(ctx->ac.i32, ctx->shader->info.gs.vertices_out, false), "");
 	ac_build_kill_if_false(&ctx->ac, can_emit);
 
 	tmp = LLVMBuildAdd(builder, vertexidx, ctx->ac.i32_1, "");
@@ -3795,7 +3660,7 @@ static void gfx10_ngg_gs_emit_vertex(struct radv_shader_context *ctx,
 	/* Determine and store whether this vertex completed a primitive. */
 	const LLVMValueRef curverts = LLVMBuildLoad(builder, ctx->gs_curprim_verts[stream], "");
 
-	tmp = LLVMConstInt(ctx->ac.i32, si_conv_gl_prim_to_vertices(ctx->gs_output_prim) - 1, false);
+	tmp = LLVMConstInt(ctx->ac.i32, si_conv_gl_prim_to_vertices(ctx->shader->info.gs.output_primitive) - 1, false);
 	const LLVMValueRef iscompleteprim =
 		LLVMBuildICmp(builder, LLVMIntUGE, curverts, tmp, "");
 
@@ -3822,7 +3687,6 @@ static void
 write_tess_factors(struct radv_shader_context *ctx)
 {
 	unsigned stride, outer_comps, inner_comps;
-	struct ac_build_if_state if_ctx, inner_if_ctx;
 	LLVMValueRef invocation_id = ac_unpack_param(&ctx->ac, ctx->abi.tcs_rel_ids, 8, 5);
 	LLVMValueRef rel_patch_id = ac_unpack_param(&ctx->ac, ctx->abi.tcs_rel_ids, 0, 8);
 	unsigned tess_inner_index = 0, tess_outer_index;
@@ -3851,9 +3715,9 @@ write_tess_factors(struct radv_shader_context *ctx)
 		return;
 	}
 
-	ac_nir_build_if(&if_ctx, ctx,
+	ac_build_ifcc(&ctx->ac,
 			LLVMBuildICmp(ctx->ac.builder, LLVMIntEQ,
-				      invocation_id, ctx->ac.i32_0, ""));
+				      invocation_id, ctx->ac.i32_0, ""), 6503);
 
 	lds_base = get_tcs_out_current_patch_data_offset(ctx);
 
@@ -3908,9 +3772,9 @@ write_tess_factors(struct radv_shader_context *ctx)
 	unsigned tf_offset = 0;
 
 	if (ctx->options->chip_class <= GFX8) {
-		ac_nir_build_if(&inner_if_ctx, ctx,
+		ac_build_ifcc(&ctx->ac,
 		                LLVMBuildICmp(ctx->ac.builder, LLVMIntEQ,
-		                              rel_patch_id, ctx->ac.i32_0, ""));
+		                              rel_patch_id, ctx->ac.i32_0, ""), 6504);
 
 		/* Store the dynamic HS control word. */
 		ac_build_buffer_store_dword(&ctx->ac, buffer,
@@ -3919,7 +3783,7 @@ write_tess_factors(struct radv_shader_context *ctx)
 					    0, ac_glc, false);
 		tf_offset += 4;
 
-		ac_nir_build_endif(&inner_if_ctx);
+		ac_build_endif(&ctx->ac, 6504);
 	}
 
 	/* Store the tessellation factors. */
@@ -3959,7 +3823,8 @@ write_tess_factors(struct radv_shader_context *ctx)
 						    ctx->oc_lds, 0, ac_glc, false);
 		}
 	}
-	ac_nir_build_endif(&if_ctx);
+	
+	ac_build_endif(&ctx->ac, 6503);
 }
 
 static void
@@ -4209,7 +4074,7 @@ ac_setup_rings(struct radv_shader_context *ctx)
 			if (!num_components)
 				continue;
 
-			stride = 4 * num_components * ctx->gs_max_out_vertices;
+			stride = 4 * num_components * ctx->shader->info.gs.vertices_out;
 
 			/* Limit on the stride field for <= GFX7. */
 			assert(stride < (1 << 14));
@@ -4362,23 +4227,17 @@ LLVMModuleRef ac_translate_nir_to_llvm(struct ac_llvm_compiler *ac_llvm,
 	ctx.abi.clamp_shadow_reference = false;
 	ctx.abi.robust_buffer_access = options->robust_buffer_access;
 
-	/* Because the new raw/struct atomic intrinsics are buggy with LLVM 8,
-	 * we fallback to the old intrinsics for atomic buffer image operations
-	 * and thus we need to apply the indexing workaround...
-	 */
-	ctx.abi.gfx9_stride_size_workaround_for_atomic = ctx.ac.chip_class == GFX9 && HAVE_LLVM < 0x900;
-
 	bool is_ngg = is_pre_gs_stage(shaders[0]->info.stage) &&  ctx.options->key.vs_common_out.as_ngg;
 	if (shader_count >= 2 || is_ngg)
 		ac_init_exec_full_mask(&ctx.ac);
 
-	if ((ctx.ac.family == CHIP_VEGA10 ||
-	     ctx.ac.family == CHIP_RAVEN) &&
+	if (options->has_ls_vgpr_init_bug &&
 	    shaders[shader_count - 1]->info.stage == MESA_SHADER_TESS_CTRL)
 		ac_nir_fixup_ls_hs_input_vgprs(&ctx);
 
 	for(int i = 0; i < shader_count; ++i) {
 		ctx.stage = shaders[i]->info.stage;
+		ctx.shader = shaders[i];
 		ctx.output_mask = 0;
 
 		if (shaders[i]->info.stage == MESA_SHADER_GEOMETRY) {
@@ -4408,34 +4267,25 @@ LLVMModuleRef ac_translate_nir_to_llvm(struct ac_llvm_compiler *ac_llvm,
 					"ngg_emit");
 			}
 
-			ctx.gs_max_out_vertices = shaders[i]->info.gs.vertices_out;
-			ctx.gs_output_prim = shaders[i]->info.gs.output_primitive;
 			ctx.abi.load_inputs = load_gs_input;
 			ctx.abi.emit_primitive = visit_end_primitive;
 		} else if (shaders[i]->info.stage == MESA_SHADER_TESS_CTRL) {
-			ctx.tcs_outputs_read = shaders[i]->info.outputs_read;
-			ctx.tcs_patch_outputs_read = shaders[i]->info.patch_outputs_read;
 			ctx.abi.load_tess_varyings = load_tcs_varyings;
 			ctx.abi.load_patch_vertices_in = load_patch_vertices_in;
 			ctx.abi.store_tcs_outputs = store_tcs_output;
-			ctx.tcs_vertices_per_patch = shaders[i]->info.tess.tcs_vertices_out;
 			if (shader_count == 1)
 				ctx.tcs_num_inputs = ctx.options->key.tcs.num_inputs;
 			else
 				ctx.tcs_num_inputs = util_last_bit64(shader_info->info.vs.ls_outputs_written);
 			ctx.tcs_num_patches = get_tcs_num_patches(&ctx);
 		} else if (shaders[i]->info.stage == MESA_SHADER_TESS_EVAL) {
-			ctx.tes_primitive_mode = shaders[i]->info.tess.primitive_mode;
 			ctx.abi.load_tess_varyings = load_tes_input;
 			ctx.abi.load_tess_coord = load_tess_coord;
 			ctx.abi.load_patch_vertices_in = load_patch_vertices_in;
-			ctx.tcs_vertices_per_patch = shaders[i]->info.tess.tcs_vertices_out;
 			ctx.tcs_num_patches = ctx.options->key.tes.num_patches;
 		} else if (shaders[i]->info.stage == MESA_SHADER_VERTEX) {
 			ctx.abi.load_base_vertex = radv_load_base_vertex;
 		} else if (shaders[i]->info.stage == MESA_SHADER_FRAGMENT) {
-			shader_info->fs.can_discard = shaders[i]->info.fs.uses_discard;
-			ctx.abi.lookup_interp_param = lookup_interp_param;
 			ctx.abi.load_sample_position = load_sample_position;
 			ctx.abi.load_sample_mask_in = load_sample_mask_in;
 			ctx.abi.emit_kill = radv_emit_kill;
@@ -4602,7 +4452,6 @@ static unsigned radv_llvm_compile(LLVMModuleRef M,
 static void ac_compile_llvm_module(struct ac_llvm_compiler *ac_llvm,
 				   LLVMModuleRef llvm_module,
 				   struct radv_shader_binary **rbinary,
-				   struct radv_shader_variant_info *shader_info,
 				   gl_shader_stage stage,
 				   const char *name,
 				   const struct radv_nir_compiler_options *options)
@@ -4659,6 +4508,7 @@ ac_fill_shader_info(struct radv_shader_variant_info *shader_info, struct nir_sha
                         shader_info->cs.block_size[i] = nir->info.cs.local_size[i];
                 break;
         case MESA_SHADER_FRAGMENT:
+		shader_info->fs.can_discard = nir->info.fs.uses_discard;
                 shader_info->fs.early_fragment_test = nir->info.fs.early_fragment_tests;
                 shader_info->fs.post_depth_coverage = nir->info.fs.post_depth_coverage;
                 break;
@@ -4705,7 +4555,7 @@ radv_compile_nir_shader(struct ac_llvm_compiler *ac_llvm,
 	llvm_module = ac_translate_nir_to_llvm(ac_llvm, nir, nir_count, shader_info,
 	                                       options);
 
-	ac_compile_llvm_module(ac_llvm, llvm_module, rbinary, shader_info,
+	ac_compile_llvm_module(ac_llvm, llvm_module, rbinary,
 			       nir[nir_count - 1]->info.stage,
 			       radv_get_shader_name(shader_info,
 						    nir[nir_count - 1]->info.stage),
@@ -4783,7 +4633,7 @@ ac_gs_copy_shader_emit(struct radv_shader_context *ctx)
 
 				soffset = LLVMConstInt(ctx->ac.i32,
 						       offset *
-						       ctx->gs_max_out_vertices * 16 * 4, false);
+						       ctx->shader->info.gs.vertices_out * 16 * 4, false);
 
 				offset++;
 
@@ -4839,12 +4689,12 @@ radv_compile_gs_copy_shader(struct ac_llvm_compiler *ac_llvm,
 
 	ctx.is_gs_copy_shader = true;
 	ctx.stage = MESA_SHADER_VERTEX;
+	ctx.shader = geom_shader;
 
 	radv_nir_shader_info_pass(geom_shader, options, &shader_info->info);
 
 	create_function(&ctx, MESA_SHADER_VERTEX, false, MESA_SHADER_VERTEX);
 
-	ctx.gs_max_out_vertices = geom_shader->info.gs.vertices_out;
 	ac_setup_rings(&ctx);
 
 	nir_foreach_variable(variable, &geom_shader->outputs) {
@@ -4859,7 +4709,7 @@ radv_compile_gs_copy_shader(struct ac_llvm_compiler *ac_llvm,
 
 	ac_llvm_finalize_module(&ctx, ac_llvm->passmgr, options);
 
-	ac_compile_llvm_module(ac_llvm, ctx.ac.module, rbinary, shader_info,
+	ac_compile_llvm_module(ac_llvm, ctx.ac.module, rbinary,
 			       MESA_SHADER_VERTEX, "GS Copy Shader", options);
 	(*rbinary)->is_gs_copy_shader = true;
 	

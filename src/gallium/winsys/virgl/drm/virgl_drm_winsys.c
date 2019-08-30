@@ -168,7 +168,7 @@ virgl_drm_winsys_resource_create(struct virgl_winsys *qws,
 
    memset(&createcmd, 0, sizeof(createcmd));
    createcmd.target = target;
-   createcmd.format = format;
+   createcmd.format = pipe_to_virgl_format(format);
    createcmd.bind = bind;
    createcmd.width = width;
    createcmd.height = height;
@@ -186,7 +186,6 @@ virgl_drm_winsys_resource_create(struct virgl_winsys *qws,
    }
 
    res->bind = bind;
-   res->format = format;
 
    res->res_handle = createcmd.res_handle;
    res->bo_handle = createcmd.bo_handle;

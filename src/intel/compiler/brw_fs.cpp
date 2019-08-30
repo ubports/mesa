@@ -4198,6 +4198,38 @@ setup_color_payload(const fs_builder &bld, const brw_wm_prog_key *key,
       dst[i] = offset(color, bld, i);
 }
 
+uint32_t
+brw_fb_write_msg_control(const fs_inst *inst,
+                         const struct brw_wm_prog_data *prog_data)
+{
+   uint32_t mctl;
+
+   if (inst->opcode == FS_OPCODE_REP_FB_WRITE) {
+      assert(inst->group == 0 && inst->exec_size == 16);
+      mctl = BRW_DATAPORT_RENDER_TARGET_WRITE_SIMD16_SINGLE_SOURCE_REPLICATED;
+   } else if (prog_data->dual_src_blend) {
+      assert(inst->exec_size == 8);
+
+      if (inst->group % 16 == 0)
+         mctl = BRW_DATAPORT_RENDER_TARGET_WRITE_SIMD8_DUAL_SOURCE_SUBSPAN01;
+      else if (inst->group % 16 == 8)
+         mctl = BRW_DATAPORT_RENDER_TARGET_WRITE_SIMD8_DUAL_SOURCE_SUBSPAN23;
+      else
+         unreachable("Invalid dual-source FB write instruction group");
+   } else {
+      assert(inst->group == 0 || (inst->group == 16 && inst->exec_size == 16));
+
+      if (inst->exec_size == 16)
+         mctl = BRW_DATAPORT_RENDER_TARGET_WRITE_SIMD16_SINGLE_SOURCE;
+      else if (inst->exec_size == 8)
+         mctl = BRW_DATAPORT_RENDER_TARGET_WRITE_SIMD8_SINGLE_SOURCE_SUBSPAN01;
+      else
+         unreachable("Invalid FB write execution size");
+   }
+
+   return mctl;
+}
+
 static void
 lower_fb_write_logical_send(const fs_builder &bld, fs_inst *inst,
                             const struct brw_wm_prog_data *prog_data,
@@ -4249,8 +4281,8 @@ lower_fb_write_logical_send(const fs_builder &bld, fs_inst *inst,
       length = 2;
    } else if ((devinfo->gen <= 7 && !devinfo->is_haswell &&
                prog_data->uses_kill) ||
-              color1.file != BAD_FILE ||
-              key->nr_color_regions > 1) {
+              (devinfo->gen < 11 &&
+               (color1.file != BAD_FILE || key->nr_color_regions > 1))) {
       /* From the Sandy Bridge PRM, volume 4, page 198:
        *
        *     "Dispatched Pixel Enables. One bit per pixel indicating
@@ -4324,6 +4356,8 @@ lower_fb_write_logical_send(const fs_builder &bld, fs_inst *inst,
       length++;
    }
 
+   bool src0_alpha_present = false;
+
    if (src0_alpha.file != BAD_FILE) {
       for (unsigned i = 0; i < bld.dispatch_width() / 8; i++) {
          const fs_builder &ubld = bld.exec_all().group(8, i)
@@ -4333,12 +4367,14 @@ lower_fb_write_logical_send(const fs_builder &bld, fs_inst *inst,
          setup_color_payload(ubld, key, &sources[length], tmp, 1);
          length++;
       }
+      src0_alpha_present = true;
    } else if (prog_data->replicate_alpha && inst->target != 0) {
       /* Handle the case when fragment shader doesn't write to draw buffer
        * zero. No need to call setup_color_payload() for src0_alpha because
        * alpha value will be undefined.
        */
       length += bld.dispatch_width() / 8;
+      src0_alpha_present = true;
    }
 
    if (sample_mask.file != BAD_FILE) {
@@ -4407,8 +4443,33 @@ lower_fb_write_logical_send(const fs_builder &bld, fs_inst *inst,
       payload.nr = bld.shader->alloc.allocate(regs_written(load));
       load->dst = payload;
 
-      inst->src[0] = payload;
-      inst->resize_sources(1);
+      uint32_t msg_ctl = brw_fb_write_msg_control(inst, prog_data);
+      uint32_t ex_desc = 0;
+
+      inst->desc =
+         (inst->group / 16) ? (1 << 11) : 0 | /* rt slot group */
+         brw_dp_write_desc(devinfo, inst->target, msg_ctl,
+                           GEN6_DATAPORT_WRITE_MESSAGE_RENDER_TARGET_WRITE,
+                           inst->last_rt, false);
+
+      if (devinfo->gen >= 11) {
+         /* Set the "Render Target Index" and "Src0 Alpha Present" fields
+          * in the extended message descriptor, in lieu of using a header.
+          */
+         ex_desc = inst->target << 12 | src0_alpha_present << 15;
+      }
+
+      inst->opcode = SHADER_OPCODE_SEND;
+      inst->resize_sources(3);
+      inst->sfid = GEN6_SFID_DATAPORT_RENDER_CACHE;
+      inst->src[0] = brw_imm_ud(inst->desc);
+      inst->src[1] = brw_imm_ud(ex_desc);
+      inst->src[2] = payload;
+      inst->mlen = regs_written(load);
+      inst->ex_mlen = 0;
+      inst->header_size = header_size;
+      inst->check_tdr = true;
+      inst->send_has_side_effects = true;
    } else {
       /* Send from the MRF */
       load = bld.LOAD_PAYLOAD(fs_reg(MRF, 1, BRW_REGISTER_TYPE_F),
@@ -4428,11 +4489,10 @@ lower_fb_write_logical_send(const fs_builder &bld, fs_inst *inst,
          inst->resize_sources(0);
       }
       inst->base_mrf = 1;
+      inst->opcode = FS_OPCODE_FB_WRITE;
+      inst->mlen = regs_written(load);
+      inst->header_size = header_size;
    }
-
-   inst->opcode = FS_OPCODE_FB_WRITE;
-   inst->mlen = regs_written(load);
-   inst->header_size = header_size;
 }
 
 static void
@@ -8029,7 +8089,6 @@ brw_compile_fs(const struct brw_compiler *compiler, void *log_data,
                const struct brw_wm_prog_key *key,
                struct brw_wm_prog_data *prog_data,
                nir_shader *shader,
-               struct gl_program *prog,
                int shader_time_index8, int shader_time_index16,
                int shader_time_index32, bool allow_spilling,
                bool use_rep_send, struct brw_vue_map *vue_map,
@@ -8086,7 +8145,7 @@ brw_compile_fs(const struct brw_compiler *compiler, void *log_data,
    cfg_t *simd8_cfg = NULL, *simd16_cfg = NULL, *simd32_cfg = NULL;
 
    fs_visitor v8(compiler, log_data, mem_ctx, &key->base,
-                 &prog_data->base, prog, shader, 8,
+                 &prog_data->base, shader, 8,
                  shader_time_index8);
    if (!v8.run_fs(allow_spilling, false /* do_rep_send */)) {
       if (error_str)
@@ -8103,7 +8162,7 @@ brw_compile_fs(const struct brw_compiler *compiler, void *log_data,
        likely(!(INTEL_DEBUG & DEBUG_NO16) || use_rep_send)) {
       /* Try a SIMD16 compile */
       fs_visitor v16(compiler, log_data, mem_ctx, &key->base,
-                     &prog_data->base, prog, shader, 16,
+                     &prog_data->base, shader, 16,
                      shader_time_index16);
       v16.import_uniforms(&v8);
       if (!v16.run_fs(allow_spilling, use_rep_send)) {
@@ -8123,7 +8182,7 @@ brw_compile_fs(const struct brw_compiler *compiler, void *log_data,
        unlikely(INTEL_DEBUG & DEBUG_DO32)) {
       /* Try a SIMD32 compile */
       fs_visitor v32(compiler, log_data, mem_ctx, &key->base,
-                     &prog_data->base, prog, shader, 32,
+                     &prog_data->base, shader, 32,
                      shader_time_index32);
       v32.import_uniforms(&v8);
       if (!v32.run_fs(allow_spilling, false)) {
@@ -8368,7 +8427,6 @@ brw_compile_cs(const struct brw_compiler *compiler, void *log_data,
                                            src_shader, 8);
       v8 = new fs_visitor(compiler, log_data, mem_ctx, &key->base,
                           &prog_data->base,
-                          NULL, /* Never used in core profile */
                           nir8, 8, shader_time_index);
       if (!v8->run_cs(min_dispatch_width)) {
          fail_msg = v8->fail_msg;
@@ -8389,7 +8447,6 @@ brw_compile_cs(const struct brw_compiler *compiler, void *log_data,
                                             src_shader, 16);
       v16 = new fs_visitor(compiler, log_data, mem_ctx, &key->base,
                            &prog_data->base,
-                           NULL, /* Never used in core profile */
                            nir16, 16, shader_time_index);
       if (v8)
          v16->import_uniforms(v8);
@@ -8423,7 +8480,6 @@ brw_compile_cs(const struct brw_compiler *compiler, void *log_data,
                                             src_shader, 32);
       v32 = new fs_visitor(compiler, log_data, mem_ctx, &key->base,
                            &prog_data->base,
-                           NULL, /* Never used in core profile */
                            nir32, 32, shader_time_index);
       if (v8)
          v32->import_uniforms(v8);
@@ -8433,7 +8489,7 @@ brw_compile_cs(const struct brw_compiler *compiler, void *log_data,
       if (!v32->run_cs(min_dispatch_width)) {
          compiler->shader_perf_log(log_data,
                                    "SIMD32 shader failed to compile: %s",
-                                   v16->fail_msg);
+                                   v32->fail_msg);
          if (!v) {
             fail_msg =
                "Couldn't generate SIMD32 program and not "

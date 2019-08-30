@@ -807,7 +807,8 @@ optimizations.extend([
    (('ffloor', 'a(is_integral)'), a),
    (('fceil', 'a(is_integral)'), a),
    (('ftrunc', 'a(is_integral)'), a),
-   (('ffract', 'a(is_integral)'), 0.0),
+   # fract(x) = x - floor(x), so fract(NaN) = NaN
+   (('~ffract', 'a(is_integral)'), 0.0),
    (('fabs', 'a(is_not_negative)'), a),
    (('iabs', 'a(is_not_negative)'), a),
    (('fsat', 'a(is_not_positive)'), 0.0),
@@ -837,28 +838,41 @@ optimizations.extend([
    (('fne', 'a(is_not_zero)', 0.0), True),
    (('feq', 'a(is_not_zero)', 0.0), False),
 
-   (('fge', 'a(is_not_negative)', 'b(is_not_positive)'), True),
-   (('fge', 'b(is_not_positive)', 'a(is_gt_zero)'),      False),
-   (('fge', 'a(is_lt_zero)',      'b(is_not_negative)'), False),
-   (('fge', 'b(is_not_negative)', 'a(is_not_positive)'), True),
+   # In this chart, + means value > 0 and - means value < 0.
+   #
+   # + >= + -> unknown  0 >= + -> false    - >= + -> false
+   # + >= 0 -> true     0 >= 0 -> true     - >= 0 -> false
+   # + >= - -> true     0 >= - -> true     - >= - -> unknown
+   #
+   # Using grouping conceptually similar to a Karnaugh map...
+   #
+   # (+ >= 0, + >= -, 0 >= 0, 0 >= -) == (is_not_negative >= is_not_positive) -> true
+   # (0 >= +, - >= +) == (is_not_positive >= gt_zero) -> false
+   # (- >= +, - >= 0) == (lt_zero >= is_not_negative) -> false
+   #
+   # The flt / ilt cases just invert the expected result.
+   #
+   # The results expecting true, must be marked imprecise.  The results
+   # expecting false are fine because NaN compared >= or < anything is false.
 
-   (('flt', 'a(is_not_negative)', 'b(is_not_positive)'), False),
-   (('flt', 'b(is_not_positive)', 'a(is_gt_zero)'),      True),
-   (('flt', 'a(is_lt_zero)',      'b(is_not_negative)'), True),
-   (('flt', 'b(is_not_negative)', 'a(is_not_positive)'), False),
+   (('~fge', 'a(is_not_negative)', 'b(is_not_positive)'), True),
+   (('fge',  'a(is_not_positive)', 'b(is_gt_zero)'),      False),
+   (('fge',  'a(is_lt_zero)',      'b(is_not_negative)'), False),
+
+   (('flt',  'a(is_not_negative)', 'b(is_not_positive)'), False),
+   (('~flt', 'a(is_not_positive)', 'b(is_gt_zero)'),      True),
+   (('~flt', 'a(is_lt_zero)',      'b(is_not_negative)'), True),
 
    (('ine', 'a(is_not_zero)', 0), True),
    (('ieq', 'a(is_not_zero)', 0), False),
 
    (('ige', 'a(is_not_negative)', 'b(is_not_positive)'), True),
-   (('ige', 'b(is_not_positive)', 'a(is_gt_zero)'),      False),
+   (('ige', 'a(is_not_positive)', 'b(is_gt_zero)'),      False),
    (('ige', 'a(is_lt_zero)',      'b(is_not_negative)'), False),
-   (('ige', 'b(is_not_negative)', 'a(is_not_positive)'), True),
 
    (('ilt', 'a(is_not_negative)', 'b(is_not_positive)'), False),
-   (('ilt', 'b(is_not_positive)', 'a(is_gt_zero)'),      True),
+   (('ilt', 'a(is_not_positive)', 'b(is_gt_zero)'),      True),
    (('ilt', 'a(is_lt_zero)',      'b(is_not_negative)'), True),
-   (('ilt', 'b(is_not_negative)', 'a(is_not_positive)'), False),
 
    (('ult', 0, 'a(is_gt_zero)'), True),
 
@@ -1319,7 +1333,7 @@ def bitfield_reverse(u):
 
     return step5
 
-optimizations += [(bitfield_reverse('x@32'), ('bitfield_reverse', 'x'))]
+optimizations += [(bitfield_reverse('x@32'), ('bitfield_reverse', 'x'), '!options->lower_bitfield_reverse')]
 
 # For any float comparison operation, "cmp", if you have "a == a && a cmp b"
 # then the "a == a" is redundant because it's equivalent to "a is not NaN"

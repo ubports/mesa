@@ -453,53 +453,6 @@ radv_shader_compile_to_nir(struct radv_device *device,
 	return nir;
 }
 
-static void mark_16bit_fs_input(struct radv_shader_variant_info *shader_info,
-                                const struct glsl_type *type,
-                                int location)
-{
-	if (glsl_type_is_scalar(type) || glsl_type_is_vector(type) || glsl_type_is_matrix(type)) {
-		unsigned attrib_count = glsl_count_attribute_slots(type, false);
-		if (glsl_type_is_16bit(type)) {
-			shader_info->fs.float16_shaded_mask |= ((1ull << attrib_count) - 1) << location;
-		}
-	} else if (glsl_type_is_array(type)) {
-		unsigned stride = glsl_count_attribute_slots(glsl_get_array_element(type), false);
-		for (unsigned i = 0; i < glsl_get_length(type); ++i) {
-			mark_16bit_fs_input(shader_info, glsl_get_array_element(type), location + i * stride);
-		}
-	} else {
-		assert(glsl_type_is_struct_or_ifc(type));
-		for (unsigned i = 0; i < glsl_get_length(type); i++) {
-			mark_16bit_fs_input(shader_info, glsl_get_struct_field(type, i), location);
-			location += glsl_count_attribute_slots(glsl_get_struct_field(type, i), false);
-		}
-	}
-}
-
-static void
-handle_fs_input_decl(struct radv_shader_variant_info *shader_info,
-		     struct nir_variable *variable)
-{
-	unsigned attrib_count = glsl_count_attribute_slots(variable->type, false);
-
-	if (variable->data.compact) {
-		unsigned component_count = variable->data.location_frac +
-		                           glsl_get_length(variable->type);
-		attrib_count = (component_count + 3) / 4;
-	} else {
-		mark_16bit_fs_input(shader_info, variable->type,
-				    variable->data.driver_location);
-	}
-
-	uint64_t mask = ((1ull << attrib_count) - 1);
-
-	if (variable->data.interpolation == INTERP_MODE_FLAT)
-		shader_info->fs.flat_shaded_mask |= mask << variable->data.driver_location;
-
-	if (variable->data.location >= VARYING_SLOT_VAR0)
-		shader_info->fs.input_mask |= mask << (variable->data.location - VARYING_SLOT_VAR0);
-}
-
 static int
 type_size_vec4(const struct glsl_type *type, bool bindless)
 {
@@ -567,27 +520,12 @@ lower_view_index(nir_shader *nir)
 	return progress;
 }
 
-/* Gather information needed to setup the vs<->ps linking registers in
- * radv_pipeline_generate_ps_inputs().
- */
-
-static void
-handle_fs_inputs(nir_shader *nir, struct radv_shader_variant_info *shader_info)
-{
-	shader_info->fs.num_interp = nir->num_inputs;
-	
-	nir_foreach_variable(variable, &nir->inputs)
-		handle_fs_input_decl(shader_info, variable);
-}
-
-static void
-lower_fs_io(nir_shader *nir, struct radv_shader_variant_info *shader_info)
+void
+radv_lower_fs_io(nir_shader *nir)
 {
 	NIR_PASS_V(nir, lower_view_index);
 	nir_assign_io_var_locations(&nir->inputs, &nir->num_inputs,
 				    MESA_SHADER_FRAGMENT);
-
-	handle_fs_inputs(nir, shader_info);
 
 	NIR_PASS_V(nir, nir_lower_io, nir_var_shader_in, type_size_vec4, 0);
 
@@ -631,7 +569,7 @@ radv_alloc_shader_memory(struct radv_device *device,
 	slab->bo = device->ws->buffer_create(device->ws, slab->size, 256,
 	                                     RADEON_DOMAIN_VRAM,
 					     RADEON_FLAG_NO_INTERPROCESS_SHARING |
-					     (device->physical_device->cpdma_prefetch_writes_memory ?
+					     (device->physical_device->rad_info.cpdma_prefetch_writes_memory ?
 					             0 : RADEON_FLAG_READ_ONLY),
 					     RADV_BO_PRIORITY_SHADER);
 	slab->ptr = (char*)device->ws->buffer_map(slab->bo);
@@ -921,38 +859,6 @@ static void radv_postprocess_config(const struct radv_physical_device *pdevice,
 	}
 }
 
-static void radv_init_llvm_target()
-{
-	LLVMInitializeAMDGPUTargetInfo();
-	LLVMInitializeAMDGPUTarget();
-	LLVMInitializeAMDGPUTargetMC();
-	LLVMInitializeAMDGPUAsmPrinter();
-
-	/* For inline assembly. */
-	LLVMInitializeAMDGPUAsmParser();
-
-	/* Workaround for bug in llvm 4.0 that causes image intrinsics
-	 * to disappear.
-	 * https://reviews.llvm.org/D26348
-	 *
-	 * Workaround for bug in llvm that causes the GPU to hang in presence
-	 * of nested loops because there is an exec mask issue. The proper
-	 * solution is to fix LLVM but this might require a bunch of work.
-	 * https://bugs.llvm.org/show_bug.cgi?id=37744
-	 *
-	 * "mesa" is the prefix for error messages.
-	 */
-	const char *argv[2] = { "mesa", "-simplifycfg-sink-common=false" };
-	LLVMParseCommandLineOptions(2, argv, NULL);
-}
-
-static once_flag radv_init_llvm_target_once_flag = ONCE_FLAG_INIT;
-
-static void radv_init_llvm_once(void)
-{
-	call_once(&radv_init_llvm_target_once_flag, radv_init_llvm_target);
-}
-
 struct radv_shader_variant *
 radv_shader_variant_create(struct radv_device *device,
 			   const struct radv_shader_binary *binary,
@@ -1134,9 +1040,6 @@ shader_variant_compile(struct radv_device *device,
 	struct radv_shader_variant_info variant_info = {0};
 	bool thread_compiler;
 
-	if (shaders[0]->info.stage == MESA_SHADER_FRAGMENT)
-		lower_fs_io(shaders[0], &variant_info);
-
 	options->family = chip_family;
 	options->chip_class = device->physical_device->rad_info.chip_class;
 	options->dump_shader = radv_can_dump_shader(device, module, gs_copy_shader);
@@ -1146,6 +1049,7 @@ shader_variant_compile(struct radv_device *device,
 	options->check_ir = device->instance->debug_flags & RADV_DEBUG_CHECKIR;
 	options->tess_offchip_block_dw_size = device->tess_offchip_block_dw_size;
 	options->address32_hi = device->physical_device->rad_info.address32_hi;
+	options->has_ls_vgpr_init_bug = device->physical_device->rad_info.has_ls_vgpr_init_bug;
 
 	if ((stage == MESA_SHADER_GEOMETRY && !options->key.vs_common_out.as_ngg) ||
 	    gs_copy_shader)
@@ -1167,7 +1071,7 @@ shader_variant_compile(struct radv_device *device,
 		tm_options |= AC_TM_NO_LOAD_STORE_OPT;
 
 	thread_compiler = !(device->instance->debug_flags & RADV_DEBUG_NOTHREADLLVM);
-	radv_init_llvm_once();
+	ac_init_llvm_once();
 	radv_init_llvm_compiler(&ac_llvm,
 				thread_compiler,
 				chip_family, tm_options,
@@ -1338,7 +1242,7 @@ radv_get_max_waves(struct radv_device *device,
 
 	if (stage == MESA_SHADER_FRAGMENT) {
 		lds_per_wave = conf->lds_size * lds_increment +
-			       align(variant->info.fs.num_interp * 48,
+			       align(variant->info.info.ps.num_interp * 48,
 				     lds_increment);
 	} else if (stage == MESA_SHADER_COMPUTE) {
 		unsigned max_workgroup_size =

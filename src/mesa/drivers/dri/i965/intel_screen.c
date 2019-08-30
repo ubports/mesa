@@ -1906,7 +1906,17 @@ intel_init_bufmgr(struct intel_screen *screen)
    if (getenv("INTEL_NO_HW") != NULL)
       screen->no_hw = true;
 
-   screen->bufmgr = brw_bufmgr_init(&screen->devinfo, dri_screen->fd);
+   bool bo_reuse = false;
+   int bo_reuse_mode = driQueryOptioni(&screen->optionCache, "bo_reuse");
+   switch (bo_reuse_mode) {
+   case DRI_CONF_BO_REUSE_DISABLED:
+      break;
+   case DRI_CONF_BO_REUSE_ALL:
+      bo_reuse = true;
+      break;
+   }
+
+   screen->bufmgr = brw_bufmgr_init(&screen->devinfo, dri_screen->fd, bo_reuse);
    if (screen->bufmgr == NULL) {
       fprintf(stderr, "[%s:%u] Error initializing buffer manager.\n",
 	      __func__, __LINE__);
@@ -2526,6 +2536,11 @@ __DRIconfig **intelInitScreen2(__DRIscreen *dri_screen)
    const struct gen_device_info *devinfo = &screen->devinfo;
    screen->deviceID = devinfo->chipset_id;
    screen->no_hw = devinfo->no_hw;
+
+   if (devinfo->gen >= 12) {
+      fprintf(stderr, "gen12 and newer are not supported on i965\n");
+      return NULL;
+   }
 
    if (!intel_init_bufmgr(screen))
        return NULL;

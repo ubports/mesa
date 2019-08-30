@@ -354,46 +354,11 @@ radv_physical_device_init(struct radv_physical_device *device,
 	radv_get_driver_uuid(&device->driver_uuid);
 	radv_get_device_uuid(&device->rad_info, &device->device_uuid);
 
-	if (device->rad_info.family == CHIP_STONEY ||
-	    device->rad_info.chip_class >= GFX9) {
-		device->has_rbplus = true;
-		device->rbplus_allowed = device->rad_info.family == CHIP_STONEY ||
-					 device->rad_info.family == CHIP_VEGA12 ||
-		                         device->rad_info.family == CHIP_RAVEN ||
-		                         device->rad_info.family == CHIP_RAVEN2 ||
-		                         device->rad_info.family == CHIP_RENOIR;
-	}
-
-	/* The mere presence of CLEAR_STATE in the IB causes random GPU hangs
-	 * on GFX6.
-	 */
-	device->has_clear_state = device->rad_info.chip_class >= GFX7;
-
-	device->cpdma_prefetch_writes_memory = device->rad_info.chip_class <= GFX8;
-
-	/* Vega10/Raven need a special workaround for a hardware bug. */
-	device->has_scissor_bug = device->rad_info.family == CHIP_VEGA10 ||
-				  device->rad_info.family == CHIP_RAVEN;
-
-	device->has_tc_compat_zrange_bug = device->rad_info.chip_class < GFX10;
-
-	/* Out-of-order primitive rasterization. */
-	device->has_out_of_order_rast = device->rad_info.chip_class >= GFX8 &&
-					device->rad_info.max_se >= 2;
-	device->out_of_order_rast_allowed = device->has_out_of_order_rast &&
+	device->out_of_order_rast_allowed = device->rad_info.has_out_of_order_rast &&
 					    !(device->instance->debug_flags & RADV_DEBUG_NO_OUT_OF_ORDER);
 
 	device->dcc_msaa_allowed =
 		(device->instance->perftest_flags & RADV_PERFTEST_DCC_MSAA);
-
-	/* TODO: Figure out how to use LOAD_CONTEXT_REG on GFX6-GFX7. */
-	device->has_load_ctx_reg_pkt = device->rad_info.chip_class >= GFX9 ||
-				       (device->rad_info.chip_class >= GFX8 &&
-				        device->rad_info.me_fw_feature >= 41);
-
-	device->has_dcc_constant_encode = device->rad_info.family == CHIP_RAVEN2 ||
-					  device->rad_info.family == CHIP_RENOIR ||
-					  device->rad_info.chip_class >= GFX10;
 
 	device->use_shader_ballot = device->rad_info.chip_class >= GFX8 &&
 				    device->instance->perftest_flags & RADV_PERFTEST_SHADER_BALLOT;
@@ -2010,9 +1975,6 @@ VkResult radv_CreateDevice(
 
 	device->tess_offchip_block_dw_size =
 		device->physical_device->rad_info.family == CHIP_HAWAII ? 4096 : 8192;
-	device->has_distributed_tess =
-		device->physical_device->rad_info.chip_class >= GFX8 &&
-		device->physical_device->rad_info.max_se >= 2;
 
 	if (getenv("RADV_TRACE_FILE")) {
 		const char *filename = getenv("RADV_TRACE_FILE");

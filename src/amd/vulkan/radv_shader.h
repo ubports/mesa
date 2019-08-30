@@ -125,6 +125,7 @@ struct radv_nir_compiler_options {
 	bool dump_preoptir;
 	bool record_llvm_ir;
 	bool check_ir;
+	bool has_ls_vgpr_init_bug;
 	enum radeon_family family;
 	enum chip_class chip_class;
 	uint32_t tess_offchip_block_dw_size;
@@ -209,6 +210,10 @@ struct radv_shader_info {
 		bool prim_id_input;
 		bool layer_input;
 		uint8_t num_input_clips_culls;
+		uint32_t input_mask;
+		uint32_t flat_shaded_mask;
+		uint32_t float16_shaded_mask;
+		uint32_t num_interp;
 	} ps;
 	struct {
 		bool uses_grid_size;
@@ -269,10 +274,6 @@ struct radv_shader_variant_info {
 			bool export_prim_id;
 		} vs;
 		struct {
-			unsigned num_interp;
-			uint32_t input_mask;
-			uint32_t flat_shaded_mask;
-			uint32_t float16_shaded_mask;
 			bool can_discard;
 			bool early_fragment_test;
 			bool post_depth_coverage;
@@ -447,5 +448,8 @@ radv_can_dump_shader_stats(struct radv_device *device,
 
 unsigned
 shader_io_get_unique_index(gl_varying_slot slot);
+
+void
+radv_lower_fs_io(nir_shader *nir);
 
 #endif

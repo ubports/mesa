@@ -372,7 +372,7 @@ void si_begin_new_gfx_cs(struct si_context *ctx)
 		ctx->prefetch_L2_mask |= SI_PREFETCH_VBO_DESCRIPTORS;
 
 	/* CLEAR_STATE disables all colorbuffers, so only enable bound ones. */
-	bool has_clear_state = ctx->screen->has_clear_state;
+	bool has_clear_state = ctx->screen->info.has_clear_state;
 	if (has_clear_state) {
 		ctx->framebuffer.dirty_cbufs =
 			 u_bit_consecutive(0, ctx->framebuffer.state.nr_cbufs);
@@ -464,6 +464,8 @@ void si_begin_new_gfx_cs(struct si_context *ctx)
 
         ctx->index_ring_offset = 0;
 
+	STATIC_ASSERT(SI_NUM_TRACKED_REGS <= sizeof(ctx->tracked_regs.reg_saved) * 8);
+
 	if (has_clear_state) {
 		ctx->tracked_regs.reg_value[SI_TRACKED_DB_RENDER_CONTROL] = 0x00000000;
 		ctx->tracked_regs.reg_value[SI_TRACKED_DB_COUNT_CONTROL] = 0x00000000;
@@ -480,7 +482,8 @@ void si_begin_new_gfx_cs(struct si_context *ctx)
 		ctx->tracked_regs.reg_value[SI_TRACKED_PA_SC_MODE_CNTL_1] = 0x00000000;
 		ctx->tracked_regs.reg_value[SI_TRACKED_PA_SU_PRIM_FILTER_CNTL] = 0;
 		ctx->tracked_regs.reg_value[SI_TRACKED_PA_SU_SMALL_PRIM_FILTER_CNTL] = 0x00000000;
-		ctx->tracked_regs.reg_value[SI_TRACKED_PA_CL_VS_OUT_CNTL] = 0x00000000;
+		ctx->tracked_regs.reg_value[SI_TRACKED_PA_CL_VS_OUT_CNTL__VS] = 0x00000000;
+		ctx->tracked_regs.reg_value[SI_TRACKED_PA_CL_VS_OUT_CNTL__CL] = 0x00000000;
 		ctx->tracked_regs.reg_value[SI_TRACKED_PA_CL_CLIP_CNTL]	= 0x00090000;
 		ctx->tracked_regs.reg_value[SI_TRACKED_PA_SC_BINNER_CNTL_0] = 0x00000003;
 		ctx->tracked_regs.reg_value[SI_TRACKED_DB_DFSM_CONTROL]	= 0x00000000;

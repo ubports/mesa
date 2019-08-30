@@ -865,7 +865,7 @@ radv_pipeline_init_blend_state(struct radv_pipeline *pipeline,
 		blend.sx_mrt_blend_opt[i] = S_028760_COLOR_COMB_FCN(V_028760_OPT_COMB_BLEND_DISABLED) | S_028760_ALPHA_COMB_FCN(V_028760_OPT_COMB_BLEND_DISABLED);
 	}
 
-	if (pipeline->device->physical_device->has_rbplus) {
+	if (pipeline->device->physical_device->rad_info.has_rbplus) {
 		/* Disable RB+ blend optimizations for dual source blending. */
 		if (blend.mrt0_is_dual_src) {
 			for (i = 0; i < 8; i++) {
@@ -1751,6 +1751,15 @@ calculate_ngg_info(const VkGraphicsPipelineCreateInfo *pCreateInfo,
 		if (es_info->info.so.num_outputs)
 			esvert_lds_size = 4 * es_info->info.so.num_outputs + 1;
 		*/
+
+		/* LDS size for passing data from GS to ES.
+		 * GS stores Primitive IDs (one DWORD) into LDS at the address
+		 * corresponding to the ES thread of the provoking vertex. All
+		 * ES threads load and export PrimitiveID for their thread.
+		 */
+		if (!radv_pipeline_has_tess(pipeline) &&
+		    pipeline->shaders[MESA_SHADER_VERTEX]->info.vs.export_prim_id)
+			esvert_lds_size = MAX2(esvert_lds_size, 1);
 	}
 
 	unsigned max_gsprims = max_gsprims_base;
@@ -2010,7 +2019,7 @@ calculate_tess_state(struct radv_pipeline *pipeline,
 	else
 		topology = V_028B6C_OUTPUT_TRIANGLE_CW;
 
-	if (pipeline->device->has_distributed_tess) {
+	if (pipeline->device->physical_device->rad_info.has_distributed_tess) {
 		if (pipeline->device->physical_device->rad_info.family == CHIP_FIJI ||
 		    pipeline->device->physical_device->rad_info.family >= CHIP_POLARIS10)
 			distribution_mode = V_028B6C_DISTRIBUTION_MODE_TRAPEZOIDS;
@@ -2568,6 +2577,9 @@ void radv_create_shaders(struct radv_pipeline *pipeline,
 		if (radv_can_dump_shader(device, modules[i], false))
 			nir_print_shader(nir[i], stderr);
 	}
+
+	if (nir[MESA_SHADER_FRAGMENT])
+		radv_lower_fs_io(nir[MESA_SHADER_FRAGMENT]);
 
 	radv_fill_shader_keys(device, keys, key, nir);
 
@@ -3212,7 +3224,7 @@ radv_pipeline_generate_binning_state(struct radeon_cmdbuf *ctx_cs,
 			fpovs_per_batch = 63;
 		} else {
 			/* The context states are affected by the scissor bug. */
-			context_states_per_bin = pipeline->device->physical_device->has_scissor_bug ? 1 : 6;
+			context_states_per_bin = pipeline->device->physical_device->rad_info.has_gfx9_scissor_bug ? 1 : 6;
 			/* 32 causes hangs for RAVEN. */
 			persistent_states_per_bin = 16;
 			fpovs_per_batch = 63;
@@ -3329,7 +3341,7 @@ radv_pipeline_generate_blend_state(struct radeon_cmdbuf *ctx_cs,
 	radeon_set_context_reg(ctx_cs, R_028808_CB_COLOR_CONTROL, blend->cb_color_control);
 	radeon_set_context_reg(ctx_cs, R_028B70_DB_ALPHA_TO_MASK, blend->db_alpha_to_mask);
 
-	if (pipeline->device->physical_device->has_rbplus) {
+	if (pipeline->device->physical_device->rad_info.has_rbplus) {
 
 		radeon_set_context_reg_seq(ctx_cs, R_028760_SX_MRT0_BLEND_OPT, 8);
 		radeon_emit_array(ctx_cs, blend->sx_mrt_blend_opt, 8);
@@ -4014,11 +4026,11 @@ radv_pipeline_generate_ps_inputs(struct radeon_cmdbuf *ctx_cs,
 		}
 	}
 
-	for (unsigned i = 0; i < 32 && (1u << i) <= ps->info.fs.input_mask; ++i) {
+	for (unsigned i = 0; i < 32 && (1u << i) <= ps->info.info.ps.input_mask; ++i) {
 		unsigned vs_offset;
 		bool flat_shade;
 		bool float16;
-		if (!(ps->info.fs.input_mask & (1u << i)))
+		if (!(ps->info.info.ps.input_mask & (1u << i)))
 			continue;
 
 		vs_offset = outinfo->vs_output_param_offset[VARYING_SLOT_VAR0 + i];
@@ -4028,8 +4040,8 @@ radv_pipeline_generate_ps_inputs(struct radeon_cmdbuf *ctx_cs,
 			continue;
 		}
 
-		flat_shade = !!(ps->info.fs.flat_shaded_mask & (1u << ps_offset));
-		float16 = !!(ps->info.fs.float16_shaded_mask & (1u << ps_offset));
+		flat_shade = !!(ps->info.info.ps.flat_shaded_mask & (1u << ps_offset));
+		float16 = !!(ps->info.info.ps.float16_shaded_mask & (1u << ps_offset));
 
 		ps_input_cntl[ps_offset] = offset_to_ps_input(vs_offset, flat_shade, float16);
 		++ps_offset;
@@ -4054,8 +4066,8 @@ radv_compute_db_shader_control(const struct radv_device *device,
 	else
 		z_order = V_02880C_LATE_Z;
 
-	bool disable_rbplus = device->physical_device->has_rbplus &&
-	                      !device->physical_device->rbplus_allowed;
+	bool disable_rbplus = device->physical_device->rad_info.has_rbplus &&
+	                      !device->physical_device->rad_info.rbplus_allowed;
 
 	/* It shouldn't be needed to export gl_SampleMask when MSAA is disabled
 	 * but this appears to break Project Cars (DXVK). See
@@ -4104,7 +4116,7 @@ radv_pipeline_generate_fragment_shader(struct radeon_cmdbuf *ctx_cs,
 			       ps->config.spi_ps_input_addr);
 
 	radeon_set_context_reg(ctx_cs, R_0286D8_SPI_PS_IN_CONTROL,
-			       S_0286D8_NUM_INTERP(ps->info.fs.num_interp) |
+			       S_0286D8_NUM_INTERP(ps->info.info.ps.num_interp) |
 			       S_0286D8_PS_W32_EN(ps->info.info.wave_size == 32));
 
 	radeon_set_context_reg(ctx_cs, R_0286E0_SPI_BARYC_CNTL, pipeline->graphics.spi_baryc_cntl);
@@ -4378,7 +4390,7 @@ radv_compute_ia_multi_vgt_param_helpers(struct radv_pipeline *pipeline,
 		    radv_pipeline_has_gs(pipeline))
 			ia_multi_vgt_param.partial_vs_wave = true;
 		/* Needed for 028B6C_DISTRIBUTION_MODE != 0 */
-		if (device->has_distributed_tess) {
+		if (device->physical_device->rad_info.has_distributed_tess) {
 			if (radv_pipeline_has_gs(pipeline)) {
 				if (device->physical_device->rad_info.chip_class <= GFX8)
 					ia_multi_vgt_param.partial_es_wave = true;

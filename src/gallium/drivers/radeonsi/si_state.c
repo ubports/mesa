@@ -127,11 +127,11 @@ static void si_emit_cb_render_state(struct si_context *sctx)
 				S_028424_OVERWRITE_COMBINER_MRT_SHARING_DISABLE(sctx->chip_class <= GFX9) |
 				S_028424_OVERWRITE_COMBINER_WATERMARK(watermark) |
 				S_028424_OVERWRITE_COMBINER_DISABLE(oc_disable) |
-				S_028424_DISABLE_CONSTANT_ENCODE_REG(sctx->screen->has_dcc_constant_encode));
+				S_028424_DISABLE_CONSTANT_ENCODE_REG(sctx->screen->info.has_dcc_constant_encode));
 	}
 
 	/* RB+ register settings. */
-	if (sctx->screen->rbplus_allowed) {
+	if (sctx->screen->info.rbplus_allowed) {
 		unsigned spi_shader_col_format =
 			sctx->ps_shader.cso ?
 			sctx->ps_shader.current->key.part.ps.epilog.spi_shader_col_format : 0;
@@ -640,7 +640,7 @@ static void *si_create_blend_state_mode(struct pipe_context *ctx,
 		color_control |= S_028808_MODE(V_028808_CB_DISABLE);
 	}
 
-	if (sctx->screen->rbplus_allowed) {
+	if (sctx->screen->info.rbplus_allowed) {
 		/* Disable RB+ blend optimizations for dual source blending.
 		 * Vulkan does this.
 		 */
@@ -715,6 +715,10 @@ static void si_bind_blend_state(struct pipe_context *ctx, void *state)
 static void si_delete_blend_state(struct pipe_context *ctx, void *state)
 {
 	struct si_context *sctx = (struct si_context *)ctx;
+
+	if (sctx->queued.named.blend == state)
+		si_bind_blend_state(ctx, sctx->noop_blend);
+
 	si_pm4_delete_state(sctx, blend, (struct si_state_blend *)state);
 }
 
@@ -801,12 +805,20 @@ static void si_emit_clip_regs(struct si_context *sctx)
 	culldist_mask |= clipdist_mask;
 
 	unsigned initial_cdw = sctx->gfx_cs->current.cdw;
-	radeon_opt_set_context_reg(sctx, R_02881C_PA_CL_VS_OUT_CNTL,
-		SI_TRACKED_PA_CL_VS_OUT_CNTL,
-		vs_sel->pa_cl_vs_out_cntl |
-		S_02881C_VS_OUT_CCDIST0_VEC_ENA((total_mask & 0x0F) != 0) |
-		S_02881C_VS_OUT_CCDIST1_VEC_ENA((total_mask & 0xF0) != 0) |
-		clipdist_mask | (culldist_mask << 8));
+	unsigned pa_cl_cntl = S_02881C_VS_OUT_CCDIST0_VEC_ENA((total_mask & 0x0F) != 0) |
+			      S_02881C_VS_OUT_CCDIST1_VEC_ENA((total_mask & 0xF0) != 0) |
+			      clipdist_mask | (culldist_mask << 8);
+
+	if (sctx->chip_class >= GFX10) {
+		radeon_opt_set_context_reg_rmw(sctx, R_02881C_PA_CL_VS_OUT_CNTL,
+					       SI_TRACKED_PA_CL_VS_OUT_CNTL__CL,
+					       pa_cl_cntl,
+					       ~SI_TRACKED_PA_CL_VS_OUT_CNTL__VS_MASK);
+	} else {
+		radeon_opt_set_context_reg(sctx, R_02881C_PA_CL_VS_OUT_CNTL,
+					   SI_TRACKED_PA_CL_VS_OUT_CNTL__CL,
+					   vs_sel->pa_cl_vs_out_cntl | pa_cl_cntl);
+	}
 	radeon_opt_set_context_reg(sctx, R_028810_PA_CL_CLIP_CNTL,
 		SI_TRACKED_PA_CL_CLIP_CNTL,
 		rs->pa_cl_clip_cntl |
@@ -1034,7 +1046,7 @@ static void si_bind_rs_state(struct pipe_context *ctx, void *state)
 		si_mark_atom_dirty(sctx, &sctx->atoms.s.db_render_state);
 
 		/* Update the small primitive filter workaround if necessary. */
-		if (sctx->screen->has_msaa_sample_loc_bug &&
+		if (sctx->screen->info.has_msaa_sample_loc_bug &&
 		    sctx->framebuffer.nr_samples > 1)
 			si_mark_atom_dirty(sctx, &sctx->atoms.s.msaa_sample_locs);
 	}
@@ -1083,7 +1095,7 @@ static void si_delete_rs_state(struct pipe_context *ctx, void *state)
 	struct si_state_rasterizer *rs = (struct si_state_rasterizer *)state;
 
 	if (sctx->queued.named.rasterizer == state)
-		si_pm4_bind_state(sctx, poly_offset, NULL);
+		si_bind_rs_state(ctx, sctx->discard_rasterizer_state);
 
 	FREE(rs->pm4_poly_offset);
 	si_pm4_delete_state(sctx, rasterizer, rs);
@@ -1327,6 +1339,10 @@ static void si_bind_dsa_state(struct pipe_context *ctx, void *state)
 static void si_delete_dsa_state(struct pipe_context *ctx, void *state)
 {
 	struct si_context *sctx = (struct si_context *)ctx;
+
+	if (sctx->queued.named.dsa == state)
+		si_bind_dsa_state(ctx, sctx->noop_dsa);
+
 	si_pm4_delete_state(sctx, dsa, (struct si_state_dsa *)state);
 }
 
@@ -1482,8 +1498,8 @@ static void si_emit_db_render_state(struct si_context *sctx)
 	if (!rs->multisample_enable)
 		db_shader_control &= C_02880C_MASK_EXPORT_ENABLE;
 
-	if (sctx->screen->has_rbplus &&
-	    !sctx->screen->rbplus_allowed)
+	if (sctx->screen->info.has_rbplus &&
+	    !sctx->screen->info.rbplus_allowed)
 		db_shader_control |= S_02880C_DUAL_QUAD_DISABLE(1);
 
 	radeon_opt_set_context_reg(sctx, R_02880C_DB_SHADER_CONTROL,
@@ -3466,7 +3482,7 @@ static void si_emit_msaa_sample_locs(struct si_context *sctx)
 	struct radeon_cmdbuf *cs = sctx->gfx_cs;
 	struct si_state_rasterizer *rs = sctx->queued.named.rasterizer;
 	unsigned nr_samples = sctx->framebuffer.nr_samples;
-	bool has_msaa_sample_loc_bug = sctx->screen->has_msaa_sample_loc_bug;
+	bool has_msaa_sample_loc_bug = sctx->screen->info.has_msaa_sample_loc_bug;
 
 	/* Smoothing (only possible with nr_samples == 1) uses the same
 	 * sample locations as the MSAA it simulates.
@@ -5390,19 +5406,16 @@ static void si_init_config(struct si_context *sctx)
 {
 	struct si_screen *sscreen = sctx->screen;
 	uint64_t border_color_va = sctx->border_color_buffer->gpu_address;
-	bool has_clear_state = sscreen->has_clear_state;
+	bool has_clear_state = sscreen->info.has_clear_state;
 	struct si_pm4_state *pm4 = CALLOC_STRUCT(si_pm4_state);
 
 	if (!pm4)
 		return;
 
-	/* Since amdgpu version 3.6.0, CONTEXT_CONTROL is emitted by the kernel */
-	if (!sscreen->info.is_amdgpu || sscreen->info.drm_minor < 6) {
-		si_pm4_cmd_begin(pm4, PKT3_CONTEXT_CONTROL);
-		si_pm4_cmd_add(pm4, CONTEXT_CONTROL_LOAD_ENABLE(1));
-		si_pm4_cmd_add(pm4, CONTEXT_CONTROL_SHADOW_ENABLE(1));
-		si_pm4_cmd_end(pm4, false);
-	}
+	si_pm4_cmd_begin(pm4, PKT3_CONTEXT_CONTROL);
+	si_pm4_cmd_add(pm4, CONTEXT_CONTROL_LOAD_ENABLE(1));
+	si_pm4_cmd_add(pm4, CONTEXT_CONTROL_SHADOW_ENABLE(1));
+	si_pm4_cmd_end(pm4, false);
 
 	if (has_clear_state) {
 		si_pm4_cmd_begin(pm4, PKT3_CLEAR_STATE);
@@ -5429,7 +5442,8 @@ static void si_init_config(struct si_context *sctx)
 		si_pm4_set_reg(pm4, R_028B98_VGT_STRMOUT_BUFFER_CONFIG, 0x0);
 	}
 
-	si_pm4_set_reg(pm4, R_028AA0_VGT_INSTANCE_STEP_RATE_0, 1);
+	if (sscreen->info.chip_class <= GFX9)
+		si_pm4_set_reg(pm4, R_028AA0_VGT_INSTANCE_STEP_RATE_0, 1);
 	if (!has_clear_state)
 		si_pm4_set_reg(pm4, R_028AB8_VGT_VTX_CNT_EN, 0x0);
 	if (sctx->chip_class < GFX7)

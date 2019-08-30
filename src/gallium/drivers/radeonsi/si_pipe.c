@@ -89,6 +89,7 @@ static const struct debug_named_value debug_options[] = {
 
 	/* 3D engine options: */
 	{ "nogfx", DBG(NO_GFX), "Disable graphics. Only multimedia compute paths can be used." },
+	{ "nongg", DBG(NO_NGG), "Disable NGG and use the legacy pipeline." },
 	{ "alwayspd", DBG(ALWAYS_PD), "Always enable the primitive discard compute shader." },
 	{ "pd", DBG(PD), "Enable the primitive discard compute shader for large draw calls." },
 	{ "nopd", DBG(NO_PD), "Disable the primitive discard compute shader." },
@@ -871,21 +872,8 @@ static void si_disk_cache_create(struct si_screen *sscreen)
 	disk_cache_format_hex_id(cache_id, sha1, 20 * 2);
 
 	/* These flags affect shader compilation. */
-	#define ALL_FLAGS (DBG(FS_CORRECT_DERIVS_AFTER_KILL) |	\
-			   DBG(SI_SCHED) |			\
-			   DBG(GISEL) |				\
-			   DBG(W32_GE) |			\
-			   DBG(W32_PS) |			\
-			   DBG(W32_CS) |			\
-			   DBG(W64_GE) |			\
-			   DBG(W64_PS) |			\
-			   DBG(W64_CS))
+	#define ALL_FLAGS (DBG(SI_SCHED) | DBG(GISEL))
 	uint64_t shader_debug_flags = sscreen->debug_flags & ALL_FLAGS;
-
-	if (sscreen->options.enable_nir) {
-		STATIC_ASSERT((ALL_FLAGS & (1u << 31)) == 0);
-		shader_debug_flags |= 1u << 31;
-	}
 
 	/* Add the high bits of 32-bit addresses, which affects
 	 * how 32-bit addresses are expanded to 64 bits.
@@ -1109,16 +1097,6 @@ radeonsi_screen_create_impl(struct radeon_winsys *ws,
 			S_0089B0_OFFCHIP_BUFFERING(max_offchip_buffers);
 	}
 
-	/* The mere presense of CLEAR_STATE in the IB causes random GPU hangs
-	 * on GFX6. Some CLEAR_STATE cause asic hang on radeon kernel, etc.
-	 * SPI_VS_OUT_CONFIG. So only enable GFX7 CLEAR_STATE on amdgpu kernel. */
-	sscreen->has_clear_state = sscreen->info.chip_class >= GFX7 &&
-				   sscreen->info.is_amdgpu;
-
-	sscreen->has_distributed_tess =
-		sscreen->info.chip_class >= GFX8 &&
-		sscreen->info.max_se >= 2;
-
 	sscreen->has_draw_indirect_multi =
 		(sscreen->info.family >= CHIP_POLARIS10) ||
 		(sscreen->info.chip_class == GFX8 &&
@@ -1131,8 +1109,7 @@ radeonsi_screen_create_impl(struct radeon_winsys *ws,
 		 sscreen->info.pfp_fw_version >= 79 &&
 		 sscreen->info.me_fw_version >= 142);
 
-	sscreen->has_out_of_order_rast = sscreen->info.chip_class >= GFX8 &&
-					 sscreen->info.max_se >= 2 &&
+	sscreen->has_out_of_order_rast = sscreen->info.has_out_of_order_rast &&
 					 !(sscreen->debug_flags & DBG(NO_OUT_OF_ORDER));
 	sscreen->assume_no_z_fights =
 		driQueryOptionb(config->options, "radeonsi_assume_no_z_fights");
@@ -1146,19 +1123,10 @@ radeonsi_screen_create_impl(struct radeon_winsys *ws,
 #include "si_debug_options.h"
 	}
 
-	sscreen->has_gfx9_scissor_bug = sscreen->info.family == CHIP_VEGA10 ||
-					sscreen->info.family == CHIP_RAVEN;
-	sscreen->has_msaa_sample_loc_bug = (sscreen->info.family >= CHIP_POLARIS10 &&
-					    sscreen->info.family <= CHIP_POLARIS12) ||
-					   sscreen->info.family == CHIP_VEGA10 ||
-					   sscreen->info.family == CHIP_RAVEN;
-	sscreen->has_ls_vgpr_init_bug = sscreen->info.family == CHIP_VEGA10 ||
-					sscreen->info.family == CHIP_RAVEN;
-	sscreen->has_dcc_constant_encode = sscreen->info.family == CHIP_RAVEN2 ||
-					   sscreen->info.family == CHIP_RENOIR ||
-					   sscreen->info.chip_class >= GFX10;
-	sscreen->use_ngg = sscreen->info.chip_class >= GFX10;
-	sscreen->use_ngg_streamout = sscreen->info.chip_class >= GFX10;
+	sscreen->use_ngg = sscreen->info.chip_class >= GFX10 &&
+			   sscreen->info.family != CHIP_NAVI14 &&
+			   !(sscreen->debug_flags & DBG(NO_NGG));
+	sscreen->use_ngg_streamout = false;
 
 	/* Only enable primitive binning on APUs by default. */
 	if (sscreen->info.chip_class >= GFX10) {
@@ -1189,26 +1157,8 @@ radeonsi_screen_create_impl(struct radeon_winsys *ws,
 	 */
 	sscreen->llvm_has_working_vgpr_indexing = sscreen->info.chip_class != GFX9;
 
-	/* Some chips have RB+ registers, but don't support RB+. Those must
-	 * always disable it.
-	 */
-	if (sscreen->info.family == CHIP_STONEY ||
-	    sscreen->info.chip_class >= GFX9) {
-		sscreen->has_rbplus = true;
-
-		sscreen->rbplus_allowed =
-			!(sscreen->debug_flags & DBG(NO_RB_PLUS)) &&
-			(sscreen->info.family == CHIP_STONEY ||
-			 sscreen->info.family == CHIP_VEGA12 ||
-			 sscreen->info.family == CHIP_RAVEN ||
-			 sscreen->info.family == CHIP_RAVEN2 ||
-			 sscreen->info.family == CHIP_RENOIR);
-	}
-
 	sscreen->dcc_msaa_allowed =
 		!(sscreen->debug_flags & DBG(NO_DCC_MSAA));
-
-	sscreen->cpdma_prefetch_writes_memory = sscreen->info.chip_class <= GFX8;
 
 	(void) mtx_init(&sscreen->shader_parts_mutex, mtx_plain);
 	sscreen->use_monolithic_shaders =

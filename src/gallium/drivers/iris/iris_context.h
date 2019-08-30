@@ -53,6 +53,11 @@ enum iris_param_domain {
    BRW_PARAM_DOMAIN_IMAGE,
 };
 
+enum {
+   DRI_CONF_BO_REUSE_DISABLED,
+   DRI_CONF_BO_REUSE_ALL
+};
+
 #define BRW_PARAM(domain, val)   (BRW_PARAM_DOMAIN_##domain << 24 | (val))
 #define BRW_PARAM_DOMAIN(param)  ((uint32_t)(param) >> 24)
 #define BRW_PARAM_VALUE(param)   ((uint32_t)(param) & 0x00ffffff)
@@ -936,6 +941,9 @@ void gen9_toggle_preemption(struct iris_context *ice,
 #  include "iris_genx_protos.h"
 #  undef genX
 #  define genX(x) gen11_##x
+#  include "iris_genx_protos.h"
+#  undef genX
+#  define genX(x) gen12_##x
 #  include "iris_genx_protos.h"
 #  undef genX
 #endif

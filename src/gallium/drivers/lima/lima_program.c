@@ -158,11 +158,21 @@ lima_program_optimize_fs_nir(struct nir_shader *s)
    BITSET_SET(alu_lower, nir_op_fsqrt);
    BITSET_SET(alu_lower, nir_op_fsin);
    BITSET_SET(alu_lower, nir_op_fcos);
+   /* nir vec4 fcsel assumes that each component of the condition will be
+    * used to select the same component from the two options, but lima
+    * can't implement that since we only have 1 component condition */
+   BITSET_SET(alu_lower, nir_op_fcsel);
+   BITSET_SET(alu_lower, nir_op_bcsel);
 
    NIR_PASS_V(s, nir_lower_fragcoord_wtrans);
    NIR_PASS_V(s, nir_lower_io, nir_var_all, type_size, 0);
    NIR_PASS_V(s, nir_lower_regs_to_ssa);
    NIR_PASS_V(s, nir_lower_tex, &tex_options);
+
+   do {
+      progress = false;
+      NIR_PASS(progress, s, nir_opt_vectorize);
+   } while (progress);
 
    do {
       progress = false;
@@ -302,6 +312,8 @@ lima_update_fs_state(struct lima_context *ctx)
       ralloc_free(fs->shader);
       fs->shader = NULL;
    }
+
+   ctx->pp_max_stack_size = MAX2(ctx->pp_max_stack_size, ctx->fs->stack_size);
 
    return true;
 }

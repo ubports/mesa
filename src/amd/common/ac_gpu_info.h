@@ -58,6 +58,14 @@ struct radeon_info {
 	uint32_t                    num_sdma_rings;
 	uint32_t                    clock_crystal_freq;
 	uint32_t                    tcc_cache_line_size;
+	bool                        has_clear_state;
+	bool                        has_distributed_tess;
+	bool                        has_dcc_constant_encode;
+	bool                        has_rbplus; /* if RB+ registers exist */
+	bool                        rbplus_allowed; /* if RB+ is allowed */
+	bool                        has_load_ctx_reg_pkt;
+	bool                        has_out_of_order_rast;
+	bool                        cpdma_prefetch_writes_memory;
 
 	/* There are 2 display DCC codepaths, because display expects unaligned DCC. */
 	/* Disable RB and pipe alignment to skip the retile blit. (1 RB chips only) */
@@ -149,6 +157,12 @@ struct radeon_info {
 	/* Tile modes. */
 	uint32_t                    si_tile_mode_array[32];
 	uint32_t                    cik_macrotile_mode_array[16];
+
+	/* Hardware bugs. */
+	bool                        has_gfx9_scissor_bug;
+	bool                        has_tc_compat_zrange_bug;
+	bool                        has_msaa_sample_loc_bug;
+	bool                        has_ls_vgpr_init_bug;
 };
 
 bool ac_query_gpu_info(int fd, void *dev_p,

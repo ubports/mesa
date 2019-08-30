@@ -127,29 +127,34 @@ mir_print_instruction(midgard_instruction *ins)
         if (ins->invert)
                 printf(".not");
 
-        ssa_args *args = &ins->ssa_args;
-
         printf(" ");
-        mir_print_index(args->dest);
+        mir_print_index(ins->dest);
 
         if (ins->mask != 0xF)
                 mir_print_mask(ins->mask);
 
         printf(", ");
 
-        mir_print_index(args->src[0]);
+        mir_print_index(ins->src[0]);
         printf(", ");
 
-        if (args->inline_constant)
+        if (ins->has_inline_constant)
                 printf("#%d", ins->inline_constant);
         else
-                mir_print_index(args->src[1]);
+                mir_print_index(ins->src[1]);
 
         printf(", ");
-        mir_print_index(args->src[2]);
+        mir_print_index(ins->src[2]);
 
-        if (ins->has_constants)
-                printf(" <%f, %f, %f, %f>", ins->constants[0], ins->constants[1], ins->constants[2], ins->constants[3]);
+        if (ins->has_constants) {
+                uint32_t *uc = ins->constants;
+                float *fc = (float *) uc;
+
+                if (midgard_is_integer_op(ins->alu.op))
+                        printf(" <0x%X, 0x%X, 0x%X, 0x%x>", uc[0], uc[1], uc[2], uc[3]);
+                else
+                        printf(" <%f, %f, %f, %f>", fc[0], fc[1], fc[2], fc[3]);
+        }
 
         if (ins->no_spill)
                 printf(" /* no spill */");

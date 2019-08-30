@@ -441,6 +441,56 @@ bool ac_query_gpu_info(int fd, void *dev_p,
 	info->num_sdma_rings = util_bitcount(dma.available_rings);
 	info->num_compute_rings = util_bitcount(compute.available_rings);
 
+	/* The mere presence of CLEAR_STATE in the IB causes random GPU hangs
+	 * on GFX6. Some CLEAR_STATE cause asic hang on radeon kernel, etc.
+	 * SPI_VS_OUT_CONFIG. So only enable GFX7 CLEAR_STATE on amdgpu kernel.
+	 */
+	info->has_clear_state = info->chip_class >= GFX7;
+
+	info->has_distributed_tess = info->chip_class >= GFX8 &&
+				     info->max_se >= 2;
+
+	info->has_dcc_constant_encode = info->family == CHIP_RAVEN2 ||
+					info->family == CHIP_RENOIR ||
+					info->chip_class >= GFX10;
+
+	info->has_rbplus = info->family == CHIP_STONEY ||
+			   info->chip_class >= GFX9;
+
+	/* Some chips have RB+ registers, but don't support RB+. Those must
+	 * always disable it.
+	 */
+	info->rbplus_allowed = info->has_rbplus &&
+			       (info->family == CHIP_STONEY ||
+			        info->family == CHIP_VEGA12 ||
+			        info->family == CHIP_RAVEN ||
+			        info->family == CHIP_RAVEN2 ||
+			        info->family == CHIP_RENOIR);
+
+	info->has_out_of_order_rast = info->chip_class >= GFX8 &&
+				      info->max_se >= 2;
+
+	/* TODO: Figure out how to use LOAD_CONTEXT_REG on GFX6-GFX7. */
+	info->has_load_ctx_reg_pkt = info->chip_class >= GFX9 ||
+				     (info->chip_class >= GFX8 &&
+				      info->me_fw_feature >= 41);
+
+	info->cpdma_prefetch_writes_memory = info->chip_class <= GFX8;
+
+	info->has_gfx9_scissor_bug = info->family == CHIP_VEGA10 ||
+				     info->family == CHIP_RAVEN;
+
+	info->has_tc_compat_zrange_bug = info->chip_class >= GFX8 &&
+					 info->chip_class <= GFX9;
+
+	info->has_msaa_sample_loc_bug = (info->family >= CHIP_POLARIS10 &&
+					 info->family <= CHIP_POLARIS12) ||
+					info->family == CHIP_VEGA10 ||
+					info->family == CHIP_RAVEN;
+
+	info->has_ls_vgpr_init_bug = info->family == CHIP_VEGA10 ||
+				     info->family == CHIP_RAVEN;
+
 	/* Get the number of good compute units. */
 	info->num_good_compute_units = 0;
 	for (i = 0; i < info->max_se; i++)

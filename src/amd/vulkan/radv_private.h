@@ -280,27 +280,13 @@ struct radv_physical_device {
 	int master_fd;
 	struct wsi_device                       wsi_device;
 
-	bool has_rbplus; /* if RB+ register exist */
-	bool rbplus_allowed; /* if RB+ is allowed */
-	bool has_clear_state;
-	bool cpdma_prefetch_writes_memory;
-	bool has_scissor_bug;
-	bool has_tc_compat_zrange_bug;
-
-	bool has_out_of_order_rast;
 	bool out_of_order_rast_allowed;
 
 	/* Whether DCC should be enabled for MSAA textures. */
 	bool dcc_msaa_allowed;
 
-	/* Whether LOAD_CONTEXT_REG packets are supported. */
-	bool has_load_ctx_reg_pkt;
-
 	/* Whether to enable the AMD_shader_ballot extension */
 	bool use_shader_ballot;
-
-	/* Whether DISABLE_CONSTANT_ENCODE_REG is supported. */
-	bool has_dcc_constant_encode;
 
 	/* Number of threads per wave. */
 	uint8_t ps_wave_size;
@@ -705,7 +691,6 @@ struct radv_device {
 	struct radeon_cmdbuf *empty_cs[RADV_MAX_QUEUE_FAMILIES];
 
 	bool always_use_syncobj;
-	bool has_distributed_tess;
 	bool pbb_allowed;
 	bool dfsm_allowed;
 	uint32_t tess_offchip_block_dw_size;
@@ -1331,7 +1316,7 @@ unsigned radv_get_default_max_sample_dist(int log_samples);
 void radv_device_init_msaa(struct radv_device *device);
 
 void radv_update_ds_clear_metadata(struct radv_cmd_buffer *cmd_buffer,
-				   struct radv_image *image,
+				   const struct radv_image_view *iview,
 				   VkClearDepthStencilValue ds_clear_value,
 				   VkImageAspectFlags aspects);
 
@@ -1802,6 +1787,24 @@ radv_image_get_dcc_pred_va(const struct radv_image *image,
 {
 	uint64_t va = radv_buffer_get_va(image->bo);
 	va += image->offset + image->dcc_pred_offset + base_level * 8;
+	return va;
+}
+
+static inline uint64_t
+radv_get_tc_compat_zrange_va(const struct radv_image *image,
+			     uint32_t base_level)
+{
+	uint64_t va = radv_buffer_get_va(image->bo);
+	va += image->offset + image->tc_compat_zrange_offset + base_level * 4;
+	return va;
+}
+
+static inline uint64_t
+radv_get_ds_clear_value_va(const struct radv_image *image,
+			   uint32_t base_level)
+{
+	uint64_t va = radv_buffer_get_va(image->bo);
+	va += image->offset + image->clear_value_offset + base_level * 8;
 	return va;
 }
 

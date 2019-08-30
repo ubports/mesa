@@ -53,11 +53,11 @@ struct lp_jit_texture
    uint32_t width;        /* same as number of elements */
    uint32_t height;
    uint32_t depth;        /* doubles as array size */
-   uint32_t first_level;
-   uint32_t last_level;
    const void *base;
    uint32_t row_stride[LP_MAX_TEXTURE_LEVELS];
    uint32_t img_stride[LP_MAX_TEXTURE_LEVELS];
+   uint32_t first_level;
+   uint32_t last_level;
    uint32_t mip_offsets[LP_MAX_TEXTURE_LEVELS];
 };
 
@@ -78,15 +78,25 @@ struct lp_jit_viewport
 };
 
 
+struct lp_jit_image
+{
+   uint32_t width;        /* same as number of elements */
+   uint32_t height;
+   uint32_t depth;
+   const void *base;
+   uint32_t row_stride;
+   uint32_t img_stride;
+};
+
 enum {
    LP_JIT_TEXTURE_WIDTH = 0,
    LP_JIT_TEXTURE_HEIGHT,
    LP_JIT_TEXTURE_DEPTH,
-   LP_JIT_TEXTURE_FIRST_LEVEL,
-   LP_JIT_TEXTURE_LAST_LEVEL,
    LP_JIT_TEXTURE_BASE,
    LP_JIT_TEXTURE_ROW_STRIDE,
    LP_JIT_TEXTURE_IMG_STRIDE,
+   LP_JIT_TEXTURE_FIRST_LEVEL,
+   LP_JIT_TEXTURE_LAST_LEVEL,
    LP_JIT_TEXTURE_MIP_OFFSETS,
    LP_JIT_TEXTURE_NUM_FIELDS  /* number of fields above */
 };
@@ -107,7 +117,15 @@ enum {
    LP_JIT_VIEWPORT_NUM_FIELDS /* number of fields above */
 };
 
-
+enum {
+   LP_JIT_IMAGE_WIDTH = 0,
+   LP_JIT_IMAGE_HEIGHT,
+   LP_JIT_IMAGE_DEPTH,
+   LP_JIT_IMAGE_BASE,
+   LP_JIT_IMAGE_ROW_STRIDE,
+   LP_JIT_IMAGE_IMG_STRIDE,
+   LP_JIT_IMAGE_NUM_FIELDS  /* number of fields above */
+};
 /**
  * This structure is passed directly to the generated fragment shader.
  *
@@ -135,6 +153,7 @@ struct lp_jit_context
 
    struct lp_jit_texture textures[PIPE_MAX_SHADER_SAMPLER_VIEWS];
    struct lp_jit_sampler samplers[PIPE_MAX_SAMPLERS];
+   struct lp_jit_image images[PIPE_MAX_SHADER_IMAGES];
 
    const uint32_t *ssbos[LP_MAX_TGSI_SHADER_BUFFERS];
    int num_ssbos[LP_MAX_TGSI_SHADER_BUFFERS];
@@ -156,6 +175,7 @@ enum {
    LP_JIT_CTX_VIEWPORTS,
    LP_JIT_CTX_TEXTURES,
    LP_JIT_CTX_SAMPLERS,
+   LP_JIT_CTX_IMAGES,
    LP_JIT_CTX_SSBOS,
    LP_JIT_CTX_NUM_SSBOS,
    LP_JIT_CTX_COUNT
@@ -191,6 +211,9 @@ enum {
 
 #define lp_jit_context_samplers(_gallivm, _ptr) \
    lp_build_struct_get_ptr(_gallivm, _ptr, LP_JIT_CTX_SAMPLERS, "samplers")
+
+#define lp_jit_context_images(_gallivm, _ptr) \
+   lp_build_struct_get_ptr(_gallivm, _ptr, LP_JIT_CTX_IMAGES, "images")
 
 #define lp_jit_context_ssbos(_gallivm, _ptr) \
    lp_build_struct_get_ptr(_gallivm, _ptr, LP_JIT_CTX_SSBOS, "ssbos")

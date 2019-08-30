@@ -57,7 +57,7 @@
 #define LP_NEW_SO            0x20000
 #define LP_NEW_SO_BUFFERS    0x40000
 #define LP_NEW_FS_SSBOS      0x80000
-
+#define LP_NEW_FS_IMAGES    0x100000
 
 
 struct vertex_info;
@@ -137,4 +137,13 @@ llvmpipe_prepare_geometry_sampling(struct llvmpipe_context *ctx,
                                    unsigned num,
                                    struct pipe_sampler_view **views);
 
+void
+llvmpipe_prepare_vertex_images(struct llvmpipe_context *lp,
+                               unsigned num,
+                               struct pipe_image_view *views);
+
+void
+llvmpipe_prepare_geometry_images(struct llvmpipe_context *lp,
+                                 unsigned num,
+                                 struct pipe_image_view *views);
 #endif

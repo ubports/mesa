@@ -2975,13 +2975,16 @@ void si_llvm_export_vs(struct si_shader_context *ctx,
 		pos_args[0].out[3] = ctx->ac.f32_1;  /* W */
 	}
 
+	bool pos_writes_edgeflag = shader->selector->info.writes_edgeflag &&
+				   !shader->key.as_ngg;
+
 	/* Write the misc vector (point size, edgeflag, layer, viewport). */
 	if (shader->selector->info.writes_psize ||
-	    shader->selector->pos_writes_edgeflag ||
+	    pos_writes_edgeflag ||
 	    shader->selector->info.writes_viewport_index ||
 	    shader->selector->info.writes_layer) {
 		pos_args[1].enabled_channels = shader->selector->info.writes_psize |
-					       (shader->selector->pos_writes_edgeflag << 1) |
+					       (pos_writes_edgeflag << 1) |
 					       (shader->selector->info.writes_layer << 2);
 
 		pos_args[1].valid_mask = 0; /* EXEC mask */
@@ -2996,7 +2999,7 @@ void si_llvm_export_vs(struct si_shader_context *ctx,
 		if (shader->selector->info.writes_psize)
 			pos_args[1].out[0] = psize_value;
 
-		if (shader->selector->pos_writes_edgeflag) {
+		if (pos_writes_edgeflag) {
 			/* The output is a float, but the hw expects an integer
 			 * with the first bit containing the edge flag. */
 			edgeflag_value = LLVMBuildFPToUI(ctx->ac.builder,
@@ -4901,13 +4904,19 @@ static void create_function(struct si_shader_context *ctx)
 		add_arg_assign_checked(&fninfo, ARG_SGPR, ctx->i32,
 				       &ctx->abi.prim_mask, SI_PARAM_PRIM_MASK);
 
-		add_arg_checked(&fninfo, ARG_VGPR, ctx->v2i32, SI_PARAM_PERSP_SAMPLE);
-		add_arg_checked(&fninfo, ARG_VGPR, ctx->v2i32, SI_PARAM_PERSP_CENTER);
-		add_arg_checked(&fninfo, ARG_VGPR, ctx->v2i32, SI_PARAM_PERSP_CENTROID);
+		add_arg_assign_checked(&fninfo, ARG_VGPR, ctx->v2i32,
+				       &ctx->abi.persp_sample, SI_PARAM_PERSP_SAMPLE);
+		add_arg_assign_checked(&fninfo, ARG_VGPR, ctx->v2i32,
+				       &ctx->abi.persp_center, SI_PARAM_PERSP_CENTER);
+		add_arg_assign_checked(&fninfo, ARG_VGPR, ctx->v2i32,
+				       &ctx->abi.persp_centroid, SI_PARAM_PERSP_CENTROID);
 		add_arg_checked(&fninfo, ARG_VGPR, v3i32, SI_PARAM_PERSP_PULL_MODEL);
-		add_arg_checked(&fninfo, ARG_VGPR, ctx->v2i32, SI_PARAM_LINEAR_SAMPLE);
-		add_arg_checked(&fninfo, ARG_VGPR, ctx->v2i32, SI_PARAM_LINEAR_CENTER);
-		add_arg_checked(&fninfo, ARG_VGPR, ctx->v2i32, SI_PARAM_LINEAR_CENTROID);
+		add_arg_assign_checked(&fninfo, ARG_VGPR, ctx->v2i32,
+				       &ctx->abi.linear_sample, SI_PARAM_LINEAR_SAMPLE);
+		add_arg_assign_checked(&fninfo, ARG_VGPR, ctx->v2i32,
+				       &ctx->abi.linear_center, SI_PARAM_LINEAR_CENTER);
+		add_arg_assign_checked(&fninfo, ARG_VGPR, ctx->v2i32,
+				       &ctx->abi.linear_centroid, SI_PARAM_LINEAR_CENTROID);
 		add_arg_checked(&fninfo, ARG_VGPR, ctx->f32, SI_PARAM_LINE_STIPPLE_TEX);
 		add_arg_assign_checked(&fninfo, ARG_VGPR, ctx->f32,
 				       &ctx->abi.frag_pos[0], SI_PARAM_POS_X_FLOAT);
@@ -5307,7 +5316,7 @@ bool si_shader_binary_upload(struct si_screen *sscreen, struct si_shader *shader
 
 	si_resource_reference(&shader->bo, NULL);
 	shader->bo = si_aligned_buffer_create(&sscreen->b,
-					      sscreen->cpdma_prefetch_writes_memory ?
+					      sscreen->info.cpdma_prefetch_writes_memory ?
 						0 : SI_RESOURCE_FLAG_READ_ONLY,
                                               PIPE_USAGE_IMMUTABLE,
                                               align(binary.rx_size, SI_CPDMA_ALIGNMENT),
@@ -6109,7 +6118,6 @@ static bool si_compile_tgsi_main(struct si_shader_context *ctx)
 		ctx->load_input = declare_input_fs;
 		ctx->abi.emit_outputs = si_llvm_return_fs_outputs;
 		bld_base->emit_epilogue = si_tgsi_emit_epilogue;
-		ctx->abi.lookup_interp_param = si_nir_lookup_interp_param;
 		ctx->abi.load_sample_position = load_sample_position;
 		ctx->abi.load_sample_mask_in = load_sample_mask_in;
 		ctx->abi.emit_fbfetch = si_nir_emit_fbfetch;
@@ -7406,7 +7414,7 @@ static void si_build_vs_prolog_function(struct si_shader_context *ctx,
 			si_init_exec_from_input(ctx, 3, 0);
 
 		if (key->vs_prolog.as_ls &&
-		    ctx->screen->has_ls_vgpr_init_bug) {
+		    ctx->screen->info.has_ls_vgpr_init_bug) {
 			/* If there are no HS threads, SPI loads the LS VGPRs
 			 * starting at VGPR 0. Shift them back to where they
 			 * belong.
@@ -7709,7 +7717,7 @@ static bool si_shader_select_gs_parts(struct si_screen *sscreen,
 		struct si_shader *es_main_part;
 		enum pipe_shader_type es_type = shader->key.part.gs.es->type;
 
-		if (es_type == PIPE_SHADER_TESS_EVAL && shader->key.as_ngg)
+		if (shader->key.as_ngg)
 			es_main_part = shader->key.part.gs.es->main_shader_part_ngg_es;
 		else
 			es_main_part = shader->key.part.gs.es->main_shader_part_es;
