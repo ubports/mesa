@@ -53,7 +53,7 @@ panfrost_create_compute_state(
 
         panfrost_shader_compile(ctx, v->tripipe,
                         cso->ir_type, cso->prog,
-                        MESA_SHADER_COMPUTE, v);
+                        MESA_SHADER_COMPUTE, v, NULL);
 
 
 
@@ -87,6 +87,11 @@ panfrost_launch_grid(struct pipe_context *pipe,
 {
         struct panfrost_context *ctx = pan_context(pipe);
 
+        /* TODO: Do we want a special compute-only batch? */
+        struct panfrost_batch *batch = panfrost_get_batch_for_fbo(ctx);
+
+        ctx->compute_grid = info;
+
         struct mali_job_descriptor_header job = {
                 .job_type = JOB_TYPE_COMPUTE,
                 .job_descriptor_size = 1,
@@ -111,25 +116,24 @@ panfrost_launch_grid(struct pipe_context *pipe,
         };
 
         payload->postfix.framebuffer =
-                panfrost_upload_transient(ctx, &compute_fbd, sizeof(compute_fbd));
+                panfrost_upload_transient(batch, &compute_fbd, sizeof(compute_fbd));
 
         /* Invoke according to the grid info */
 
         panfrost_pack_work_groups_compute(&payload->prefix,
                         info->grid[0], info->grid[1], info->grid[2],
-                        info->block[0], info->block[1], info->block[2]);
+                        info->block[0], info->block[1], info->block[2], false);
 
         /* Upload the payload */
 
-        struct panfrost_transfer transfer = panfrost_allocate_transient(ctx, sizeof(job) + sizeof(*payload));
+        struct panfrost_transfer transfer = panfrost_allocate_transient(batch, sizeof(job) + sizeof(*payload));
         memcpy(transfer.cpu, &job, sizeof(job));
         memcpy(transfer.cpu + sizeof(job), payload, sizeof(*payload));
 
-        /* TODO: Do we want a special compute-only batch? */
-        struct panfrost_job *batch = panfrost_get_job_for_fbo(ctx);
-
         /* Queue the job */
         panfrost_scoreboard_queue_compute_job(batch, transfer);
+
+        panfrost_flush(pipe, NULL, PIPE_FLUSH_END_OF_FRAME);
 }
 
 void

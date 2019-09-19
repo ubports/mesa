@@ -26,6 +26,7 @@
 #include "ac_gpu_info.h"
 #include "sid.h"
 
+#include "util/macros.h"
 #include "util/u_math.h"
 
 #include <stdio.h>
@@ -440,6 +441,56 @@ bool ac_query_gpu_info(int fd, void *dev_p,
 	info->num_sdma_rings = util_bitcount(dma.available_rings);
 	info->num_compute_rings = util_bitcount(compute.available_rings);
 
+	/* The mere presence of CLEAR_STATE in the IB causes random GPU hangs
+	 * on GFX6. Some CLEAR_STATE cause asic hang on radeon kernel, etc.
+	 * SPI_VS_OUT_CONFIG. So only enable GFX7 CLEAR_STATE on amdgpu kernel.
+	 */
+	info->has_clear_state = info->chip_class >= GFX7;
+
+	info->has_distributed_tess = info->chip_class >= GFX8 &&
+				     info->max_se >= 2;
+
+	info->has_dcc_constant_encode = info->family == CHIP_RAVEN2 ||
+					info->family == CHIP_RENOIR ||
+					info->chip_class >= GFX10;
+
+	info->has_rbplus = info->family == CHIP_STONEY ||
+			   info->chip_class >= GFX9;
+
+	/* Some chips have RB+ registers, but don't support RB+. Those must
+	 * always disable it.
+	 */
+	info->rbplus_allowed = info->has_rbplus &&
+			       (info->family == CHIP_STONEY ||
+			        info->family == CHIP_VEGA12 ||
+			        info->family == CHIP_RAVEN ||
+			        info->family == CHIP_RAVEN2 ||
+			        info->family == CHIP_RENOIR);
+
+	info->has_out_of_order_rast = info->chip_class >= GFX8 &&
+				      info->max_se >= 2;
+
+	/* TODO: Figure out how to use LOAD_CONTEXT_REG on GFX6-GFX7. */
+	info->has_load_ctx_reg_pkt = info->chip_class >= GFX9 ||
+				     (info->chip_class >= GFX8 &&
+				      info->me_fw_feature >= 41);
+
+	info->cpdma_prefetch_writes_memory = info->chip_class <= GFX8;
+
+	info->has_gfx9_scissor_bug = info->family == CHIP_VEGA10 ||
+				     info->family == CHIP_RAVEN;
+
+	info->has_tc_compat_zrange_bug = info->chip_class >= GFX8 &&
+					 info->chip_class <= GFX9;
+
+	info->has_msaa_sample_loc_bug = (info->family >= CHIP_POLARIS10 &&
+					 info->family <= CHIP_POLARIS12) ||
+					info->family == CHIP_VEGA10 ||
+					info->family == CHIP_RAVEN;
+
+	info->has_ls_vgpr_init_bug = info->family == CHIP_VEGA10 ||
+				     info->family == CHIP_RAVEN;
+
 	/* Get the number of good compute units. */
 	info->num_good_compute_units = 0;
 	for (i = 0; i < info->max_se; i++)
@@ -460,7 +511,7 @@ bool ac_query_gpu_info(int fd, void *dev_p,
 	info->gart_page_size = alignment_info.size_remote;
 
 	if (info->chip_class == GFX6)
-		info->gfx_ib_pad_with_type2 = TRUE;
+		info->gfx_ib_pad_with_type2 = true;
 
 	unsigned ib_align = 0;
 	ib_align = MAX2(ib_align, gfx.ib_start_alignment);
@@ -477,7 +528,8 @@ bool ac_query_gpu_info(int fd, void *dev_p,
 
 	if (info->drm_minor >= 31 &&
 	    (info->family == CHIP_RAVEN ||
-	     info->family == CHIP_RAVEN2)) {
+	     info->family == CHIP_RAVEN2 ||
+	     info->family == CHIP_RENOIR)) {
 		if (info->num_render_backends == 1)
 			info->use_display_dcc_unaligned = true;
 		else
@@ -485,8 +537,67 @@ bool ac_query_gpu_info(int fd, void *dev_p,
 	}
 
 	info->has_gds_ordered_append = info->chip_class >= GFX7 &&
-				       info->drm_minor >= 29 &&
-				       HAVE_LLVM >= 0x0800;
+				       info->drm_minor >= 29;
+
+	if (info->chip_class >= GFX9) {
+		unsigned pc_lines = 0;
+
+		switch (info->family) {
+		case CHIP_VEGA10:
+		case CHIP_VEGA12:
+		case CHIP_VEGA20:
+			pc_lines = 2048;
+			break;
+		case CHIP_RAVEN:
+		case CHIP_RAVEN2:
+		case CHIP_RENOIR:
+		case CHIP_NAVI10:
+		case CHIP_NAVI12:
+			pc_lines = 1024;
+			break;
+		case CHIP_NAVI14:
+			pc_lines = 512;
+			break;
+		default:
+			assert(0);
+		}
+
+		if (info->chip_class >= GFX10) {
+			info->pbb_max_alloc_count = pc_lines / 3;
+		} else {
+			info->pbb_max_alloc_count =
+				MIN2(128, pc_lines / (4 * info->max_se));
+		}
+	}
+
+	if (info->chip_class >= GFX10) {
+		switch (info->family) {
+		case CHIP_NAVI10:
+		case CHIP_NAVI12:
+			info->num_sdp_interfaces = 16;
+			break;
+		case CHIP_NAVI14:
+			info->num_sdp_interfaces = 8;
+			break;
+		default:
+			assert(0);
+		}
+	}
+
+	info->max_wave64_per_simd = info->family >= CHIP_POLARIS10 &&
+				    info->family <= CHIP_VEGAM ? 8 : 10;
+
+	/* The number is per SIMD. There is enough SGPRs for the maximum number
+	 * of Wave32, which is double the number for Wave64.
+	 */
+	if (info->chip_class >= GFX10)
+		info->num_physical_sgprs_per_simd = 128 * info->max_wave64_per_simd * 2;
+	else if (info->chip_class >= GFX8)
+		info->num_physical_sgprs_per_simd = 800;
+	else
+		info->num_physical_sgprs_per_simd = 512;
+
+	info->num_physical_wave64_vgprs_per_simd = info->chip_class >= GFX10 ? 512 : 256;
 	return true;
 }
 

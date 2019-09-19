@@ -45,6 +45,8 @@
 #include "gallium/winsys/amdgpu/drm/amdgpu_public.h"
 #include <xf86drm.h>
 
+#include <llvm/Config/llvm-config.h>
+
 static const struct debug_named_value debug_options[] = {
 	/* Shader logging options: */
 	{ "vs", DBG(VS), "Print vertex shaders" },
@@ -59,7 +61,6 @@ static const struct debug_named_value debug_options[] = {
 	{ "preoptir", DBG(PREOPT_IR), "Print the LLVM IR before initial optimizations" },
 
 	/* Shader compiler options the shader cache should be aware of: */
-	{ "unsafemath", DBG(UNSAFE_MATH), "Enable unsafe math shader optimizations" },
 	{ "sisched", DBG(SI_SCHED), "Enable LLVM SI Machine Instruction Scheduler." },
 	{ "gisel", DBG(GISEL), "Enable LLVM global instruction selector." },
 	{ "w32ge", DBG(W32_GE), "Use Wave32 for vertex, tessellation, and geometry shaders." },
@@ -90,6 +91,7 @@ static const struct debug_named_value debug_options[] = {
 
 	/* 3D engine options: */
 	{ "nogfx", DBG(NO_GFX), "Disable graphics. Only multimedia compute paths can be used." },
+	{ "nongg", DBG(NO_NGG), "Disable NGG and use the legacy pipeline." },
 	{ "alwayspd", DBG(ALWAYS_PD), "Always enable the primitive discard compute shader." },
 	{ "pd", DBG(PD), "Enable the primitive discard compute shader for large draw calls." },
 	{ "nopd", DBG(NO_PD), "Disable the primitive discard compute shader." },
@@ -174,7 +176,7 @@ static void si_destroy_context(struct pipe_context *context)
 
 	si_release_all_descriptors(sctx);
 
-	if (sctx->chip_class >= GFX10)
+	if (sctx->chip_class >= GFX10 && sctx->has_graphics)
 		gfx10_destroy_query(sctx);
 
 	pipe_resource_reference(&sctx->esgs_ring, NULL);
@@ -294,6 +296,7 @@ static void si_destroy_context(struct pipe_context *context)
 	util_dynarray_fini(&sctx->resident_img_needs_color_decompress);
 	util_dynarray_fini(&sctx->resident_tex_needs_depth_decompress);
 	si_unref_sdma_uploads(sctx);
+	free(sctx->sdma_uploads);
 	FREE(sctx);
 }
 
@@ -501,7 +504,7 @@ static struct pipe_context *si_create_context(struct pipe_screen *screen,
 	if (!sctx->border_color_map)
 		goto fail;
 
-	sctx->ngg = sctx->chip_class >= GFX10;
+	sctx->ngg = sscreen->use_ngg;
 
 	/* Initialize context functions used by graphics and compute. */
 	if (sctx->chip_class >= GFX10)
@@ -542,6 +545,17 @@ static struct pipe_context *si_create_context(struct pipe_screen *screen,
 		if (sctx->blitter == NULL)
 			goto fail;
 		sctx->blitter->skip_viewport_restore = true;
+
+		/* Some states are expected to be always non-NULL. */
+		sctx->noop_blend = util_blitter_get_noop_blend_state(sctx->blitter);
+		sctx->queued.named.blend = sctx->noop_blend;
+
+		sctx->noop_dsa = util_blitter_get_noop_dsa_state(sctx->blitter);
+		sctx->queued.named.dsa = sctx->noop_dsa;
+
+		sctx->discard_rasterizer_state =
+			util_blitter_get_discard_rasterizer_state(sctx->blitter);
+		sctx->queued.named.rasterizer = sctx->discard_rasterizer_state;
 
 		si_init_draw_functions(sctx);
 		si_initialize_prim_discard_tunables(sctx);
@@ -733,6 +747,9 @@ static void si_destroy_screen(struct pipe_screen* pscreen)
 	util_queue_destroy(&sscreen->shader_compiler_queue);
 	util_queue_destroy(&sscreen->shader_compiler_queue_low_priority);
 
+	/* Release the reference on glsl types of the compiler threads. */
+	glsl_type_singleton_decref();
+
 	for (i = 0; i < ARRAY_SIZE(sscreen->compiler); i++)
 		si_destroy_compiler(&sscreen->compiler[i]);
 
@@ -858,22 +875,8 @@ static void si_disk_cache_create(struct si_screen *sscreen)
 	disk_cache_format_hex_id(cache_id, sha1, 20 * 2);
 
 	/* These flags affect shader compilation. */
-	#define ALL_FLAGS (DBG(FS_CORRECT_DERIVS_AFTER_KILL) |	\
-			   DBG(SI_SCHED) |			\
-			   DBG(GISEL) |				\
-			   DBG(UNSAFE_MATH) |			\
-			   DBG(W32_GE) |			\
-			   DBG(W32_PS) |			\
-			   DBG(W32_CS) |			\
-			   DBG(W64_GE) |			\
-			   DBG(W64_PS) |			\
-			   DBG(W64_CS))
+	#define ALL_FLAGS (DBG(SI_SCHED) | DBG(GISEL))
 	uint64_t shader_debug_flags = sscreen->debug_flags & ALL_FLAGS;
-
-	if (sscreen->options.enable_nir) {
-		STATIC_ASSERT((ALL_FLAGS & (1u << 31)) == 0);
-		shader_debug_flags |= 1u << 31;
-	}
 
 	/* Add the high bits of 32-bit addresses, which affects
 	 * how 32-bit addresses are expanded to 64 bits.
@@ -923,7 +926,7 @@ radeonsi_screen_create_impl(struct radeon_winsys *ws,
 	sscreen->ws = ws;
 	ws->query_info(ws, &sscreen->info);
 
-	if (sscreen->info.chip_class == GFX10 && HAVE_LLVM < 0x0900) {
+	if (sscreen->info.chip_class == GFX10 && LLVM_VERSION_MAJOR < 9) {
 		fprintf(stderr, "radeonsi: Navi family support requires LLVM 9 or higher\n");
 		FREE(sscreen);
 		return NULL;
@@ -1020,12 +1023,16 @@ radeonsi_screen_create_impl(struct radeon_winsys *ws,
 	num_comp_lo_threads = MIN2(num_comp_lo_threads,
 				   ARRAY_SIZE(sscreen->compiler_lowp));
 
+	/* Take a reference on the glsl types for the compiler threads. */
+	glsl_type_singleton_init_or_ref();
+
 	if (!util_queue_init(&sscreen->shader_compiler_queue, "sh",
 			     64, num_comp_hi_threads,
 			     UTIL_QUEUE_INIT_RESIZE_IF_FULL |
 			     UTIL_QUEUE_INIT_SET_FULL_THREAD_AFFINITY)) {
 		si_destroy_shader_cache(sscreen);
 		FREE(sscreen);
+		glsl_type_singleton_decref();
 		return NULL;
 	}
 
@@ -1037,6 +1044,7 @@ radeonsi_screen_create_impl(struct radeon_winsys *ws,
 			     UTIL_QUEUE_INIT_USE_MINIMUM_PRIORITY)) {
 	       si_destroy_shader_cache(sscreen);
 	       FREE(sscreen);
+	       glsl_type_singleton_decref();
 	       return NULL;
 	}
 
@@ -1077,7 +1085,6 @@ radeonsi_screen_create_impl(struct radeon_winsys *ws,
 	}
 
 	sscreen->tess_factor_ring_size = 32768 * sscreen->info.max_se;
-	assert(((sscreen->tess_factor_ring_size / 4) & C_030938_SIZE) == 0);
 	sscreen->tess_offchip_ring_size = max_offchip_buffers *
 					  sscreen->tess_offchip_block_dw_size * 4;
 
@@ -1093,16 +1100,6 @@ radeonsi_screen_create_impl(struct radeon_winsys *ws,
 			S_0089B0_OFFCHIP_BUFFERING(max_offchip_buffers);
 	}
 
-	/* The mere presense of CLEAR_STATE in the IB causes random GPU hangs
-	 * on GFX6. Some CLEAR_STATE cause asic hang on radeon kernel, etc.
-	 * SPI_VS_OUT_CONFIG. So only enable GFX7 CLEAR_STATE on amdgpu kernel. */
-	sscreen->has_clear_state = sscreen->info.chip_class >= GFX7 &&
-				   sscreen->info.is_amdgpu;
-
-	sscreen->has_distributed_tess =
-		sscreen->info.chip_class >= GFX8 &&
-		sscreen->info.max_se >= 2;
-
 	sscreen->has_draw_indirect_multi =
 		(sscreen->info.family >= CHIP_POLARIS10) ||
 		(sscreen->info.chip_class == GFX8 &&
@@ -1115,8 +1112,7 @@ radeonsi_screen_create_impl(struct radeon_winsys *ws,
 		 sscreen->info.pfp_fw_version >= 79 &&
 		 sscreen->info.me_fw_version >= 142);
 
-	sscreen->has_out_of_order_rast = sscreen->info.chip_class >= GFX8 &&
-					 sscreen->info.max_se >= 2 &&
+	sscreen->has_out_of_order_rast = sscreen->info.has_out_of_order_rast &&
 					 !(sscreen->debug_flags & DBG(NO_OUT_OF_ORDER));
 	sscreen->assume_no_z_fights =
 		driQueryOptionb(config->options, "radeonsi_assume_no_z_fights");
@@ -1130,19 +1126,10 @@ radeonsi_screen_create_impl(struct radeon_winsys *ws,
 #include "si_debug_options.h"
 	}
 
-	if (sscreen->options.always_nir)
-		sscreen->options.enable_nir = true;
-
-	sscreen->has_gfx9_scissor_bug = sscreen->info.family == CHIP_VEGA10 ||
-					sscreen->info.family == CHIP_RAVEN;
-	sscreen->has_msaa_sample_loc_bug = (sscreen->info.family >= CHIP_POLARIS10 &&
-					    sscreen->info.family <= CHIP_POLARIS12) ||
-					   sscreen->info.family == CHIP_VEGA10 ||
-					   sscreen->info.family == CHIP_RAVEN;
-	sscreen->has_ls_vgpr_init_bug = sscreen->info.family == CHIP_VEGA10 ||
-					sscreen->info.family == CHIP_RAVEN;
-	sscreen->has_dcc_constant_encode = sscreen->info.family == CHIP_RAVEN2 ||
-					   sscreen->info.chip_class >= GFX10;
+	sscreen->use_ngg = sscreen->info.chip_class >= GFX10 &&
+			   sscreen->info.family != CHIP_NAVI14 &&
+			   !(sscreen->debug_flags & DBG(NO_NGG));
+	sscreen->use_ngg_streamout = false;
 
 	/* Only enable primitive binning on APUs by default. */
 	if (sscreen->info.chip_class >= GFX10) {
@@ -1173,25 +1160,8 @@ radeonsi_screen_create_impl(struct radeon_winsys *ws,
 	 */
 	sscreen->llvm_has_working_vgpr_indexing = sscreen->info.chip_class != GFX9;
 
-	/* Some chips have RB+ registers, but don't support RB+. Those must
-	 * always disable it.
-	 */
-	if (sscreen->info.family == CHIP_STONEY ||
-	    sscreen->info.chip_class >= GFX9) {
-		sscreen->has_rbplus = true;
-
-		sscreen->rbplus_allowed =
-			!(sscreen->debug_flags & DBG(NO_RB_PLUS)) &&
-			(sscreen->info.family == CHIP_STONEY ||
-			 sscreen->info.family == CHIP_VEGA12 ||
-			 sscreen->info.family == CHIP_RAVEN ||
-			 sscreen->info.family == CHIP_RAVEN2);
-	}
-
 	sscreen->dcc_msaa_allowed =
 		!(sscreen->debug_flags & DBG(NO_DCC_MSAA));
-
-	sscreen->cpdma_prefetch_writes_memory = sscreen->info.chip_class <= GFX8;
 
 	(void) mtx_init(&sscreen->shader_parts_mutex, mtx_plain);
 	sscreen->use_monolithic_shaders =

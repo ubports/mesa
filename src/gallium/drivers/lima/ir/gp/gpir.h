@@ -388,6 +388,12 @@ typedef struct gpir_compiler {
 
    struct lima_vs_shader_state *prog;
    int constant_base;
+
+   /* shaderdb */
+   int num_instr;
+   int num_loops;
+   int num_spills;
+   int num_fills;
 } gpir_compiler;
 
 #define GPIR_VALUE_REG_NUM 11
@@ -436,7 +442,6 @@ void gpir_instr_print_prog(gpir_compiler *comp);
 bool gpir_codegen_acc_same_op(gpir_op op1, gpir_op op2);
 
 bool gpir_pre_rsched_lower_prog(gpir_compiler *comp);
-bool gpir_post_rsched_lower_prog(gpir_compiler *comp);
 bool gpir_reduce_reg_pressure_schedule_prog(gpir_compiler *comp);
 bool gpir_regalloc_prog(gpir_compiler *comp);
 bool gpir_schedule_prog(gpir_compiler *comp);

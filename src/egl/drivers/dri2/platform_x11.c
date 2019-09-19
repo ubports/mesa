@@ -42,6 +42,7 @@
 #include <sys/stat.h>
 #include "util/debug.h"
 #include "util/macros.h"
+#include "util/bitscan.h"
 
 #include "egl_dri2.h"
 #include "egl_dri2_fallbacks.h"
@@ -846,16 +847,23 @@ dri2_x11_add_configs_for_visuals(struct dri2_egl_display *dri2_dpy,
                     EGL_NONE
             };
 
-            unsigned int rgba_masks[4] = {
-               visuals[i].red_mask,
-               visuals[i].green_mask,
-               visuals[i].blue_mask,
+            int rgba_shifts[4] = {
+               ffs(visuals[i].red_mask) - 1,
+               ffs(visuals[i].green_mask) - 1,
+               ffs(visuals[i].blue_mask) - 1,
+               -1,
+            };
+
+            unsigned int rgba_sizes[4] = {
+               util_bitcount(visuals[i].red_mask),
+               util_bitcount(visuals[i].green_mask),
+               util_bitcount(visuals[i].blue_mask),
                0,
             };
 
             dri2_conf = dri2_add_config(disp, config, config_count + 1,
                                         surface_type, config_attrs,
-                                        rgba_masks);
+                                        rgba_shifts, rgba_sizes);
             if (dri2_conf)
                if (dri2_conf->base.ConfigID == config_count + 1)
                   config_count++;
@@ -869,11 +877,14 @@ dri2_x11_add_configs_for_visuals(struct dri2_egl_display *dri2_dpy,
              * wants... especially on drivers that only have 32-bit RGBA
              * EGLConfigs! */
             if (d.data->depth == 24 || d.data->depth == 30) {
-               rgba_masks[3] =
-                  ~(rgba_masks[0] | rgba_masks[1] | rgba_masks[2]);
+               unsigned int rgba_mask = ~(visuals[i].red_mask |
+                                          visuals[i].green_mask |
+                                          visuals[i].blue_mask);
+               rgba_shifts[3] = ffs(rgba_mask) - 1;
+               rgba_sizes[3] = util_bitcount(rgba_mask);
                dri2_conf = dri2_add_config(disp, config, config_count + 1,
                                            surface_type, config_attrs,
-                                           rgba_masks);
+                                           rgba_shifts, rgba_sizes);
                if (dri2_conf)
                   if (dri2_conf->base.ConfigID == config_count + 1)
                      config_count++;
@@ -896,13 +907,9 @@ dri2_x11_add_configs_for_visuals(struct dri2_egl_display *dri2_dpy,
             EGL_NONE
          };
          EGLint surface_type = EGL_PBUFFER_BIT;
-         unsigned int rgba_masks[4] = {
-            0x1f << 11,
-            0x3f << 5,
-            0x1f << 0,
-            0,
-         };
-
+         int rgba_shifts[4] = { 11, 5, 0, -1 };
+         unsigned int rgba_sizes[4] = { 5, 6, 5, 0 };
+ 
          /* Check that we've found single-sample, no depth, no stencil,
           * and single-buffered.
           */
@@ -918,7 +925,7 @@ dri2_x11_add_configs_for_visuals(struct dri2_egl_display *dri2_dpy,
          }
 
          if (dri2_add_config(disp, config, config_count + 1, surface_type,
-                             config_attrs, rgba_masks)) {
+                             config_attrs, rgba_shifts, rgba_sizes)) {
             config_count++;
             break;
          }
@@ -1263,7 +1270,6 @@ static const struct dri2_egl_display_vtbl dri2_x11_swrast_display_vtbl = {
    .destroy_surface = dri2_x11_destroy_surface,
    .create_image = dri2_create_image_khr,
    .swap_buffers = dri2_x11_swap_buffers,
-   .set_damage_region = dri2_fallback_set_damage_region,
    .swap_buffers_region = dri2_fallback_swap_buffers_region,
    .post_sub_buffer = dri2_fallback_post_sub_buffer,
    /* XXX: should really implement this since X11 has pixmaps */
@@ -1286,7 +1292,6 @@ static const struct dri2_egl_display_vtbl dri2_x11_display_vtbl = {
    .swap_buffers = dri2_x11_swap_buffers,
    .swap_buffers_with_damage = dri2_fallback_swap_buffers_with_damage,
    .swap_buffers_region = dri2_x11_swap_buffers_region,
-   .set_damage_region = dri2_fallback_set_damage_region,
    .post_sub_buffer = dri2_x11_post_sub_buffer,
    .copy_buffers = dri2_x11_copy_buffers,
    .query_buffer_age = dri2_fallback_query_buffer_age,

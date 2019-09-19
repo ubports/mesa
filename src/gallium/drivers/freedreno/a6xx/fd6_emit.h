@@ -49,9 +49,9 @@ enum fd6_state_id {
 	FD6_GROUP_LRZ,
 	FD6_GROUP_LRZ_BINNING,
 	FD6_GROUP_VBO,
-	FD6_GROUP_VBO_BINNING,
 	FD6_GROUP_VS_CONST,
 	FD6_GROUP_FS_CONST,
+	FD6_GROUP_VS_DRIVER_PARAMS,
 	FD6_GROUP_VS_TEX,
 	FD6_GROUP_FS_TEX,
 	FD6_GROUP_IBO,
@@ -113,14 +113,21 @@ fd6_emit_get_prog(struct fd6_emit *emit)
 }
 
 static inline void
-fd6_emit_add_group(struct fd6_emit *emit, struct fd_ringbuffer *stateobj,
+fd6_emit_take_group(struct fd6_emit *emit, struct fd_ringbuffer *stateobj,
 		enum fd6_state_id group_id, unsigned enable_mask)
 {
 	debug_assert(emit->num_groups < ARRAY_SIZE(emit->groups));
 	struct fd6_state_group *g = &emit->groups[emit->num_groups++];
-	g->stateobj = fd_ringbuffer_ref(stateobj);
+	g->stateobj = stateobj;
 	g->group_id = group_id;
 	g->enable_mask = enable_mask;
+}
+
+static inline void
+fd6_emit_add_group(struct fd6_emit *emit, struct fd_ringbuffer *stateobj,
+		enum fd6_state_id group_id, unsigned enable_mask)
+{
+	fd6_emit_take_group(emit, fd_ringbuffer_ref(stateobj), group_id, enable_mask);
 }
 
 static inline unsigned
@@ -234,6 +241,7 @@ void fd6_emit_cs_state(struct fd_context *ctx, struct fd_ringbuffer *ring,
 
 void fd6_emit_restore(struct fd_batch *batch, struct fd_ringbuffer *ring);
 
+void fd6_emit_init_screen(struct pipe_screen *pscreen);
 void fd6_emit_init(struct pipe_context *pctx);
 
 static inline void

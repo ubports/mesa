@@ -34,6 +34,9 @@ The integer capabilities:
   bound.
 * ``PIPE_CAP_OCCLUSION_QUERY``: Whether occlusion queries are available.
 * ``PIPE_CAP_QUERY_TIME_ELAPSED``: Whether PIPE_QUERY_TIME_ELAPSED queries are available.
+* ``PIPE_CAP_TEXTURE_SHADOW_MAP``: indicates whether the fragment shader hardware
+  can do the depth texture / Z comparison operation in TEX instructions
+  for shadow testing.
 * ``PIPE_CAP_TEXTURE_SWIZZLE``: Whether swizzling through sampler views is
   supported.
 * ``PIPE_CAP_MAX_TEXTURE_2D_SIZE``: The maximum size of 2D (and 1D) textures.
@@ -528,8 +531,8 @@ The integer capabilities:
   execution. 0 = throttling is disabled.
 * ``PIPE_CAP_DMABUF``: Whether Linux DMABUF handles are supported by
   resource_from_handle and resource_get_handle.
-* ``PIPE_CAP_PREFER_COMPUTE_BLIT_FOR_MULTIMEDIA``: Whether VDPAU, VAAPI, and
-  OpenMAX should use a compute-based blit instead of pipe_context::blit.
+* ``PIPE_CAP_PREFER_COMPUTE_FOR_MULTIMEDIA``: Whether VDPAU, VAAPI, and
+  OpenMAX should use a compute-based blit instead of pipe_context::blit and compute pipeline for compositing images.
 * ``PIPE_CAP_FRAGMENT_SHADER_INTERLOCK``: True if fragment shader interlock
   functionality is supported.
 * ``PIPE_CAP_CS_DERIVED_SYSTEM_VALUES_SUPPORTED``: True if driver handles
@@ -547,6 +550,13 @@ The integer capabilities:
 * ``PIPE_CAP_TEXTURE_SHADOW_LOD``: True if the driver supports shadow sampler
   types with texture functions having interaction with LOD of texture lookup.
 * ``PIPE_CAP_SHADER_SAMPLES_IDENTICAL``: True if the driver supports a shader query to tell whether all samples of a multisampled surface are definitely identical.
+* ``PIPE_CAP_TGSI_ATOMINC_WRAP``: Atomic increment/decrement + wrap around are supported.
+* ``PIPE_CAP_PREFER_IMM_ARRAYS_AS_CONSTBUF``: True if the state tracker should
+  turn arrays whose contents can be deduced at compile time into constant
+  buffer loads, or false if the driver can handle such arrays itself in a more
+  efficient manner.
+* ``PIPE_CAP_GL_SPIRV``: True if the driver supports ARB_gl_spirv extension.
+* ``PIPE_CAP_GL_SPIRV_VARIABLE_POINTERS``: True if the driver supports Variable Pointers in SPIR-V shaders.
 
 .. _pipe_capf:
 

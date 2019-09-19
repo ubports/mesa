@@ -36,6 +36,7 @@
 #define LIMA_DEBUG_GP      (1 << 0)
 #define LIMA_DEBUG_PP      (1 << 1)
 #define LIMA_DEBUG_DUMP    (1 << 2)
+#define LIMA_DEBUG_SHADERDB (1 << 3)
 
 extern uint32_t lima_debug;
 extern FILE *lima_dump_command_stream;
@@ -72,10 +73,7 @@ struct lima_screen {
    #define pp_reload_program_offset  0x0080
    #define pp_shared_index_offset    0x00c0
    #define pp_clear_gl_pos_offset    0x0100
-   #define pp_stack_offset           0x1000
-   #define pp_stack_pp_size           0x400 /* per pp, up to 8 pp */
-   #define pp_stack_offset_end       0x3000
-   #define pp_buffer_size            0x3000
+   #define pp_buffer_size            0x1000
 
 };
 

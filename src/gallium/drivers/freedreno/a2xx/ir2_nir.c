@@ -42,6 +42,7 @@ static const nir_shader_compiler_options options = {
 	.lower_bitops = true,
 	.lower_rotate = true,
 	.lower_vector_cmp = true,
+	.lower_fdph = true,
 };
 
 const nir_shader_compiler_options *
@@ -122,7 +123,7 @@ ir2_optimize_nir(nir_shader *s, bool lower)
 	ir2_optimize_loop(s);
 
 	OPT_V(s, nir_remove_dead_variables, nir_var_function_temp);
-	OPT_V(s, nir_move_load_const);
+	OPT_V(s, nir_opt_sink, nir_move_const_undef);
 
 	/* TODO we dont want to get shaders writing to depth for depth textures */
 	if (s->info.stage == MESA_SHADER_FRAGMENT) {
@@ -504,12 +505,10 @@ load_input(struct ir2_context *ctx, nir_dest *dst, unsigned idx)
 
 	switch (slot) {
 	case VARYING_SLOT_PNTC:
-		/* need to extract with abs and invert y */
-		instr = instr_create_alu_dest(ctx, nir_op_ffma, dst);
+		/* need to extract with abs */
+		instr = instr_create_alu_dest(ctx, nir_op_mov, dst);
 		instr->src[0] = ir2_src(ctx->f->inputs_count, IR2_SWIZZLE_ZW, IR2_SRC_INPUT);
 		instr->src[0].abs = true;
-		instr->src[1] = load_const(ctx, (float[]) {1.0f, -1.0f}, 2);
-		instr->src[2] = load_const(ctx, (float[]) {0.0f, 1.0f}, 2);
 		break;
 	case VARYING_SLOT_POS:
 		/* need to extract xy with abs and add tile offset on a20x
@@ -1062,6 +1061,29 @@ static void cleanup_binning(struct ir2_context *ctx)
 	ir2_optimize_nir(ctx->nir, false);
 }
 
+static bool
+ir2_alu_to_scalar_filter_cb(const nir_instr *instr, const void *data)
+{
+	if (instr->type != nir_instr_type_alu)
+		return false;
+
+	nir_alu_instr *alu = nir_instr_as_alu(instr);
+	switch (alu->op) {
+	case nir_op_frsq:
+	case nir_op_frcp:
+	case nir_op_flog2:
+	case nir_op_fexp2:
+	case nir_op_fsqrt:
+	case nir_op_fcos:
+	case nir_op_fsin:
+		return true;
+	default:
+		break;
+	}
+
+	return false;
+}
+
 void
 ir2_nir_compile(struct ir2_context *ctx, bool binning)
 {
@@ -1074,28 +1096,17 @@ ir2_nir_compile(struct ir2_context *ctx, bool binning)
 	if (binning)
 		cleanup_binning(ctx);
 
-	/* postprocess */
-	OPT_V(ctx->nir, nir_opt_algebraic_late);
-
 	OPT_V(ctx->nir, nir_copy_prop);
 	OPT_V(ctx->nir, nir_opt_dce);
-	OPT_V(ctx->nir, nir_opt_move_comparisons);
+	OPT_V(ctx->nir, nir_opt_move, nir_move_comparisons);
 
 	OPT_V(ctx->nir, nir_lower_int_to_float);
 	OPT_V(ctx->nir, nir_lower_bool_to_float);
+	while(OPT(ctx->nir, nir_opt_algebraic));
+	OPT_V(ctx->nir, nir_opt_algebraic_late);
 	OPT_V(ctx->nir, nir_lower_to_source_mods, nir_lower_all_source_mods);
 
-	/* TODO: static bitset ? */
-	BITSET_DECLARE(scalar_ops, nir_num_opcodes);
-	BITSET_ZERO(scalar_ops);
-	BITSET_SET(scalar_ops, nir_op_frsq);
-	BITSET_SET(scalar_ops, nir_op_frcp);
-	BITSET_SET(scalar_ops, nir_op_flog2);
-	BITSET_SET(scalar_ops, nir_op_fexp2);
-	BITSET_SET(scalar_ops, nir_op_fsqrt);
-	BITSET_SET(scalar_ops, nir_op_fcos);
-	BITSET_SET(scalar_ops, nir_op_fsin);
-	OPT_V(ctx->nir, nir_lower_alu_to_scalar, scalar_ops);
+	OPT_V(ctx->nir, nir_lower_alu_to_scalar, ir2_alu_to_scalar_filter_cb, NULL);
 
 	OPT_V(ctx->nir, nir_lower_locals_to_regs);
 

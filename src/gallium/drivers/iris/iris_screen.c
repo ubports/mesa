@@ -53,6 +53,7 @@
 #include "iris_screen.h"
 #include "intel/compiler/brw_compiler.h"
 #include "intel/common/gen_gem.h"
+#include "iris_monitor.h"
 
 static void
 iris_flush_frontbuffer(struct pipe_screen *_screen,
@@ -199,10 +200,11 @@ iris_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_CS_DERIVED_SYSTEM_VALUES_SUPPORTED:
    case PIPE_CAP_TEXTURE_SHADOW_LOD:
    case PIPE_CAP_SHADER_SAMPLES_IDENTICAL:
+   case PIPE_CAP_GL_SPIRV:
+   case PIPE_CAP_GL_SPIRV_VARIABLE_POINTERS:
       return true;
    case PIPE_CAP_FBFETCH:
-      /* TODO: Support non-coherent FB fetch on Broadwell */
-      return devinfo->gen >= 9 ? BRW_MAX_DRAW_BUFFERS : 0;
+      return BRW_MAX_DRAW_BUFFERS;
    case PIPE_CAP_FBFETCH_COHERENT:
    case PIPE_CAP_CONSERVATIVE_RASTER_INNER_COVERAGE:
    case PIPE_CAP_POST_DEPTH_COVERAGE:
@@ -308,6 +310,8 @@ iris_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
        * illegal snoop <-> snoop transfers.
        */
       return devinfo->has_llc;
+   case PIPE_CAP_MAX_FRAMES_IN_FLIGHT:
+      return screen->driconf.disable_throttling ? 0 : 1;
 
    case PIPE_CAP_CONTEXT_PRIORITY_MASK:
       return PIPE_CONTEXT_PRIORITY_LOW |
@@ -521,6 +525,7 @@ iris_destroy_screen(struct pipe_screen *pscreen)
    u_transfer_helper_destroy(pscreen->transfer_helper);
    iris_bufmgr_destroy(screen->bufmgr);
    disk_cache_destroy(screen->disk_cache);
+   close(screen->fd);
    ralloc_free(screen);
 }
 
@@ -630,7 +635,17 @@ iris_screen_create(int fd, const struct pipe_screen_config *config)
    if (getenv("INTEL_NO_HW") != NULL)
       screen->no_hw = true;
 
-   screen->bufmgr = iris_bufmgr_init(&screen->devinfo, fd);
+   bool bo_reuse = false;
+   int bo_reuse_mode = driQueryOptioni(config->options, "bo_reuse");
+   switch (bo_reuse_mode) {
+   case DRI_CONF_BO_REUSE_DISABLED:
+      break;
+   case DRI_CONF_BO_REUSE_ALL:
+      bo_reuse = true;
+      break;
+   }
+
+   screen->bufmgr = iris_bufmgr_init(&screen->devinfo, fd, bo_reuse);
    if (!screen->bufmgr)
       return NULL;
 
@@ -643,6 +658,10 @@ iris_screen_create(int fd, const struct pipe_screen_config *config)
 
    screen->driconf.dual_color_blend_by_location =
       driQueryOptionb(config->options, "dual_color_blend_by_location");
+   screen->driconf.disable_throttling =
+      driQueryOptionb(config->options, "disable_throttling");
+   screen->driconf.always_flush_cache =
+      driQueryOptionb(config->options, "always_flush_cache");
 
    screen->precompile = env_var_as_boolean("shader_precompile", true);
 
@@ -683,6 +702,8 @@ iris_screen_create(int fd, const struct pipe_screen_config *config)
    pscreen->flush_frontbuffer = iris_flush_frontbuffer;
    pscreen->get_timestamp = iris_get_timestamp;
    pscreen->query_memory_info = iris_query_memory_info;
+   pscreen->get_driver_query_group_info = iris_get_monitor_group_info;
+   pscreen->get_driver_query_info = iris_get_monitor_info;
 
    return pscreen;
 }

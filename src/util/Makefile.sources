@@ -1,4 +1,6 @@
 MESA_UTIL_FILES := \
+	anon_file.h \
+	anon_file.c \
 	bigmath.h \
 	bitscan.c \
 	bitscan.h \
@@ -13,6 +15,8 @@ MESA_UTIL_FILES := \
 	debug.h \
 	disk_cache.c \
 	disk_cache.h \
+	double.c \
+	double.h \
 	fast_idiv_by_const.c \
 	fast_idiv_by_const.h \
 	format_r11g11b10f.h \
@@ -54,6 +58,8 @@ MESA_UTIL_FILES := \
 	simple_mtx.h \
 	slab.c \
 	slab.h \
+	softfloat.c \
+	softfloat.h \
 	string_buffer.c \
 	string_buffer.h \
 	strndup.h \

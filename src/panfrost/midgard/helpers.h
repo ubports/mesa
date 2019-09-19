@@ -47,8 +47,7 @@
         )
 
 #define OP_IS_STORE(op) (\
-                OP_IS_STORE_R26(op) || \
-                op == midgard_op_st_cubemap_coords \
+                OP_IS_STORE_R26(op) \
 	)
 
 #define OP_IS_PROJECTION(op) ( \
@@ -58,7 +57,7 @@
 
 #define OP_IS_VEC4_ONLY(op) ( \
                 OP_IS_PROJECTION(op) || \
-                op == midgard_op_st_cubemap_coords \
+                op == midgard_op_ld_cubemap_coords \
         )
 
 #define OP_IS_MOVE(op) ( \
@@ -67,15 +66,21 @@
         )
 
 #define OP_IS_UBO_READ(op) ( \
-                op == midgard_op_ld_uniform_32  || \
-                op == midgard_op_ld_uniform_16  || \
-                op == midgard_op_ld_uniform_32i \
+                op == midgard_op_ld_ubo_char  || \
+                op == midgard_op_ld_ubo_char2  || \
+                op == midgard_op_ld_ubo_char4  || \
+                op == midgard_op_ld_ubo_short4  || \
+                op == midgard_op_ld_ubo_int4 \
+        )
+
+#define OP_IS_CSEL_V(op) ( \
+                op == midgard_alu_op_icsel_v || \
+                op == midgard_alu_op_fcsel_v \
         )
 
 #define OP_IS_CSEL(op) ( \
+                OP_IS_CSEL_V(op) || \
                 op == midgard_alu_op_icsel || \
-                op == midgard_alu_op_icsel_v || \
-                op == midgard_alu_op_fcsel_v || \
                 op == midgard_alu_op_fcsel \
         )
 
@@ -174,12 +179,9 @@ quadword_size(int tag)
 #define REGISTER_TEXTURE_BASE 28
 #define REGISTER_SELECT 31
 
-/* SSA helper aliases to mimic the registers. UNUSED_0 encoded as an inline
- * constant. UNUSED_1 encoded as REGISTER_UNUSED */
+/* SSA helper aliases to mimic the registers. */
 
-#define SSA_UNUSED_0 0
-#define SSA_UNUSED_1 -2
-
+#define SSA_UNUSED ~0
 #define SSA_FIXED_SHIFT 24
 #define SSA_FIXED_REGISTER(reg) (((1 + (reg)) << SSA_FIXED_SHIFT) | 1)
 #define SSA_REG_FROM_FIXED(reg) ((((reg) & ~1) >> SSA_FIXED_SHIFT) - 1)

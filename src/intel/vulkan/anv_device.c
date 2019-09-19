@@ -40,12 +40,21 @@
 #include "util/os_file.h"
 #include "util/u_atomic.h"
 #include "util/u_string.h"
+#include "util/xmlpool.h"
 #include "git_sha1.h"
 #include "vk_util.h"
 #include "common/gen_defines.h"
 #include "compiler/glsl_types.h"
 
 #include "genxml/gen7_pack.h"
+
+static const char anv_dri_options_xml[] =
+DRI_CONF_BEGIN
+   DRI_CONF_SECTION_PERFORMANCE
+      DRI_CONF_VK_X11_OVERRIDE_MIN_IMAGE_COUNT(0)
+      DRI_CONF_VK_X11_STRICT_IMAGE_COUNT("false")
+   DRI_CONF_SECTION_END
+DRI_CONF_END;
 
 /* This is probably far to big but it reflects the max size used for messages
  * in OpenGLs KHR_debug.
@@ -415,6 +424,8 @@ anv_physical_device_init(struct anv_physical_device *device,
       intel_logw("Bay Trail Vulkan support is incomplete");
    } else if (device->info.gen >= 8 && device->info.gen <= 11) {
       /* Gen8-11 fully supported */
+   } else if (device->info.gen == 12) {
+      intel_logw("Vulkan is not yet fully supported on gen12");
    } else {
       result = vk_errorf(device->instance, device,
                          VK_ERROR_INCOMPATIBLE_DRIVER,
@@ -768,6 +779,12 @@ VkResult anv_CreateInstance(
 
    VG(VALGRIND_CREATE_MEMPOOL(instance, 0, false));
 
+   driParseOptionInfo(&instance->available_dri_options, anv_dri_options_xml);
+   driParseConfigFiles(&instance->dri_options, &instance->available_dri_options,
+                       0, "anv", NULL,
+                       instance->app_info.engine_name,
+                       instance->app_info.engine_version);
+
    *pInstance = anv_instance_to_handle(instance);
 
    return VK_SUCCESS;
@@ -797,6 +814,9 @@ void anv_DestroyInstance(
 
    glsl_type_singleton_decref();
    _mesa_locale_fini();
+
+   driDestroyOptionCache(&instance->dri_options);
+   driDestroyOptionInfo(&instance->available_dri_options);
 
    vk_free(&instance->alloc, instance);
 }
@@ -1098,6 +1118,18 @@ void anv_GetPhysicalDeviceFeatures2(
          break;
       }
 
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LINE_RASTERIZATION_FEATURES_EXT: {
+         VkPhysicalDeviceLineRasterizationFeaturesEXT *features =
+            (VkPhysicalDeviceLineRasterizationFeaturesEXT *)ext;
+         features->rectangularLines = true;
+         features->bresenhamLines = true;
+         features->smoothLines = true;
+         features->stippledRectangularLines = false;
+         features->stippledBresenhamLines = true;
+         features->stippledSmoothLines = false;
+         break;
+      }
+
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES: {
          VkPhysicalDeviceMultiviewFeatures *features =
             (VkPhysicalDeviceMultiviewFeatures *)ext;
@@ -1111,6 +1143,13 @@ void anv_GetPhysicalDeviceFeatures2(
          VkPhysicalDeviceImagelessFramebufferFeaturesKHR *features =
             (VkPhysicalDeviceImagelessFramebufferFeaturesKHR *)ext;
          features->imagelessFramebuffer = true;
+         break;
+      }
+
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR: {
+         VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR *features =
+            (VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR *)ext;
+         features->pipelineExecutableInfo = true;
          break;
       }
 
@@ -1151,6 +1190,14 @@ void anv_GetPhysicalDeviceFeatures2(
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES: {
          VkPhysicalDeviceShaderDrawParametersFeatures *features = (void *)ext;
          features->shaderDrawParameters = true;
+         break;
+      }
+
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT: {
+         VkPhysicalDeviceSubgroupSizeControlFeaturesEXT *features =
+            (VkPhysicalDeviceSubgroupSizeControlFeaturesEXT *)ext;
+         features->subgroupSizeControl = true;
+         features->computeFullSubgroups = true;
          break;
       }
 
@@ -1230,10 +1277,14 @@ void anv_GetPhysicalDeviceProperties(
    const uint32_t max_images =
       pdevice->has_bindless_images ? UINT16_MAX : MAX_IMAGES;
 
-   /* The moment we have anything bindless, claim a high per-stage limit */
+   /* If we can use bindless for everything, claim a high per-stage limit,
+    * otherwise use the binding table size, minus the slots reserved for
+    * render targets and one slot for the descriptor buffer. */
    const uint32_t max_per_stage =
-      pdevice->has_a64_buffer_access ? UINT32_MAX :
-                                       MAX_BINDING_TABLE_SIZE - MAX_RTS;
+      pdevice->has_bindless_images && pdevice->has_a64_buffer_access
+      ? UINT32_MAX : MAX_BINDING_TABLE_SIZE - MAX_RTS - 1;
+
+   const uint32_t max_workgroup_size = 32 * devinfo->max_cs_threads;
 
    VkSampleCountFlags sample_counts =
       isl_device_get_sample_counts(&pdevice->isl_dev);
@@ -1293,11 +1344,11 @@ void anv_GetPhysicalDeviceProperties(
       .maxFragmentCombinedOutputResources       = 8,
       .maxComputeSharedMemorySize               = 64 * 1024,
       .maxComputeWorkGroupCount                 = { 65535, 65535, 65535 },
-      .maxComputeWorkGroupInvocations           = 32 * devinfo->max_cs_threads,
+      .maxComputeWorkGroupInvocations           = max_workgroup_size,
       .maxComputeWorkGroupSize = {
-         16 * devinfo->max_cs_threads,
-         16 * devinfo->max_cs_threads,
-         16 * devinfo->max_cs_threads,
+         max_workgroup_size,
+         max_workgroup_size,
+         max_workgroup_size,
       },
       .subPixelPrecisionBits                    = 8,
       .subTexelPrecisionBits                    = 8,
@@ -1346,10 +1397,14 @@ void anv_GetPhysicalDeviceProperties(
       .maxCombinedClipAndCullDistances          = 8,
       .discreteQueuePriorities                  = 2,
       .pointSizeRange                           = { 0.125, 255.875 },
-      .lineWidthRange                           = { 0.0, 7.9921875 },
+      .lineWidthRange                           = {
+         0.0,
+         (devinfo->gen >= 9 || devinfo->is_cherryview) ?
+            2047.9921875 : 7.9921875,
+      },
       .pointSizeGranularity                     = (1.0 / 8.0),
       .lineWidthGranularity                     = (1.0 / 128.0),
-      .strictLines                              = false, /* FINISHME */
+      .strictLines                              = false,
       .standardSampleLocations                  = true,
       .optimalBufferCopyOffsetAlignment         = 128,
       .optimalBufferCopyRowPitchAlignment       = 128,
@@ -1506,6 +1561,25 @@ void anv_GetPhysicalDeviceProperties2(
          break;
       }
 
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LINE_RASTERIZATION_PROPERTIES_EXT: {
+         VkPhysicalDeviceLineRasterizationPropertiesEXT *props =
+            (VkPhysicalDeviceLineRasterizationPropertiesEXT *)ext;
+         /* In the Skylake PRM Vol. 7, subsection titled "GIQ (Diamond)
+          * Sampling Rules - Legacy Mode", it says the following:
+          *
+          *    "Note that the device divides a pixel into a 16x16 array of
+          *    subpixels, referenced by their upper left corners."
+          *
+          * This is the only known reference in the PRMs to the subpixel
+          * precision of line rasterization and a "16x16 array of subpixels"
+          * implies 4 subpixel precision bits.  Empirical testing has shown
+          * that 4 subpixel precision bits applies to all line rasterization
+          * types.
+          */
+         props->lineSubPixelPrecisionBits = 4;
+         break;
+      }
+
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES: {
          VkPhysicalDeviceMaintenance3Properties *props =
             (VkPhysicalDeviceMaintenance3Properties *)ext;
@@ -1541,6 +1615,16 @@ void anv_GetPhysicalDeviceProperties2(
          properties->pointClippingBehavior = VK_POINT_CLIPPING_BEHAVIOR_USER_CLIP_PLANES_ONLY;
          break;
       }
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wswitch"
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENTATION_PROPERTIES_ANDROID: {
+         VkPhysicalDevicePresentationPropertiesANDROID *props =
+            (VkPhysicalDevicePresentationPropertiesANDROID *)ext;
+         props->sharedImage = VK_FALSE;
+         break;
+      }
+#pragma GCC diagnostic pop
 
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_PROPERTIES: {
          VkPhysicalDeviceProtectedMemoryProperties *props =
@@ -1604,6 +1688,37 @@ void anv_GetPhysicalDeviceProperties2(
          props->maxSubgroupSize = 32;
          props->maxComputeWorkgroupSubgroups = pdevice->info.max_cs_threads;
          props->requiredSubgroupSizeStages = VK_SHADER_STAGE_COMPUTE_BIT;
+         break;
+      }
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT_CONTROLS_PROPERTIES_KHR : {
+         VkPhysicalDeviceFloatControlsPropertiesKHR *properties = (void *)ext;
+         properties->denormBehaviorIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_ALL_KHR;
+         properties->roundingModeIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE_KHR;
+
+         /* Broadwell does not support HF denorms and there are restrictions
+          * other gens. According to Kabylake's PRM:
+          *
+          * "math - Extended Math Function
+          * [...]
+          * Restriction : Half-float denorms are always retained."
+          */
+         properties->shaderDenormFlushToZeroFloat16 = false;
+         properties->shaderDenormPreserveFloat16 = pdevice->info.gen > 8;
+         properties->shaderRoundingModeRTEFloat16 = true;
+         properties->shaderRoundingModeRTZFloat16 = true;
+         properties->shaderSignedZeroInfNanPreserveFloat16 = true;
+
+         properties->shaderDenormFlushToZeroFloat32 = true;
+         properties->shaderDenormPreserveFloat32 = true;
+         properties->shaderRoundingModeRTEFloat32 = true;
+         properties->shaderRoundingModeRTZFloat32 = true;
+         properties->shaderSignedZeroInfNanPreserveFloat32 = true;
+
+         properties->shaderDenormFlushToZeroFloat64 = true;
+         properties->shaderDenormPreserveFloat64 = true;
+         properties->shaderRoundingModeRTEFloat64 = true;
+         properties->shaderRoundingModeRTZFloat64 = true;
+         properties->shaderSignedZeroInfNanPreserveFloat64 = true;
          break;
       }
 
@@ -2065,6 +2180,9 @@ anv_device_init_dispatch(struct anv_device *device)
 {
    const struct anv_device_dispatch_table *genX_table;
    switch (device->info.gen) {
+   case 12:
+      genX_table = &gen12_device_dispatch_table;
+      break;
    case 11:
       genX_table = &gen11_device_dispatch_table;
       break;
@@ -2464,6 +2582,9 @@ VkResult anv_CreateDevice(
    case 11:
       result = gen11_init_device_state(device);
       break;
+   case 12:
+      result = gen12_init_device_state(device);
+      break;
    default:
       /* Shouldn't get here as we don't create physical devices for any other
        * gens. */
@@ -2536,6 +2657,7 @@ void anv_DestroyDevice(
     * BO will go away in a couple of lines so we don't actually leak.
     */
    anv_state_pool_free(&device->dynamic_state_pool, device->border_colors);
+   anv_state_pool_free(&device->dynamic_state_pool, device->slice_hash);
 #endif
 
    anv_scratch_pool_finish(device, &device->scratch_pool);

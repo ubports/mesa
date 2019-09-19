@@ -674,7 +674,14 @@ static bool
 shader_image_load_store(const _mesa_glsl_parse_state *state)
 {
    return (state->is_version(420, 310) ||
-           state->ARB_shader_image_load_store_enable);
+           state->ARB_shader_image_load_store_enable ||
+           state->EXT_shader_image_load_store_enable);
+}
+
+static bool
+shader_image_load_store_ext(const _mesa_glsl_parse_state *state)
+{
+   return state->EXT_shader_image_load_store_enable;
 }
 
 static bool
@@ -682,6 +689,7 @@ shader_image_atomic(const _mesa_glsl_parse_state *state)
 {
    return (state->is_version(420, 320) ||
            state->ARB_shader_image_load_store_enable ||
+           state->EXT_shader_image_load_store_enable ||
            state->OES_shader_image_atomic_enable);
 }
 
@@ -1194,6 +1202,7 @@ enum image_function_flags {
    IMAGE_FUNCTION_MS_ONLY = (1 << 7),
    IMAGE_FUNCTION_AVAIL_ATOMIC_EXCHANGE = (1 << 8),
    IMAGE_FUNCTION_AVAIL_ATOMIC_ADD = (1 << 9),
+   IMAGE_FUNCTION_EXT_ONLY = (1 << 10),
 };
 
 } /* anonymous namespace */
@@ -1245,6 +1254,8 @@ builtin_builder::initialize()
    if (mem_ctx != NULL)
       return;
 
+   glsl_type_singleton_init_or_ref();
+
    mem_ctx = ralloc_context(NULL);
    create_shader();
    create_intrinsics();
@@ -1259,6 +1270,8 @@ builtin_builder::release()
 
    ralloc_free(shader);
    shader = NULL;
+
+   glsl_type_singleton_decref();
 }
 
 void
@@ -4414,6 +4427,18 @@ builtin_builder::add_image_functions(bool glsl)
                       flags | IMAGE_FUNCTION_SUPPORTS_FLOAT_DATA_TYPE |
                       IMAGE_FUNCTION_MS_ONLY,
                       ir_intrinsic_image_samples);
+
+   /* EXT_shader_image_load_store */
+   add_image_function(glsl ? "imageAtomicIncWrap" : "__intrinsic_image_atomic_inc_wrap",
+                      "__intrinsic_image_atomic_inc_wrap",
+                      &builtin_builder::_image_prototype, 1,
+                      (atom_flags | IMAGE_FUNCTION_EXT_ONLY),
+                      ir_intrinsic_image_atomic_inc_wrap);
+   add_image_function(glsl ? "imageAtomicDecWrap" : "__intrinsic_image_atomic_dec_wrap",
+                      "__intrinsic_image_atomic_dec_wrap",
+                      &builtin_builder::_image_prototype, 1,
+                      (atom_flags | IMAGE_FUNCTION_EXT_ONLY),
+                      ir_intrinsic_image_atomic_dec_wrap);
 }
 
 ir_variable *
@@ -6936,6 +6961,9 @@ get_image_available_predicate(const glsl_type *type, unsigned flags)
                      IMAGE_FUNCTION_AVAIL_ATOMIC))
       return shader_image_atomic;
 
+   else if (flags & IMAGE_FUNCTION_EXT_ONLY)
+      return shader_image_load_store_ext;
+
    else
       return shader_image_load_store;
 }
@@ -7253,24 +7281,28 @@ builtin_builder::_vote(const char *intrinsic_name,
 /* The singleton instance of builtin_builder. */
 static builtin_builder builtins;
 static mtx_t builtins_lock = _MTX_INITIALIZER_NP;
+static uint32_t builtin_users = 0;
 
 /**
  * External API (exposing the built-in module to the rest of the compiler):
  *  @{
  */
-void
-_mesa_glsl_initialize_builtin_functions()
+extern "C" void
+_mesa_glsl_builtin_functions_init_or_ref()
 {
    mtx_lock(&builtins_lock);
-   builtins.initialize();
+   if (builtin_users++ == 0)
+      builtins.initialize();
    mtx_unlock(&builtins_lock);
 }
 
-void
-_mesa_glsl_release_builtin_functions()
+extern "C" void
+_mesa_glsl_builtin_functions_decref()
 {
    mtx_lock(&builtins_lock);
-   builtins.release();
+   assert(builtin_users != 0);
+   if (--builtin_users == 0)
+      builtins.release();
    mtx_unlock(&builtins_lock);
 }
 

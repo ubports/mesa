@@ -122,9 +122,9 @@ brw_codegen_wm_prog(struct brw_context *brw,
    char *error_str = NULL;
    program = brw_compile_fs(brw->screen->compiler, brw, mem_ctx,
                             key, &prog_data, nir,
-                            &fp->program, st_index8, st_index16, st_index32,
+                            st_index8, st_index16, st_index32,
                             true, false, vue_map,
-                            &error_str);
+                            NULL, &error_str);
 
    if (program == NULL) {
       if (!fp->program.is_arb_asm) {

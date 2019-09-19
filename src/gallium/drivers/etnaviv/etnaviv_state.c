@@ -42,6 +42,7 @@
 #include "util/u_inlines.h"
 #include "util/u_math.h"
 #include "util/u_memory.h"
+#include "util/u_upload_mgr.h"
 
 static void
 etna_set_stencil_ref(struct pipe_context *pctx, const struct pipe_stencil_ref *sr)
@@ -51,10 +52,12 @@ etna_set_stencil_ref(struct pipe_context *pctx, const struct pipe_stencil_ref *s
 
    ctx->stencil_ref_s = *sr;
 
-   cs->PE_STENCIL_CONFIG = VIVS_PE_STENCIL_CONFIG_REF_FRONT(sr->ref_value[0]);
-   /* rest of bits weaved in from depth_stencil_alpha */
-   cs->PE_STENCIL_CONFIG_EXT =
-      VIVS_PE_STENCIL_CONFIG_EXT_REF_BACK(sr->ref_value[0]);
+   for (unsigned i = 0; i < 2; i++) {
+      cs->PE_STENCIL_CONFIG[i] =
+         VIVS_PE_STENCIL_CONFIG_REF_FRONT(sr->ref_value[i]);
+      cs->PE_STENCIL_CONFIG_EXT[i] =
+         VIVS_PE_STENCIL_CONFIG_EXT_REF_BACK(sr->ref_value[!i]);
+   }
    ctx->dirty |= ETNA_DIRTY_STENCIL_REF;
 }
 
@@ -95,6 +98,11 @@ etna_set_constant_buffer(struct pipe_context *pctx,
 
    /* there is no support for ARB_uniform_buffer_object */
    assert(cb->buffer == NULL && cb->user_buffer != NULL);
+
+   if (!cb->buffer) {
+      struct pipe_constant_buffer *cb = &ctx->constant_buffer[shader];
+      u_upload_data(pctx->const_uploader, 0, cb->buffer_size, 16, cb->user_buffer, &cb->buffer_offset, &cb->buffer);
+   }
 
    ctx->dirty |= ETNA_DIRTY_CONSTBUF;
 }

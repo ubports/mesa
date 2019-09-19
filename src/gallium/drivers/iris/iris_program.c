@@ -152,8 +152,10 @@ iris_lower_storage_image_derefs(nir_shader *nir)
          case nir_intrinsic_image_deref_load:
          case nir_intrinsic_image_deref_store:
          case nir_intrinsic_image_deref_atomic_add:
-         case nir_intrinsic_image_deref_atomic_min:
-         case nir_intrinsic_image_deref_atomic_max:
+         case nir_intrinsic_image_deref_atomic_imin:
+         case nir_intrinsic_image_deref_atomic_umin:
+         case nir_intrinsic_image_deref_atomic_imax:
+         case nir_intrinsic_image_deref_atomic_umax:
          case nir_intrinsic_image_deref_atomic_and:
          case nir_intrinsic_image_deref_atomic_or:
          case nir_intrinsic_image_deref_atomic_xor:
@@ -496,6 +498,7 @@ iris_setup_uniforms(const struct brw_compiler *compiler,
 
 static const char *surface_group_names[] = {
    [IRIS_SURFACE_GROUP_RENDER_TARGET]      = "render target",
+   [IRIS_SURFACE_GROUP_RENDER_TARGET_READ] = "non-coherent render target read",
    [IRIS_SURFACE_GROUP_CS_WORK_GROUPS]     = "CS work groups",
    [IRIS_SURFACE_GROUP_TEXTURE]            = "texture",
    [IRIS_SURFACE_GROUP_UBO]                = "ubo",
@@ -642,7 +645,8 @@ skip_compacting_binding_tables(void)
  * Set up the binding table indices and apply to the shader.
  */
 static void
-iris_setup_binding_table(struct nir_shader *nir,
+iris_setup_binding_table(const struct gen_device_info *devinfo,
+                         struct nir_shader *nir,
                          struct iris_binding_table *bt,
                          unsigned num_render_targets,
                          unsigned num_system_values,
@@ -660,6 +664,15 @@ iris_setup_binding_table(struct nir_shader *nir,
       /* All render targets used. */
       bt->used_mask[IRIS_SURFACE_GROUP_RENDER_TARGET] =
          BITFIELD64_MASK(num_render_targets);
+
+      /* Setup render target read surface group inorder to support non-coherent
+       * framebuffer fetch on Gen8
+       */
+      if (devinfo->gen == 8 && info->outputs_read) {
+         bt->sizes[IRIS_SURFACE_GROUP_RENDER_TARGET_READ] = num_render_targets;
+         bt->used_mask[IRIS_SURFACE_GROUP_RENDER_TARGET_READ] =
+            BITFIELD64_MASK(num_render_targets);
+      }
    } else if (info->stage == MESA_SHADER_COMPUTE) {
       bt->sizes[IRIS_SURFACE_GROUP_CS_WORK_GROUPS] = 1;
    }
@@ -678,10 +691,7 @@ iris_setup_binding_table(struct nir_shader *nir,
     */
    bt->sizes[IRIS_SURFACE_GROUP_UBO] = num_cbufs + 1;
 
-   /* The first IRIS_MAX_ABOs indices in the SSBO group are for atomics, real
-    * SSBOs start after that.  Compaction will remove unused ABOs.
-    */
-   bt->sizes[IRIS_SURFACE_GROUP_SSBO] = IRIS_MAX_ABOS + info->num_ssbos;
+   bt->sizes[IRIS_SURFACE_GROUP_SSBO] = info->num_ssbos;
 
    for (int i = 0; i < IRIS_SURFACE_GROUP_COUNT; i++)
       assert(bt->sizes[i] <= SURFACE_GROUP_MAX_ELEMENTS);
@@ -701,12 +711,21 @@ iris_setup_binding_table(struct nir_shader *nir,
             bt->used_mask[IRIS_SURFACE_GROUP_CS_WORK_GROUPS] = 1;
             break;
 
+         case nir_intrinsic_load_output:
+            if (devinfo->gen == 8) {
+               mark_used_with_src(bt, &intrin->src[0],
+                                  IRIS_SURFACE_GROUP_RENDER_TARGET_READ);
+            }
+            break;
+
          case nir_intrinsic_image_size:
          case nir_intrinsic_image_load:
          case nir_intrinsic_image_store:
          case nir_intrinsic_image_atomic_add:
-         case nir_intrinsic_image_atomic_min:
-         case nir_intrinsic_image_atomic_max:
+         case nir_intrinsic_image_atomic_imin:
+         case nir_intrinsic_image_atomic_umin:
+         case nir_intrinsic_image_atomic_imax:
+         case nir_intrinsic_image_atomic_umax:
          case nir_intrinsic_image_atomic_and:
          case nir_intrinsic_image_atomic_or:
          case nir_intrinsic_image_atomic_xor:
@@ -798,8 +817,10 @@ iris_setup_binding_table(struct nir_shader *nir,
          case nir_intrinsic_image_load:
          case nir_intrinsic_image_store:
          case nir_intrinsic_image_atomic_add:
-         case nir_intrinsic_image_atomic_min:
-         case nir_intrinsic_image_atomic_max:
+         case nir_intrinsic_image_atomic_imin:
+         case nir_intrinsic_image_atomic_umin:
+         case nir_intrinsic_image_atomic_imax:
+         case nir_intrinsic_image_atomic_umax:
          case nir_intrinsic_image_atomic_and:
          case nir_intrinsic_image_atomic_or:
          case nir_intrinsic_image_atomic_xor:
@@ -819,6 +840,13 @@ iris_setup_binding_table(struct nir_shader *nir,
          case nir_intrinsic_store_ssbo:
             rewrite_src_with_bti(&b, bt, instr, &intrin->src[1],
                                  IRIS_SURFACE_GROUP_SSBO);
+            break;
+
+         case nir_intrinsic_load_output:
+            if (devinfo->gen == 8) {
+               rewrite_src_with_bti(&b, bt, instr, &intrin->src[0],
+                                    IRIS_SURFACE_GROUP_RENDER_TARGET_READ);
+            }
             break;
 
          case nir_intrinsic_get_buffer_size:
@@ -923,7 +951,7 @@ iris_compile_vs(struct iris_context *ice,
                        &num_system_values, &num_cbufs);
 
    struct iris_binding_table bt;
-   iris_setup_binding_table(nir, &bt, /* num_render_targets */ 0,
+   iris_setup_binding_table(devinfo, nir, &bt, /* num_render_targets */ 0,
                             num_system_values, num_cbufs);
 
    brw_nir_analyze_ubo_ranges(compiler, nir, NULL, prog_data->ubo_ranges);
@@ -941,7 +969,7 @@ iris_compile_vs(struct iris_context *ice,
    char *error_str = NULL;
    const unsigned *program =
       brw_compile_vs(compiler, &ice->dbg, mem_ctx, &key_no_ucp, vs_prog_data,
-                     nir, -1, &error_str);
+                     nir, -1, NULL, &error_str);
    if (program == NULL) {
       dbg_printf("Failed to compile vertex shader: %s\n", error_str);
       ralloc_free(mem_ctx);
@@ -1095,6 +1123,7 @@ iris_compile_tcs(struct iris_context *ice,
       rzalloc(mem_ctx, struct brw_tcs_prog_data);
    struct brw_vue_prog_data *vue_prog_data = &tcs_prog_data->base;
    struct brw_stage_prog_data *prog_data = &vue_prog_data->base;
+   const struct gen_device_info *devinfo = &screen->devinfo;
    enum brw_param_builtin *system_values = NULL;
    unsigned num_system_values = 0;
    unsigned num_cbufs = 0;
@@ -1108,7 +1137,7 @@ iris_compile_tcs(struct iris_context *ice,
 
       iris_setup_uniforms(compiler, mem_ctx, nir, prog_data, &system_values,
                           &num_system_values, &num_cbufs);
-      iris_setup_binding_table(nir, &bt, /* num_render_targets */ 0,
+      iris_setup_binding_table(devinfo, nir, &bt, /* num_render_targets */ 0,
                                num_system_values, num_cbufs);
       brw_nir_analyze_ubo_ranges(compiler, nir, NULL, prog_data->ubo_ranges);
    } else {
@@ -1151,7 +1180,7 @@ iris_compile_tcs(struct iris_context *ice,
    char *error_str = NULL;
    const unsigned *program =
       brw_compile_tcs(compiler, &ice->dbg, mem_ctx, key, tcs_prog_data, nir,
-                      -1, &error_str);
+                      -1, NULL, &error_str);
    if (program == NULL) {
       dbg_printf("Failed to compile control shader: %s\n", error_str);
       ralloc_free(mem_ctx);
@@ -1241,6 +1270,7 @@ iris_compile_tes(struct iris_context *ice,
    struct brw_vue_prog_data *vue_prog_data = &tes_prog_data->base;
    struct brw_stage_prog_data *prog_data = &vue_prog_data->base;
    enum brw_param_builtin *system_values;
+   const struct gen_device_info *devinfo = &screen->devinfo;
    unsigned num_system_values;
    unsigned num_cbufs;
 
@@ -1259,7 +1289,7 @@ iris_compile_tes(struct iris_context *ice,
                        &num_system_values, &num_cbufs);
 
    struct iris_binding_table bt;
-   iris_setup_binding_table(nir, &bt, /* num_render_targets */ 0,
+   iris_setup_binding_table(devinfo, nir, &bt, /* num_render_targets */ 0,
                             num_system_values, num_cbufs);
 
    brw_nir_analyze_ubo_ranges(compiler, nir, NULL, prog_data->ubo_ranges);
@@ -1271,7 +1301,7 @@ iris_compile_tes(struct iris_context *ice,
    char *error_str = NULL;
    const unsigned *program =
       brw_compile_tes(compiler, &ice->dbg, mem_ctx, key, &input_vue_map,
-                      tes_prog_data, nir, NULL, -1, &error_str);
+                      tes_prog_data, nir, -1, NULL, &error_str);
    if (program == NULL) {
       dbg_printf("Failed to compile evaluation shader: %s\n", error_str);
       ralloc_free(mem_ctx);
@@ -1379,7 +1409,7 @@ iris_compile_gs(struct iris_context *ice,
                        &num_system_values, &num_cbufs);
 
    struct iris_binding_table bt;
-   iris_setup_binding_table(nir, &bt, /* num_render_targets */ 0,
+   iris_setup_binding_table(devinfo, nir, &bt, /* num_render_targets */ 0,
                             num_system_values, num_cbufs);
 
    brw_nir_analyze_ubo_ranges(compiler, nir, NULL, prog_data->ubo_ranges);
@@ -1391,7 +1421,7 @@ iris_compile_gs(struct iris_context *ice,
    char *error_str = NULL;
    const unsigned *program =
       brw_compile_gs(compiler, &ice->dbg, mem_ctx, key, gs_prog_data, nir,
-                     NULL, -1, &error_str);
+                     NULL, -1, NULL, &error_str);
    if (program == NULL) {
       dbg_printf("Failed to compile geometry shader: %s\n", error_str);
       ralloc_free(mem_ctx);
@@ -1474,6 +1504,7 @@ iris_compile_fs(struct iris_context *ice,
       rzalloc(mem_ctx, struct brw_wm_prog_data);
    struct brw_stage_prog_data *prog_data = &fs_prog_data->base;
    enum brw_param_builtin *system_values;
+   const struct gen_device_info *devinfo = &screen->devinfo;
    unsigned num_system_values;
    unsigned num_cbufs;
 
@@ -1484,8 +1515,22 @@ iris_compile_fs(struct iris_context *ice,
    iris_setup_uniforms(compiler, mem_ctx, nir, prog_data, &system_values,
                        &num_system_values, &num_cbufs);
 
+   /* Lower output variables to load_output intrinsics before setting up
+    * binding tables, so iris_setup_binding_table can map any load_output
+    * intrinsics to IRIS_SURFACE_GROUP_RENDER_TARGET_READ on Gen8 for
+    * non-coherent framebuffer fetches.
+    */
+   brw_nir_lower_fs_outputs(nir);
+
+   /* On Gen11+, shader RT write messages have a "Null Render Target" bit
+    * and do not need a binding table entry with a null surface.  Earlier
+    * generations need an entry for a null surface.
+    */
+   int null_rts = devinfo->gen < 11 ? 1 : 0;
+
    struct iris_binding_table bt;
-   iris_setup_binding_table(nir, &bt, MAX2(key->nr_color_regions, 1),
+   iris_setup_binding_table(devinfo, nir, &bt,
+                            MAX2(key->nr_color_regions, null_rts),
                             num_system_values, num_cbufs);
 
    brw_nir_analyze_ubo_ranges(compiler, nir, NULL, prog_data->ubo_ranges);
@@ -1493,7 +1538,8 @@ iris_compile_fs(struct iris_context *ice,
    char *error_str = NULL;
    const unsigned *program =
       brw_compile_fs(compiler, &ice->dbg, mem_ctx, key, fs_prog_data,
-                     nir, NULL, -1, -1, -1, true, false, vue_map, &error_str);
+                     nir, -1, -1, -1, true, false, vue_map,
+                     NULL, &error_str);
    if (program == NULL) {
       dbg_printf("Failed to compile fragment shader: %s\n", error_str);
       ralloc_free(mem_ctx);
@@ -1525,11 +1571,11 @@ iris_compile_fs(struct iris_context *ice,
 static void
 iris_update_compiled_fs(struct iris_context *ice)
 {
+   struct iris_screen *screen = (struct iris_screen *)ice->ctx.screen;
+   const struct gen_device_info *devinfo = &screen->devinfo;
    struct iris_shader_state *shs = &ice->state.shaders[MESA_SHADER_FRAGMENT];
    struct iris_uncompiled_shader *ish =
       ice->shaders.uncompiled[MESA_SHADER_FRAGMENT];
-      struct iris_screen *screen = (struct iris_screen *)ice->ctx.screen;
-      const struct gen_device_info *devinfo = &screen->devinfo;
    struct brw_wm_prog_key key = { KEY_INIT(devinfo->gen) };
    ice->vtbl.populate_fs_key(ice, &ish->nir->info, &key);
 
@@ -1592,6 +1638,35 @@ update_last_vue_map(struct iris_context *ice,
    }
 
    ice->shaders.last_vue_map = &vue_prog_data->vue_map;
+}
+
+static void
+iris_update_pull_constant_descriptors(struct iris_context *ice,
+                                      gl_shader_stage stage)
+{
+   struct iris_compiled_shader *shader = ice->shaders.prog[stage];
+
+   if (!shader || !shader->prog_data->has_ubo_pull)
+      return;
+
+   struct iris_shader_state *shs = &ice->state.shaders[stage];
+   bool any_new_descriptors =
+      shader->num_system_values > 0 && shs->sysvals_need_upload;
+
+   unsigned bound_cbufs = shs->bound_cbufs;
+
+   while (bound_cbufs) {
+      const int i = u_bit_scan(&bound_cbufs);
+      struct pipe_shader_buffer *cbuf = &shs->constbuf[i];
+      struct iris_state_ref *surf_state = &shs->constbuf_surf_state[i];
+      if (!surf_state->res && cbuf->buffer) {
+         iris_upload_ubo_ssbo_surf_state(ice, cbuf, surf_state, false);
+         any_new_descriptors = true;
+      }
+   }
+
+   if (any_new_descriptors)
+      ice->state.dirty |= IRIS_DIRTY_BINDINGS_VS << stage;
 }
 
 /**
@@ -1708,6 +1783,11 @@ iris_update_compiled_shaders(struct iris_context *ice)
          }
       }
    }
+
+   for (int i = MESA_SHADER_VERTEX; i <= MESA_SHADER_FRAGMENT; i++) {
+      if (ice->state.dirty & (IRIS_DIRTY_CONSTANTS_VS << i))
+         iris_update_pull_constant_descriptors(ice, i);
+   }
 }
 
 static struct iris_compiled_shader *
@@ -1722,24 +1802,23 @@ iris_compile_cs(struct iris_context *ice,
       rzalloc(mem_ctx, struct brw_cs_prog_data);
    struct brw_stage_prog_data *prog_data = &cs_prog_data->base;
    enum brw_param_builtin *system_values;
+   const struct gen_device_info *devinfo = &screen->devinfo;
    unsigned num_system_values;
    unsigned num_cbufs;
 
    nir_shader *nir = nir_shader_clone(mem_ctx, ish->nir);
 
-   prog_data->total_shared = nir->info.cs.shared_size;
-
    iris_setup_uniforms(compiler, mem_ctx, nir, prog_data, &system_values,
                        &num_system_values, &num_cbufs);
 
    struct iris_binding_table bt;
-   iris_setup_binding_table(nir, &bt, /* num_render_targets */ 0,
+   iris_setup_binding_table(devinfo, nir, &bt, /* num_render_targets */ 0,
                             num_system_values, num_cbufs);
 
    char *error_str = NULL;
    const unsigned *program =
       brw_compile_cs(compiler, &ice->dbg, mem_ctx, key, cs_prog_data,
-                     nir, -1, &error_str);
+                     nir, -1, NULL, &error_str);
    if (program == NULL) {
       dbg_printf("Failed to compile compute shader: %s\n", error_str);
       ralloc_free(mem_ctx);
@@ -1763,8 +1842,8 @@ iris_compile_cs(struct iris_context *ice,
    return shader;
 }
 
-void
-iris_update_compiled_compute_shader(struct iris_context *ice)
+static void
+iris_update_compiled_cs(struct iris_context *ice)
 {
    struct iris_shader_state *shs = &ice->state.shaders[MESA_SHADER_COMPUTE];
    struct iris_uncompiled_shader *ish =
@@ -1792,6 +1871,16 @@ iris_update_compiled_compute_shader(struct iris_context *ice)
                           IRIS_DIRTY_CONSTANTS_CS;
       shs->sysvals_need_upload = true;
    }
+}
+
+void
+iris_update_compiled_compute_shader(struct iris_context *ice)
+{
+   if (ice->state.dirty & IRIS_DIRTY_UNCOMPILED_CS)
+      iris_update_compiled_cs(ice);
+
+   if (ice->state.dirty & IRIS_DIRTY_CONSTANTS_CS)
+      iris_update_pull_constant_descriptors(ice, MESA_SHADER_COMPUTE);
 }
 
 void
@@ -2096,7 +2185,7 @@ iris_create_fs_state(struct pipe_context *ctx,
       struct brw_wm_prog_key key = {
          KEY_INIT(devinfo->gen),
          .nr_color_regions = util_bitcount(color_outputs),
-         .coherent_fb_fetch = true,
+         .coherent_fb_fetch = devinfo->gen >= 9,
          .input_slots_valid =
             can_rearrange_varyings ? 0 : info->inputs_read | VARYING_BIT_POS,
       };
@@ -2232,6 +2321,20 @@ bind_shader_state(struct iris_context *ice,
 static void
 iris_bind_vs_state(struct pipe_context *ctx, void *state)
 {
+   struct iris_context *ice = (struct iris_context *)ctx;
+   struct iris_uncompiled_shader *new_ish = state;
+
+   if (new_ish &&
+       ice->state.window_space_position !=
+       new_ish->nir->info.vs.window_space_position) {
+      ice->state.window_space_position =
+         new_ish->nir->info.vs.window_space_position;
+
+      ice->state.dirty |= IRIS_DIRTY_CLIP |
+                          IRIS_DIRTY_RASTER |
+                          IRIS_DIRTY_CC_VIEWPORT;
+   }
+
    bind_shader_state((void *) ctx, state, MESA_SHADER_VERTEX);
 }
 

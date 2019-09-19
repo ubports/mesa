@@ -112,6 +112,7 @@ enum ir3_driver_param {
  */
 struct ir3_const_state {
 	unsigned num_ubos;
+	unsigned num_driver_params;   /* scalar */
 
 	struct {
 		/* user const start at zero */
@@ -390,7 +391,10 @@ struct ir3_shader_variant {
 	 * which is pointed to by so->binning:
 	 */
 	bool binning_pass;
-	struct ir3_shader_variant *binning;
+//	union {
+		struct ir3_shader_variant *binning;
+		struct ir3_shader_variant *nonbinning;
+//	};
 
 	struct ir3_info info;
 	struct ir3 *ir;
@@ -523,6 +527,7 @@ struct ir3_ubo_analysis_state
 	struct ir3_ubo_range range[IR3_MAX_CONSTANT_BUFFERS];
 	uint32_t size;
 	uint32_t lower_count;
+	uint32_t cmdstream_size; /* for per-gen backend to stash required cmdstream size */
 };
 
 

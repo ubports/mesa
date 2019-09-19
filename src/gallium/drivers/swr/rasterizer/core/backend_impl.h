@@ -28,6 +28,11 @@
  ******************************************************************************/
 #pragma once
 
+#include "tilemgr.h"
+#include "state.h"
+#include "context.h"
+
+
 void InitBackendSingleFuncTable(PFN_BACKEND_FUNC (&table)[SWR_INPUT_COVERAGE_COUNT][2][2]);
 void InitBackendSampleFuncTable(
     PFN_BACKEND_FUNC (&table)[SWR_MULTISAMPLE_TYPE_COUNT][SWR_INPUT_COVERAGE_COUNT][2][2]);
@@ -624,6 +629,19 @@ inline void SetupRenderBuffers(uint8_t*             pColorBuffer[SWR_NUM_RENDERT
     }
 }
 
+INLINE void SetRenderHotTilesDirty(DRAW_CONTEXT* pDC, RenderOutputBuffers& renderBuffers)
+{
+    const API_STATE& state = GetApiState(pDC);
+
+    unsigned long rtSlot                 = 0;
+    uint32_t      colorHottileEnableMask = state.colorHottileEnable;
+    while (_BitScanForward(&rtSlot, colorHottileEnableMask))
+    {
+        colorHottileEnableMask &= ~(1 << rtSlot);
+        renderBuffers.pColorHotTile[rtSlot]->state = HOTTILE_DIRTY;
+    }
+}
+
 template <typename T>
 void SetupPixelShaderContext(SWR_PS_CONTEXT*            psContext,
                              const SWR_MULTISAMPLE_POS& samplePos,
@@ -633,6 +651,7 @@ void SetupPixelShaderContext(SWR_PS_CONTEXT*            psContext,
     psContext->pPerspAttribs          = work.pPerspAttribs;
     psContext->frontFace              = work.triFlags.frontFacing;
     psContext->renderTargetArrayIndex = work.triFlags.renderTargetArrayIndex;
+    psContext->viewportIndex          = work.triFlags.viewportIndex;
 
     // save Ia/Ib/Ic and Ja/Jb/Jc if we need to reevaluate i/j/k in the shader because of pull
     // attribs
@@ -1029,6 +1048,8 @@ void BackendPixelRate(DRAW_CONTEXT*        pDC,
                        state.colorHottileEnable,
                        renderBuffers);
 
+    bool isTileDirty = false;
+
     RDTSC_END(pDC->pContext->pBucketMgr, BESetup, 0);
 
     PixelRateZTestLoop<T> PixelRateZTest(pDC,
@@ -1124,7 +1145,6 @@ void BackendPixelRate(DRAW_CONTEXT*        pDC,
             // execute pixel shader
             RDTSC_BEGIN(pDC->pContext->pBucketMgr, BEPixelShader, pDC->drawId);
             state.psState.pfnPixelShader(GetPrivateState(pDC), pWorkerData, &psContext);
-            UPDATE_STAT_BE(PsInvocations, _mm_popcnt_u32(_simd_movemask_ps(activeLanes)));
             RDTSC_END(pDC->pContext->pBucketMgr, BEPixelShader, 0);
 
             // update stats
@@ -1138,6 +1158,8 @@ void BackendPixelRate(DRAW_CONTEXT*        pDC,
             {
                 goto Endtile;
             };
+
+            isTileDirty = true;
 
             // late-Z
             if (!T::bCanEarlyZ && !T::bForcedSampleCount)
@@ -1250,6 +1272,11 @@ void BackendPixelRate(DRAW_CONTEXT*        pDC,
 
         psContext.vY.UL     = _simd_add_ps(psContext.vY.UL, dy);
         psContext.vY.center = _simd_add_ps(psContext.vY.center, dy);
+    }
+
+    if (isTileDirty)
+    {
+        SetRenderHotTilesDirty(pDC, renderBuffers);
     }
 
     RDTSC_END(pDC->pContext->pBucketMgr, BEPixelRateBackend, 0);

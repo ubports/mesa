@@ -26,7 +26,7 @@ project(
   ).stdout(),
   license : 'MIT',
   meson_version : '>= 0.46',
-  default_options : ['buildtype=debugoptimized', 'b_ndebug=if-release', 'c_std=c99', 'cpp_std=c++11']
+  default_options : ['buildtype=debugoptimized', 'b_ndebug=if-release', 'c_std=c99', 'cpp_std=c++14']
 )
 
 cc = meson.get_compiler('c')
@@ -42,7 +42,7 @@ pre_args = [
   '-D__STDC_FORMAT_MACROS',
   '-D__STDC_LIMIT_MACROS',
   '-DPACKAGE_VERSION="@0@"'.format(meson.project_version()),
-  '-DPACKAGE_BUGREPORT="https://bugs.freedesktop.org/enter_bug.cgi?product=Mesa"',
+  '-DPACKAGE_BUGREPORT="https://gitlab.freedesktop.org/mesa/mesa/issues"',
 ]
 
 with_vulkan_icd_dir = get_option('vulkan-icd-dir')
@@ -61,6 +61,8 @@ if with_tools.contains('all')
     'freedreno',
     'glsl',
     'intel',
+    'intel-ui',
+    'lima',
     'nir',
     'nouveau',
     'xvmc',
@@ -87,7 +89,14 @@ if host_machine.system() == 'windows'
   endif
 endif
 with_opengl = get_option('opengl')
-with_shared_glapi = get_option('shared-glapi')
+
+# Default shared glapi off for windows, on elsewhere.
+_sg = get_option('shared-glapi')
+if _sg == 'auto'
+  with_shared_glapi = host_machine.system() != 'windows'
+else
+  with_shared_glapi = _sg == 'true'
+endif
 
 # shared-glapi is required if at least two OpenGL APIs are being built
 if not with_shared_glapi
@@ -113,7 +122,7 @@ with_gles1 = with_gles1 != 'false'
 with_gles2 = with_gles2 != 'false'
 with_any_opengl = with_opengl or with_gles1 or with_gles2
 # Only build shared_glapi if at least one OpenGL API is enabled
-with_shared_glapi = get_option('shared-glapi') and with_any_opengl
+with_shared_glapi = with_shared_glapi and with_any_opengl
 
 system_has_kms_drm = ['openbsd', 'netbsd', 'freebsd', 'gnu/kfreebsd', 'dragonfly', 'linux'].contains(host_machine.system())
 
@@ -158,7 +167,7 @@ if gallium_drivers.contains('auto')
     elif ['arm', 'aarch64'].contains(host_machine.cpu_family())
       gallium_drivers = [
         'kmsro', 'v3d', 'vc4', 'freedreno', 'etnaviv', 'nouveau',
-        'tegra', 'virgl', 'lima', 'swrast'
+        'tegra', 'virgl', 'lima', 'panfrost', 'swrast'
       ]
     else
       error('Unknown architecture @0@. Please pass -Dgallium-drivers to set driver options. Patches gladly accepted to fix this.'.format(
@@ -268,10 +277,12 @@ _platforms = get_option('platforms')
 if _platforms.contains('auto')
   if system_has_kms_drm
     _platforms = ['x11', 'wayland', 'drm', 'surfaceless']
-  elif ['darwin', 'windows', 'cygwin'].contains(host_machine.system())
+  elif ['darwin', 'cygwin'].contains(host_machine.system())
     _platforms = ['x11', 'surfaceless']
   elif ['haiku'].contains(host_machine.system())
     _platforms = ['haiku']
+  elif host_machine.system() == 'windows'
+    _platforms = ['windows']
   else
     error('Unknown OS @0@. Please pass -Dplatforms to set platforms. Patches gladly accepted to fix this.'.format(
           host_machine.system()))
@@ -284,6 +295,7 @@ with_platform_wayland = _platforms.contains('wayland')
 with_platform_drm = _platforms.contains('drm')
 with_platform_haiku = _platforms.contains('haiku')
 with_platform_surfaceless = _platforms.contains('surfaceless')
+with_platform_windows = _platforms.contains('windows')
 
 with_platforms = false
 if _platforms.length() != 0 and _platforms != ['']
@@ -307,6 +319,8 @@ if with_glx == 'auto'
   if with_dri
     with_glx = 'dri'
   elif with_platform_haiku
+    with_glx = 'disabled'
+  elif host_machine.system() == 'windows'
     with_glx = 'disabled'
   elif with_gallium
     # Even when building just gallium drivers the user probably wants dri
@@ -375,7 +389,11 @@ if with_egl and not (with_platform_drm or with_platform_surfaceless or with_plat
   endif
 endif
 
-pre_args += '-DGLX_USE_TLS'
+# Android uses emutls for versions <= P/28. For USE_ELF_TLS we need ELF TLS.
+if not with_platform_android or get_option('platform-sdk-version') >= 29
+  pre_args += '-DUSE_ELF_TLS'
+endif
+
 if with_glx != 'disabled'
   if not (with_platform_x11 and with_any_opengl)
     error('Cannot build GLX support without X11 platform support and at least one OpenGL API')
@@ -400,7 +418,9 @@ endif
 
 with_glvnd = get_option('glvnd')
 if with_glvnd
-  if with_glx == 'xlib' or with_glx == 'gallium-xlib'
+  if with_platform_windows
+    error('glvnd cannot be used on Windows')
+  elif with_glx == 'xlib' or with_glx == 'gallium-xlib'
     error('Cannot build glvnd support for GLX that is not DRI based.')
   elif with_glx == 'disabled' and not with_egl
     error('glvnd requires DRI based GLX and/or EGL')
@@ -773,6 +793,11 @@ if cc.get_id() == 'gcc' and cc.version().version_compare('< 4.4.6')
   error('When using GCC, version 4.4.6 or later is required.')
 endif
 
+# Support systems without ETIME (e.g. FreeBSD)
+if cc.get_define('ETIME', prefix : '#include <errno.h>') == ''
+  pre_args += '-DETIME=ETIMEDOUT'
+endif
+
 # Define DEBUG for debug builds only (debugoptimized is not included on this one)
 if get_option('buildtype') == 'debug'
   pre_args += '-DDEBUG'
@@ -1024,7 +1049,7 @@ elif cc.has_header_symbol('sys/mkdev.h', 'major')
   pre_args += '-DMAJOR_IN_MKDEV'
 endif
 
-foreach h : ['xlocale.h', 'sys/sysctl.h', 'linux/futex.h', 'endian.h', 'dlfcn.h', 'execinfo.h', 'sys/shm.h']
+foreach h : ['xlocale.h', 'sys/sysctl.h', 'linux/futex.h', 'endian.h', 'dlfcn.h', 'execinfo.h', 'sys/shm.h', 'cet.h']
   if cc.compiles('#include <@0@>'.format(h), name : '@0@'.format(h))
     pre_args += '-DHAVE_@0@'.format(h.to_upper().underscorify())
   endif
@@ -1095,14 +1120,15 @@ if build_machine.system() != 'darwin'
 endif
 
 # check for dl support
-if cc.has_function('dlopen')
-  dep_dl = null_dep
-else
-  dep_dl = cc.find_library('dl')
-endif
-if cc.has_function('dladdr', dependencies : dep_dl)
-  # This is really only required for megadrivers
-  pre_args += '-DHAVE_DLADDR'
+dep_dl = null_dep
+if host_machine.system() != 'windows'
+  if not cc.has_function('dlopen')
+    dep_dl = cc.find_library('dl')
+  endif
+  if cc.has_function('dladdr', dependencies : dep_dl)
+    # This is really only required for megadrivers
+    pre_args += '-DHAVE_DLADDR'
+  endif
 endif
 
 if cc.has_function('dl_iterate_phdr')
@@ -1121,7 +1147,7 @@ else
 endif
 
 # TODO: some of these may be conditional
-dep_zlib = dependency('zlib', version : '>= 1.2.3')
+dep_zlib = dependency('zlib', version : '>= 1.2.3', fallback : ['zlib', 'zlib_dep'])
 pre_args += '-DHAVE_ZLIB'
 dep_thread = dependency('threads')
 if dep_thread.found() and host_machine.system() != 'windows'
@@ -1133,8 +1159,14 @@ if dep_thread.found() and host_machine.system() != 'windows'
       args : '-D_GNU_SOURCE')
     pre_args += '-DHAVE_PTHREAD_SETAFFINITY'
   endif
+  if cc.has_function(
+      'pthread_setaffinity_np',
+      dependencies : dep_thread,
+      prefix : '#include <pthread_np.h>')
+    pre_args += '-DPTHREAD_SETAFFINITY_IN_NP_HEADER'
+  endif
 endif
-dep_expat = dependency('expat')
+dep_expat = dependency('expat', fallback : ['expat', 'expat_dep'])
 # this only exists on linux so either this is linux and it will be found, or
 # it's not linux and wont
 dep_m = cc.find_library('m', required : false)
@@ -1222,17 +1254,17 @@ if with_gallium_opencl
     'all-targets', 'linker', 'coverage', 'instrumentation', 'ipo', 'irreader',
     'lto', 'option', 'objcarcopts', 'profiledata',
   ]
+endif
+if with_gallium_opencl or with_gallium_softpipe
   llvm_optional_modules += ['coroutines']
 endif
 
 if with_amd_vk or with_gallium_radeonsi
-  _llvm_version = '>= 7.0.0'
+  _llvm_version = '>= 8.0.0'
 elif with_gallium_swr
   _llvm_version = '>= 6.0.0'
-elif with_gallium_opencl or with_gallium_r600
-  _llvm_version = '>= 3.9.0'
 else
-  _llvm_version = '>= 3.3.0'
+  _llvm_version = '>= 3.9.0'
 endif
 
 _shared_llvm = get_option('shared-llvm')
@@ -1256,11 +1288,8 @@ if _llvm != 'false'
   with_llvm = dep_llvm.found()
 endif
 if with_llvm
-  _llvm_version = dep_llvm.version().split('.')
-  pre_args += [
-    '-DHAVE_LLVM=0x0@0@0@1@'.format(_llvm_version[0], _llvm_version[1]),
-    '-DMESA_LLVM_VERSION_STRING="@0@"'.format(dep_llvm.version()),
-  ]
+  pre_args += '-DLLVM_AVAILABLE'
+  pre_args += '-DMESA_LLVM_VERSION_STRING="@0@"'.format(dep_llvm.version())
 
   # LLVM can be built without rtti, turning off rtti changes the ABI of C++
   # programs, so we need to build all C++ code in mesa without rtti as well to
@@ -1325,9 +1354,6 @@ else
 endif
 
 if with_osmesa != 'none'
-  if with_osmesa == 'classic' and not with_dri_swrast
-    error('OSMesa classic requires dri (classic) swrast.')
-  endif
   if with_osmesa == 'gallium' and not with_gallium_softpipe
     error('OSMesa gallium requires gallium softpipe or llvmpipe.')
   endif

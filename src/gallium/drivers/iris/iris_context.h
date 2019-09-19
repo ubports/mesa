@@ -53,6 +53,11 @@ enum iris_param_domain {
    BRW_PARAM_DOMAIN_IMAGE,
 };
 
+enum {
+   DRI_CONF_BO_REUSE_DISABLED,
+   DRI_CONF_BO_REUSE_ALL
+};
+
 #define BRW_PARAM(domain, val)   (BRW_PARAM_DOMAIN_##domain << 24 | (val))
 #define BRW_PARAM_DOMAIN(param)  ((uint32_t)(param) >> 24)
 #define BRW_PARAM_VALUE(param)   ((uint32_t)(param) & 0x00ffffff)
@@ -105,6 +110,7 @@ enum iris_param_domain {
 #define IRIS_DIRTY_FS                       (1ull << 32)
 #define IRIS_DIRTY_CS                       (1ull << 33)
 #define IRIS_DIRTY_URB                      (1ull << 34)
+#define IRIS_SHIFT_FOR_DIRTY_CONSTANTS      35
 #define IRIS_DIRTY_CONSTANTS_VS             (1ull << 35)
 #define IRIS_DIRTY_CONSTANTS_TCS            (1ull << 36)
 #define IRIS_DIRTY_CONSTANTS_TES            (1ull << 37)
@@ -283,6 +289,7 @@ struct iris_uncompiled_shader {
 
 enum iris_surface_group {
    IRIS_SURFACE_GROUP_RENDER_TARGET,
+   IRIS_SURFACE_GROUP_RENDER_TARGET_READ,
    IRIS_SURFACE_GROUP_CS_WORK_GROUPS,
    IRIS_SURFACE_GROUP_TEXTURE,
    IRIS_SURFACE_GROUP_IMAGE,
@@ -460,6 +467,11 @@ struct iris_vtable {
                                  struct iris_bo *bo, uint32_t offset,
                                  uint64_t imm);
 
+   void (*emit_mi_report_perf_count)(struct iris_batch *batch,
+                                     struct iris_bo *bo,
+                                     uint32_t offset_in_bytes,
+                                     uint32_t report_id);
+
    unsigned (*derived_program_state_size)(enum iris_program_cache_id id);
    void (*store_derived_program_state)(struct iris_context *ice,
                                        enum iris_program_cache_id cache_id,
@@ -539,12 +551,18 @@ struct iris_context {
       } params;
 
       /**
+       * Are the above values the ones stored in the draw_params buffer?
+       * If so, we can compare them against new values to see if anything
+       * changed.  If not, we need to assume they changed.
+       */
+      bool params_valid;
+
+      /**
        * Resource and offset that stores draw_parameters from the indirect
        * buffer or to the buffer that stures the previous values for non
        * indirect draws.
        */
-      struct pipe_resource *draw_params_res;
-      uint32_t draw_params_offset;
+      struct iris_state_ref draw_params;
 
       struct {
          /**
@@ -565,10 +583,7 @@ struct iris_context {
        * contains parameters that are not present in the indirect buffer as
        * drawid and is_indexed_draw. They will go in their own vertex element.
        */
-      struct pipe_resource *derived_draw_params_res;
-      uint32_t derived_draw_params_offset;
-
-      bool is_indirect;
+      struct iris_state_ref derived_draw_params;
    } draw;
 
    struct {
@@ -601,6 +616,8 @@ struct iris_context {
       bool condition;
    } condition;
 
+   struct gen_perf_context *perf_ctx;
+
    struct {
       uint64_t dirty;
       uint64_t dirty_for_nos[IRIS_NOS_COUNT];
@@ -630,6 +647,8 @@ struct iris_context {
       enum pipe_prim_type prim_mode:8;
       bool prim_is_points_or_lines;
       uint8_t vertices_per_patch;
+
+      bool window_space_position;
 
       /** The last compute grid size */
       uint32_t last_grid[3];
@@ -724,6 +743,9 @@ struct iris_context {
 
       /** Records the size of variable-length state for INTEL_DEBUG=bat */
       struct hash_table_u64 *sizes;
+
+      /** Last rendering scale argument provided to genX(emit_hashing_mode). */
+      unsigned current_hash_scale;
    } state;
 };
 
@@ -782,6 +804,11 @@ void iris_emit_pipe_control_write(struct iris_batch *batch,
                                   uint64_t imm);
 void iris_emit_end_of_pipe_sync(struct iris_batch *batch,
                                 const char *reason, uint32_t flags);
+void iris_flush_all_caches(struct iris_batch *batch);
+
+#define iris_handle_always_flush_cache(batch) \
+   if (unlikely(batch->screen->driconf.always_flush_cache)) \
+      iris_flush_all_caches(batch);
 
 void iris_init_flush_functions(struct pipe_context *ctx);
 
@@ -884,6 +911,11 @@ void iris_render_cache_add_bo(struct iris_batch *batch,
                               enum isl_aux_usage aux_usage);
 void iris_cache_flush_for_depth(struct iris_batch *batch, struct iris_bo *bo);
 void iris_depth_cache_add_bo(struct iris_batch *batch, struct iris_bo *bo);
+int iris_get_driver_query_info(struct pipe_screen *pscreen, unsigned index,
+                               struct pipe_driver_query_info *info);
+int iris_get_driver_query_group_info(struct pipe_screen *pscreen,
+                                     unsigned index,
+                                     struct pipe_driver_query_group_info *info);
 
 /* iris_state.c */
 void gen9_toggle_preemption(struct iris_context *ice,
@@ -918,6 +950,9 @@ void gen9_toggle_preemption(struct iris_context *ice,
 #  include "iris_genx_protos.h"
 #  undef genX
 #  define genX(x) gen11_##x
+#  include "iris_genx_protos.h"
+#  undef genX
+#  define genX(x) gen12_##x
 #  include "iris_genx_protos.h"
 #  undef genX
 #endif

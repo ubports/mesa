@@ -25,101 +25,86 @@
 
 #include <assert.h>
 
+#include "drm-uapi/panfrost_drm.h"
+
+#include "pan_bo.h"
 #include "pan_context.h"
 #include "util/hash_table.h"
 #include "util/ralloc.h"
 #include "util/u_format.h"
 #include "util/u_pack_color.h"
+#include "pan_util.h"
+#include "pandecode/decode.h"
 
-struct panfrost_job *
-panfrost_create_job(struct panfrost_context *ctx)
+static struct panfrost_batch *
+panfrost_create_batch(struct panfrost_context *ctx,
+                      const struct pipe_framebuffer_state *key)
 {
-        struct panfrost_job *job = rzalloc(ctx, struct panfrost_job);
+        struct panfrost_batch *batch = rzalloc(ctx, struct panfrost_batch);
 
-        job->ctx = ctx;
+        batch->ctx = ctx;
 
-        job->bos = _mesa_set_create(job,
-                                    _mesa_hash_pointer,
-                                    _mesa_key_pointer_equal);
+        batch->bos = _mesa_set_create(batch,
+                                      _mesa_hash_pointer,
+                                      _mesa_key_pointer_equal);
 
-        job->minx = job->miny = ~0;
-        job->maxx = job->maxy = 0;
-        job->transient_offset = 0;
+        batch->minx = batch->miny = ~0;
+        batch->maxx = batch->maxy = 0;
+        batch->transient_offset = 0;
 
-        util_dynarray_init(&job->headers, job);
-        util_dynarray_init(&job->gpu_headers, job);
-        util_dynarray_init(&job->transient_indices, job);
+        util_dynarray_init(&batch->headers, batch);
+        util_dynarray_init(&batch->gpu_headers, batch);
+        util_copy_framebuffer_state(&batch->key, key);
 
-        return job;
+        return batch;
 }
 
-void
-panfrost_free_job(struct panfrost_context *ctx, struct panfrost_job *job)
+static void
+panfrost_free_batch(struct panfrost_batch *batch)
 {
-        if (!job)
+        if (!batch)
                 return;
 
-        set_foreach(job->bos, entry) {
+        struct panfrost_context *ctx = batch->ctx;
+
+        set_foreach(batch->bos, entry) {
                 struct panfrost_bo *bo = (struct panfrost_bo *)entry->key;
-                panfrost_bo_unreference(ctx->base.screen, bo);
+                panfrost_bo_unreference(bo);
         }
 
-        /* Free up the transient BOs we're sitting on */
-        struct panfrost_screen *screen = pan_screen(ctx->base.screen);
+        _mesa_hash_table_remove_key(ctx->batches, &batch->key);
 
-        util_dynarray_foreach(&job->transient_indices, unsigned, index) {
-                /* Mark it free */
-                BITSET_SET(screen->free_transient, *index);
-        }
+        if (ctx->batch == batch)
+                ctx->batch = NULL;
 
-        /* Unreference the polygon list */
-        panfrost_bo_unreference(ctx->base.screen, job->polygon_list);
-
-        _mesa_hash_table_remove_key(ctx->jobs, &job->key);
-
-        if (ctx->job == job)
-                ctx->job = NULL;
-
-        ralloc_free(job);
+        util_unreference_framebuffer_state(&batch->key);
+        ralloc_free(batch);
 }
 
-struct panfrost_job *
-panfrost_get_job(struct panfrost_context *ctx,
-                 struct pipe_surface **cbufs, struct pipe_surface *zsbuf)
+static struct panfrost_batch *
+panfrost_get_batch(struct panfrost_context *ctx,
+                   const struct pipe_framebuffer_state *key)
 {
         /* Lookup the job first */
-
-        struct panfrost_job_key key = {
-                .cbufs = {
-                        cbufs[0],
-                        cbufs[1],
-                        cbufs[2],
-                        cbufs[3],
-                },
-                .zsbuf = zsbuf
-        };
-
-        struct hash_entry *entry = _mesa_hash_table_search(ctx->jobs, &key);
+        struct hash_entry *entry = _mesa_hash_table_search(ctx->batches, key);
 
         if (entry)
                 return entry->data;
 
         /* Otherwise, let's create a job */
 
-        struct panfrost_job *job = panfrost_create_job(ctx);
+        struct panfrost_batch *batch = panfrost_create_batch(ctx, key);
 
         /* Save the created job */
+        _mesa_hash_table_insert(ctx->batches, &batch->key, batch);
 
-        memcpy(&job->key, &key, sizeof(key));
-        _mesa_hash_table_insert(ctx->jobs, &job->key, job);
-
-        return job;
+        return batch;
 }
 
 /* Get the job corresponding to the FBO we're currently rendering into */
 
-struct panfrost_job *
-panfrost_get_job_for_fbo(struct panfrost_context *ctx)
+struct panfrost_batch *
+panfrost_get_batch_for_fbo(struct panfrost_context *ctx)
 {
         /* If we're wallpapering, we special case to workaround
          * u_blitter abuse */
@@ -129,38 +114,66 @@ panfrost_get_job_for_fbo(struct panfrost_context *ctx)
 
         /* If we already began rendering, use that */
 
-        if (ctx->job) {
-                assert(ctx->job->key.zsbuf == ctx->pipe_framebuffer.zsbuf &&
-                       !memcmp(ctx->job->key.cbufs,
-                               ctx->pipe_framebuffer.cbufs,
-                               sizeof(ctx->job->key.cbufs)));
-                return ctx->job;
+        if (ctx->batch) {
+                assert(util_framebuffer_state_equal(&ctx->batch->key,
+                                                    &ctx->pipe_framebuffer));
+                return ctx->batch;
         }
 
         /* If not, look up the job */
-
-        struct pipe_surface **cbufs = ctx->pipe_framebuffer.cbufs;
-        struct pipe_surface *zsbuf = ctx->pipe_framebuffer.zsbuf;
-        struct panfrost_job *job = panfrost_get_job(ctx, cbufs, zsbuf);
+        struct panfrost_batch *batch = panfrost_get_batch(ctx,
+                                                          &ctx->pipe_framebuffer);
 
         /* Set this job as the current FBO job. Will be reset when updating the
          * FB state and when submitting or releasing a job.
          */
-        ctx->job = job;
-        return job;
+        ctx->batch = batch;
+        return batch;
 }
 
 void
-panfrost_job_add_bo(struct panfrost_job *job, struct panfrost_bo *bo)
+panfrost_batch_add_bo(struct panfrost_batch *batch, struct panfrost_bo *bo)
 {
         if (!bo)
                 return;
 
-        if (_mesa_set_search(job->bos, bo))
+        if (_mesa_set_search(batch->bos, bo))
                 return;
 
         panfrost_bo_reference(bo);
-        _mesa_set_add(job->bos, bo);
+        _mesa_set_add(batch->bos, bo);
+}
+
+void panfrost_batch_add_fbo_bos(struct panfrost_batch *batch)
+{
+        for (unsigned i = 0; i < batch->key.nr_cbufs; ++i) {
+                struct panfrost_resource *rsrc = pan_resource(batch->key.cbufs[i]->texture);
+                panfrost_batch_add_bo(batch, rsrc->bo);
+        }
+
+        if (batch->key.zsbuf) {
+                struct panfrost_resource *rsrc = pan_resource(batch->key.zsbuf->texture);
+                panfrost_batch_add_bo(batch, rsrc->bo);
+        }
+}
+
+struct panfrost_bo *
+panfrost_batch_create_bo(struct panfrost_batch *batch, size_t size,
+                         uint32_t create_flags)
+{
+        struct panfrost_bo *bo;
+
+        bo = panfrost_bo_create(pan_screen(batch->ctx->base.screen), size,
+                                create_flags);
+        panfrost_batch_add_bo(batch, bo);
+
+        /* panfrost_batch_add_bo() has retained a reference and
+         * panfrost_bo_create() initialize the refcnt to 1, so let's
+         * unreference the BO here so it gets released when the batch is
+         * destroyed (unless it's retained by someone else in the meantime).
+         */
+        panfrost_bo_unreference(bo);
+        return bo;
 }
 
 /* Returns the polygon list's GPU address if available, or otherwise allocates
@@ -168,79 +181,281 @@ panfrost_job_add_bo(struct panfrost_job *job, struct panfrost_bo *bo)
  * since we'll hit the BO cache and this is one-per-batch anyway. */
 
 mali_ptr
-panfrost_job_get_polygon_list(struct panfrost_job *batch, unsigned size)
+panfrost_batch_get_polygon_list(struct panfrost_batch *batch, unsigned size)
 {
         if (batch->polygon_list) {
                 assert(batch->polygon_list->size >= size);
         } else {
-                struct panfrost_screen *screen = pan_screen(batch->ctx->base.screen);
-
                 /* Create the BO as invisible, as there's no reason to map */
 
-                batch->polygon_list = panfrost_drm_create_bo(screen,
-                                size, PAN_ALLOCATE_INVISIBLE);
+                batch->polygon_list = panfrost_batch_create_bo(batch, size,
+				                               PAN_BO_INVISIBLE);
         }
 
         return batch->polygon_list->gpu;
 }
 
-void
-panfrost_flush_jobs_writing_resource(struct panfrost_context *panfrost,
-                                     struct pipe_resource *prsc)
+struct panfrost_bo *
+panfrost_batch_get_scratchpad(struct panfrost_batch *batch)
 {
-#if 0
-        struct hash_entry *entry = _mesa_hash_table_search(panfrost->write_jobs,
-                                   prsc);
-        if (entry) {
-                struct panfrost_job *job = entry->data;
-                panfrost_job_submit(panfrost, job);
+        if (batch->scratchpad)
+                return batch->scratchpad;
+
+        batch->scratchpad = panfrost_batch_create_bo(batch, 64 * 4 * 4096,
+                                                     PAN_BO_INVISIBLE);
+        assert(batch->scratchpad);
+        return batch->scratchpad;
+}
+
+struct panfrost_bo *
+panfrost_batch_get_tiler_heap(struct panfrost_batch *batch)
+{
+        if (batch->tiler_heap)
+                return batch->tiler_heap;
+
+        batch->tiler_heap = panfrost_batch_create_bo(batch, 4096 * 4096,
+                                                     PAN_BO_INVISIBLE |
+                                                     PAN_BO_GROWABLE);
+        assert(batch->tiler_heap);
+        return batch->tiler_heap;
+}
+
+struct panfrost_bo *
+panfrost_batch_get_tiler_dummy(struct panfrost_batch *batch)
+{
+        if (batch->tiler_dummy)
+                return batch->tiler_dummy;
+
+        batch->tiler_dummy = panfrost_batch_create_bo(batch, 4096,
+                                                      PAN_BO_INVISIBLE);
+        assert(batch->tiler_dummy);
+        return batch->tiler_dummy;
+}
+
+static void
+panfrost_batch_draw_wallpaper(struct panfrost_batch *batch)
+{
+        /* Nothing to reload? TODO: MRT wallpapers */
+        if (batch->key.cbufs[0] == NULL)
+                return;
+
+        /* Check if the buffer has any content on it worth preserving */
+
+        struct pipe_surface *surf = batch->key.cbufs[0];
+        struct panfrost_resource *rsrc = pan_resource(surf->texture);
+        unsigned level = surf->u.tex.level;
+
+        if (!rsrc->slices[level].initialized)
+                return;
+
+        batch->ctx->wallpaper_batch = batch;
+
+        /* Clamp the rendering area to the damage extent. The
+         * KHR_partial_update() spec states that trying to render outside of
+         * the damage region is "undefined behavior", so we should be safe.
+         */
+        unsigned damage_width = (rsrc->damage.extent.maxx - rsrc->damage.extent.minx);
+        unsigned damage_height = (rsrc->damage.extent.maxy - rsrc->damage.extent.miny);
+
+        if (damage_width && damage_height) {
+                panfrost_batch_intersection_scissor(batch,
+                                                    rsrc->damage.extent.minx,
+                                                    rsrc->damage.extent.miny,
+                                                    rsrc->damage.extent.maxx,
+                                                    rsrc->damage.extent.maxy);
         }
-#endif
-        /* TODO stub */
+
+        /* FIXME: Looks like aligning on a tile is not enough, but
+         * aligning on twice the tile size seems to works. We don't
+         * know exactly what happens here but this deserves extra
+         * investigation to figure it out.
+         */
+        batch->minx = batch->minx & ~((MALI_TILE_LENGTH * 2) - 1);
+        batch->miny = batch->miny & ~((MALI_TILE_LENGTH * 2) - 1);
+        batch->maxx = MIN2(ALIGN_POT(batch->maxx, MALI_TILE_LENGTH * 2),
+                           rsrc->base.width0);
+        batch->maxy = MIN2(ALIGN_POT(batch->maxy, MALI_TILE_LENGTH * 2),
+                           rsrc->base.height0);
+
+        struct pipe_scissor_state damage;
+        struct pipe_box rects[4];
+
+        /* Clamp the damage box to the rendering area. */
+        damage.minx = MAX2(batch->minx, rsrc->damage.biggest_rect.x);
+        damage.miny = MAX2(batch->miny, rsrc->damage.biggest_rect.y);
+        damage.maxx = MIN2(batch->maxx,
+                           rsrc->damage.biggest_rect.x +
+                           rsrc->damage.biggest_rect.width);
+        damage.maxy = MIN2(batch->maxy,
+                           rsrc->damage.biggest_rect.y +
+                           rsrc->damage.biggest_rect.height);
+
+        /* One damage rectangle means we can end up with at most 4 reload
+         * regions:
+         * 1: left region, only exists if damage.x > 0
+         * 2: right region, only exists if damage.x + damage.width < fb->width
+         * 3: top region, only exists if damage.y > 0. The intersection with
+         *    the left and right regions are dropped
+         * 4: bottom region, only exists if damage.y + damage.height < fb->height.
+         *    The intersection with the left and right regions are dropped
+         *
+         *                    ____________________________
+         *                    |       |     3     |      |
+         *                    |       |___________|      |
+         *                    |       |   damage  |      |
+         *                    |   1   |    rect   |   2  |
+         *                    |       |___________|      |
+         *                    |       |     4     |      |
+         *                    |_______|___________|______|
+         */
+        u_box_2d(batch->minx, batch->miny, damage.minx - batch->minx,
+                 batch->maxy - batch->miny, &rects[0]);
+        u_box_2d(damage.maxx, batch->miny, batch->maxx - damage.maxx,
+                 batch->maxy - batch->miny, &rects[1]);
+        u_box_2d(damage.minx, batch->miny, damage.maxx - damage.minx,
+                 damage.miny - batch->miny, &rects[2]);
+        u_box_2d(damage.minx, damage.maxy, damage.maxx - damage.minx,
+                 batch->maxy - damage.maxy, &rects[3]);
+
+        for (unsigned i = 0; i < 4; i++) {
+                /* Width and height are always >= 0 even if width is declared as a
+                 * signed integer: u_box_2d() helper takes unsigned args and
+                 * panfrost_set_damage_region() is taking care of clamping
+                 * negative values.
+                 */
+                if (!rects[i].width || !rects[i].height)
+                        continue;
+
+                /* Blit the wallpaper in */
+                panfrost_blit_wallpaper(batch->ctx, &rects[i]);
+        }
+        batch->ctx->wallpaper_batch = NULL;
+}
+
+static int
+panfrost_batch_submit_ioctl(struct panfrost_batch *batch,
+                            mali_ptr first_job_desc,
+                            uint32_t reqs)
+{
+        struct panfrost_context *ctx = batch->ctx;
+        struct pipe_context *gallium = (struct pipe_context *) ctx;
+        struct panfrost_screen *screen = pan_screen(gallium->screen);
+        struct drm_panfrost_submit submit = {0,};
+        uint32_t *bo_handles;
+        int ret;
+
+        submit.in_syncs = (u64) (uintptr_t) &ctx->out_sync;
+        submit.in_sync_count = 1;
+
+        submit.out_sync = ctx->out_sync;
+
+        submit.jc = first_job_desc;
+        submit.requirements = reqs;
+
+        bo_handles = calloc(batch->bos->entries, sizeof(*bo_handles));
+        assert(bo_handles);
+
+        set_foreach(batch->bos, entry) {
+                struct panfrost_bo *bo = (struct panfrost_bo *)entry->key;
+                assert(bo->gem_handle > 0);
+                bo_handles[submit.bo_handle_count++] = bo->gem_handle;
+        }
+
+        submit.bo_handles = (u64) (uintptr_t) bo_handles;
+        ret = drmIoctl(screen->fd, DRM_IOCTL_PANFROST_SUBMIT, &submit);
+        free(bo_handles);
+        if (ret) {
+                fprintf(stderr, "Error submitting: %m\n");
+                return errno;
+        }
+
+        /* Trace the job if we're doing that */
+        if (pan_debug & PAN_DBG_TRACE) {
+                /* Wait so we can get errors reported back */
+                drmSyncobjWait(screen->fd, &ctx->out_sync, 1, INT64_MAX, 0, NULL);
+                pandecode_jc(submit.jc, FALSE);
+        }
+
+        return 0;
+}
+
+static int
+panfrost_batch_submit_jobs(struct panfrost_batch *batch)
+{
+        bool has_draws = batch->first_job.gpu;
+        int ret = 0;
+
+        if (has_draws) {
+                ret = panfrost_batch_submit_ioctl(batch, batch->first_job.gpu, 0);
+                assert(!ret);
+        }
+
+        if (batch->first_tiler.gpu || batch->clear) {
+                mali_ptr fragjob = panfrost_fragment_job(batch, has_draws);
+
+                ret = panfrost_batch_submit_ioctl(batch, fragjob, PANFROST_JD_REQ_FS);
+                assert(!ret);
+        }
+
+        return ret;
 }
 
 void
-panfrost_job_submit(struct panfrost_context *ctx, struct panfrost_job *job)
+panfrost_batch_submit(struct panfrost_batch *batch)
 {
+        assert(batch);
+
+        struct panfrost_context *ctx = batch->ctx;
         int ret;
 
-        panfrost_scoreboard_link_batch(job);
+        /* Nothing to do! */
+        if (!batch->last_job.gpu && !batch->clear)
+                goto out;
 
-        bool has_draws = job->last_job.gpu;
-        bool is_scanout = panfrost_is_scanout(ctx);
+        if (!batch->clear && batch->last_tiler.gpu)
+                panfrost_batch_draw_wallpaper(batch);
 
-        if (!job)
-                return;
+        panfrost_scoreboard_link_batch(batch);
 
-        ret = panfrost_drm_submit_vs_fs_job(ctx, has_draws, is_scanout);
+        ret = panfrost_batch_submit_jobs(batch);
 
         if (ret)
-                fprintf(stderr, "panfrost_job_submit failed: %d\n", ret);
+                fprintf(stderr, "panfrost_batch_submit failed: %d\n", ret);
+
+out:
+        /* If this is the bound batch, the panfrost_context parameters are
+         * relevant so submitting it invalidates those paramaters, but if it's
+         * not bound, the context parameters are for some other batch so we
+         * can't invalidate them.
+         */
+        if (ctx->batch == batch)
+                panfrost_invalidate_frame(ctx);
 
         /* The job has been submitted, let's invalidate the current FBO job
          * cache.
 	 */
-        assert(!ctx->job || job == ctx->job);
-        ctx->job = NULL;
+        assert(!ctx->batch || batch == ctx->batch);
+        ctx->batch = NULL;
 
-        /* Remove the job from the ctx->jobs set so that future
-         * panfrost_get_job() calls don't see it.
-         * We must reset the job key to avoid removing another valid entry when
-         * the job is freed.
+        /* We always stall the pipeline for correct results since pipelined
+         * rendering is quite broken right now (to be fixed by the panfrost_job
+         * refactor, just take the perf hit for correctness)
          */
-        _mesa_hash_table_remove_key(ctx->jobs, &job->key);
-        memset(&job->key, 0, sizeof(job->key));
+        drmSyncobjWait(pan_screen(ctx->base.screen)->fd, &ctx->out_sync, 1,
+                       INT64_MAX, 0, NULL);
+        panfrost_free_batch(batch);
 }
 
 void
-panfrost_job_set_requirements(struct panfrost_context *ctx,
-                              struct panfrost_job *job)
+panfrost_batch_set_requirements(struct panfrost_batch *batch)
 {
+        struct panfrost_context *ctx = batch->ctx;
+
         if (ctx->rasterizer && ctx->rasterizer->base.multisample)
-                job->requirements |= PAN_REQ_MSAA;
+                batch->requirements |= PAN_REQ_MSAA;
 
         if (ctx->depth_stencil && ctx->depth_stencil->depth.writemask)
-                job->requirements |= PAN_REQ_DEPTH_WRITE;
+                batch->requirements |= PAN_REQ_DEPTH_WRITE;
 }
 
 /* Helper to smear a 32-bit color across 128-bit components */
@@ -337,96 +552,102 @@ pan_pack_color(uint32_t *packed, const union pipe_color_union *color, enum pipe_
 }
 
 void
-panfrost_job_clear(struct panfrost_context *ctx,
-                   struct panfrost_job *job,
-                   unsigned buffers,
-                   const union pipe_color_union *color,
-                   double depth, unsigned stencil)
-
+panfrost_batch_clear(struct panfrost_batch *batch,
+                     unsigned buffers,
+                     const union pipe_color_union *color,
+                     double depth, unsigned stencil)
 {
+        struct panfrost_context *ctx = batch->ctx;
+
         if (buffers & PIPE_CLEAR_COLOR) {
                 for (unsigned i = 0; i < PIPE_MAX_COLOR_BUFS; ++i) {
                         if (!(buffers & (PIPE_CLEAR_COLOR0 << i)))
                                 continue;
 
                         enum pipe_format format = ctx->pipe_framebuffer.cbufs[i]->format;
-                        pan_pack_color(job->clear_color[i], color, format);
+                        pan_pack_color(batch->clear_color[i], color, format);
                 }
         }
 
         if (buffers & PIPE_CLEAR_DEPTH) {
-                job->clear_depth = depth;
+                batch->clear_depth = depth;
         }
 
         if (buffers & PIPE_CLEAR_STENCIL) {
-                job->clear_stencil = stencil;
+                batch->clear_stencil = stencil;
         }
 
-        job->clear |= buffers;
+        batch->clear |= buffers;
 
         /* Clearing affects the entire framebuffer (by definition -- this is
          * the Gallium clear callback, which clears the whole framebuffer. If
          * the scissor test were enabled from the GL side, the state tracker
          * would emit a quad instead and we wouldn't go down this code path) */
 
-        panfrost_job_union_scissor(job, 0, 0,
-                                   ctx->pipe_framebuffer.width,
-                                   ctx->pipe_framebuffer.height);
-}
-
-void
-panfrost_flush_jobs_reading_resource(struct panfrost_context *panfrost,
-                                     struct pipe_resource *prsc)
-{
-        struct panfrost_resource *rsc = pan_resource(prsc);
-
-        panfrost_flush_jobs_writing_resource(panfrost, prsc);
-
-        hash_table_foreach(panfrost->jobs, entry) {
-                struct panfrost_job *job = entry->data;
-
-                if (_mesa_set_search(job->bos, rsc->bo)) {
-                        printf("TODO: submit job for flush\n");
-                        //panfrost_job_submit(panfrost, job);
-                        continue;
-                }
-        }
+        panfrost_batch_union_scissor(batch, 0, 0,
+                                     ctx->pipe_framebuffer.width,
+                                     ctx->pipe_framebuffer.height);
 }
 
 static bool
-panfrost_job_compare(const void *a, const void *b)
+panfrost_batch_compare(const void *a, const void *b)
 {
-        return memcmp(a, b, sizeof(struct panfrost_job_key)) == 0;
+        return util_framebuffer_state_equal(a, b);
 }
 
 static uint32_t
-panfrost_job_hash(const void *key)
+panfrost_batch_hash(const void *key)
 {
-        return _mesa_hash_data(key, sizeof(struct panfrost_job_key));
+        return _mesa_hash_data(key, sizeof(struct pipe_framebuffer_state));
 }
 
 /* Given a new bounding rectangle (scissor), let the job cover the union of the
  * new and old bounding rectangles */
 
 void
-panfrost_job_union_scissor(struct panfrost_job *job,
-                           unsigned minx, unsigned miny,
-                           unsigned maxx, unsigned maxy)
+panfrost_batch_union_scissor(struct panfrost_batch *batch,
+                             unsigned minx, unsigned miny,
+                             unsigned maxx, unsigned maxy)
 {
-        job->minx = MIN2(job->minx, minx);
-        job->miny = MIN2(job->miny, miny);
-        job->maxx = MAX2(job->maxx, maxx);
-        job->maxy = MAX2(job->maxy, maxy);
+        batch->minx = MIN2(batch->minx, minx);
+        batch->miny = MIN2(batch->miny, miny);
+        batch->maxx = MAX2(batch->maxx, maxx);
+        batch->maxy = MAX2(batch->maxy, maxy);
 }
 
 void
-panfrost_job_init(struct panfrost_context *ctx)
+panfrost_batch_intersection_scissor(struct panfrost_batch *batch,
+                                  unsigned minx, unsigned miny,
+                                  unsigned maxx, unsigned maxy)
 {
-        ctx->jobs = _mesa_hash_table_create(ctx,
-                                            panfrost_job_hash,
-                                            panfrost_job_compare);
+        batch->minx = MAX2(batch->minx, minx);
+        batch->miny = MAX2(batch->miny, miny);
+        batch->maxx = MIN2(batch->maxx, maxx);
+        batch->maxy = MIN2(batch->maxy, maxy);
+}
 
-        ctx->write_jobs = _mesa_hash_table_create(ctx,
-                          _mesa_hash_pointer,
-                          _mesa_key_pointer_equal);
+/* Are we currently rendering to the screen (rather than an FBO)? */
+
+bool
+panfrost_batch_is_scanout(struct panfrost_batch *batch)
+{
+        /* If there is no color buffer, it's an FBO */
+        if (batch->key.nr_cbufs != 1)
+                return false;
+
+        /* If we're too early that no framebuffer was sent, it's scanout */
+        if (!batch->key.cbufs[0])
+                return true;
+
+        return batch->key.cbufs[0]->texture->bind & PIPE_BIND_DISPLAY_TARGET ||
+               batch->key.cbufs[0]->texture->bind & PIPE_BIND_SCANOUT ||
+               batch->key.cbufs[0]->texture->bind & PIPE_BIND_SHARED;
+}
+
+void
+panfrost_batch_init(struct panfrost_context *ctx)
+{
+        ctx->batches = _mesa_hash_table_create(ctx,
+                                               panfrost_batch_hash,
+                                               panfrost_batch_compare);
 }

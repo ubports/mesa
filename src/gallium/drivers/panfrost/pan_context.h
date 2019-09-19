@@ -32,6 +32,7 @@
 #include "pan_resource.h"
 #include "pan_job.h"
 #include "pan_blend.h"
+#include "pan_encoder.h"
 
 #include "pipe/p_compiler.h"
 #include "pipe/p_config.h"
@@ -79,13 +80,27 @@ struct panfrost_query {
         unsigned type;
         unsigned index;
 
-        /* Memory for the GPU to writeback the value of the query */
-        struct panfrost_transfer transfer;
+        union {
+                /* For computed queries. 64-bit to prevent overflow */
+                struct {
+                        uint64_t start;
+                        uint64_t end;
+                };
+
+                /* Memory for the GPU to writeback the value of the query */
+                struct panfrost_transfer transfer;
+        };
 };
 
 struct panfrost_fence {
         struct pipe_reference reference;
         int fd;
+};
+
+struct panfrost_streamout {
+        struct pipe_stream_output_target *targets[PIPE_MAX_SO_BUFFERS];
+        uint32_t offsets[PIPE_MAX_SO_BUFFERS];
+        unsigned num_targets;
 };
 
 struct panfrost_context {
@@ -95,25 +110,22 @@ struct panfrost_context {
         /* Compiler context */
         struct midgard_screen compiler;
 
-        /* Bound job and map of panfrost_job_key to jobs */
-        struct panfrost_job *job;
-        struct hash_table *jobs;
+        /* Bound job batch and map of panfrost_batch_key to job batches */
+        struct panfrost_batch *batch;
+        struct hash_table *batches;
 
-        /* panfrost_resource -> panfrost_job */
-        struct hash_table *write_jobs;
+        /* Within a launch_grid call.. */
+        const struct pipe_grid_info *compute_grid;
 
         /* Bit mask for supported PIPE_DRAW for this hardware */
         unsigned draw_modes;
 
         struct pipe_framebuffer_state pipe_framebuffer;
+        struct panfrost_streamout streamout;
 
-        struct panfrost_memory cmdstream_persistent;
-        struct panfrost_memory shaders;
-        struct panfrost_memory scratchpad;
-        struct panfrost_memory tiler_heap;
-        struct panfrost_memory tiler_dummy;
-        struct panfrost_memory depth_stencil_buffer;
-
+        bool active_queries;
+        uint64_t prims_generated;
+        uint64_t tf_prims_generated;
         struct panfrost_query *occlusion_query;
 
         /* Each draw has corresponding vertex and tiler payloads */
@@ -130,12 +142,11 @@ struct panfrost_context {
 
         unsigned vertex_count;
         unsigned instance_count;
+        enum pipe_prim_type active_prim;
 
         /* If instancing is enabled, vertex count padded for instance; if
          * it is disabled, just equal to plain vertex count */
         unsigned padded_count;
-
-        union mali_attr attributes[PIPE_MAX_ATTRIBS];
 
         /* TODO: Multiple uniform buffers (index =/= 0), finer updates? */
 
@@ -167,7 +178,7 @@ struct panfrost_context {
          * errors due to unsupported reucrsion */
 
         struct blitter_context *blitter_wallpaper;
-        struct panfrost_job *wallpaper_batch;
+        struct panfrost_batch *wallpaper_batch;
 
         struct panfrost_blend_state *blend;
 
@@ -209,9 +220,12 @@ struct panfrost_shader_state {
         bool writes_point_size;
         bool reads_point_coord;
         bool reads_face;
+        bool reads_frag_coord;
 
         struct mali_attr_meta varyings[PIPE_MAX_ATTRIBS];
         gl_varying_slot varyings_loc[PIPE_MAX_ATTRIBS];
+        struct pipe_stream_output_info stream_output;
+        uint64_t so_mask;
 
         unsigned sysval_count;
         unsigned sysval[MAX_SYSVAL_COUNT];
@@ -224,6 +238,8 @@ struct panfrost_shader_state {
 
         /* Should we enable helper invocations */
         bool helper_invocations;
+
+        struct panfrost_bo *bo;
 };
 
 /* A collection of varyings (the CSO) */
@@ -275,6 +291,9 @@ struct pipe_context *
 panfrost_create_context(struct pipe_screen *screen, void *priv, unsigned flags);
 
 void
+panfrost_invalidate_frame(struct panfrost_context *ctx);
+
+void
 panfrost_emit_for_draw(struct panfrost_context *ctx, bool with_vertex_data);
 
 struct panfrost_transfer
@@ -289,20 +308,17 @@ panfrost_flush(
         struct pipe_fence_handle **fence,
         unsigned flags);
 
-bool
-panfrost_is_scanout(struct panfrost_context *ctx);
-
-mali_ptr panfrost_sfbd_fragment(struct panfrost_context *ctx, bool has_draws);
-mali_ptr panfrost_mfbd_fragment(struct panfrost_context *ctx, bool has_draws);
+mali_ptr panfrost_sfbd_fragment(struct panfrost_batch *batch, bool has_draws);
+mali_ptr panfrost_mfbd_fragment(struct panfrost_batch *batch, bool has_draws);
 
 struct bifrost_framebuffer
-panfrost_emit_mfbd(struct panfrost_context *ctx, unsigned vertex_count);
+panfrost_emit_mfbd(struct panfrost_batch *batch, unsigned vertex_count);
 
 struct mali_single_framebuffer
-panfrost_emit_sfbd(struct panfrost_context *ctx, unsigned vertex_count);
+panfrost_emit_sfbd(struct panfrost_batch *batch, unsigned vertex_count);
 
 mali_ptr
-panfrost_fragment_job(struct panfrost_context *ctx, bool has_draws);
+panfrost_fragment_job(struct panfrost_batch *batch, bool has_draws);
 
 void
 panfrost_shader_compile(
@@ -311,28 +327,8 @@ panfrost_shader_compile(
                 enum pipe_shader_ir ir_type,
                 const void *ir,
                 gl_shader_stage stage,
-                struct panfrost_shader_state *state);
-
-void
-panfrost_pack_work_groups_compute(
-        struct mali_vertex_tiler_prefix *out,
-        unsigned num_x,
-        unsigned num_y,
-        unsigned num_z,
-        unsigned size_x,
-        unsigned size_y,
-        unsigned size_z);
-
-void
-panfrost_pack_work_groups_fused(
-        struct mali_vertex_tiler_prefix *vertex,
-        struct mali_vertex_tiler_prefix *tiler,
-        unsigned num_x,
-        unsigned num_y,
-        unsigned num_z,
-        unsigned size_x,
-        unsigned size_y,
-        unsigned size_z);
+                struct panfrost_shader_state *state,
+                uint64_t *outputs_written);
 
 /* Instancing */
 
@@ -340,7 +336,7 @@ mali_ptr
 panfrost_vertex_buffer_address(struct panfrost_context *ctx, unsigned i);
 
 void
-panfrost_emit_vertex_data(struct panfrost_job *batch);
+panfrost_emit_vertex_data(struct panfrost_batch *batch);
 
 struct pan_shift_odd {
         unsigned shift;
@@ -360,5 +356,12 @@ pan_expand_shift_odd(struct pan_shift_odd o);
 
 void
 panfrost_compute_context_init(struct pipe_context *pctx);
+
+/* Varyings */
+
+void
+panfrost_emit_varying_descriptor(
+        struct panfrost_context *ctx,
+        unsigned vertex_count);
 
 #endif

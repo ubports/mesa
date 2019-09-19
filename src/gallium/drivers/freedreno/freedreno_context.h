@@ -86,6 +86,9 @@ struct fd_vertex_stateobj {
 
 struct fd_streamout_stateobj {
 	struct pipe_stream_output_target *targets[PIPE_MAX_SO_BUFFERS];
+	/* Bitmask of stream that should be reset. */
+	unsigned reset;
+
 	unsigned num_targets;
 	/* Track offset from vtxcnt for streamout data.  This counter
 	 * is just incremented by # of vertices on each draw until
@@ -327,19 +330,8 @@ struct fd_context {
 	/* compute: */
 	void (*launch_grid)(struct fd_context *ctx, const struct pipe_grid_info *info);
 
-	/* constant emit:  (note currently not used/needed for a2xx) */
-	void (*emit_const)(struct fd_ringbuffer *ring, gl_shader_stage type,
-			uint32_t regid, uint32_t offset, uint32_t sizedwords,
-			const uint32_t *dwords, struct pipe_resource *prsc);
-	/* emit bo addresses as constant: */
-	void (*emit_const_bo)(struct fd_ringbuffer *ring, gl_shader_stage type, boolean write,
-			uint32_t regid, uint32_t num, struct pipe_resource **prscs, uint32_t *offsets);
-
-	/* indirect-branch emit: */
-	void (*emit_ib)(struct fd_ringbuffer *ring, struct fd_ringbuffer *target);
-
 	/* query: */
-	struct fd_query * (*create_query)(struct fd_context *ctx, unsigned query_type);
+	struct fd_query * (*create_query)(struct fd_context *ctx, unsigned query_type, unsigned index);
 	void (*query_prepare)(struct fd_batch *batch, uint32_t num_tiles);
 	void (*query_prepare_tile)(struct fd_batch *batch, uint32_t n,
 			struct fd_ringbuffer *ring);
@@ -347,11 +339,6 @@ struct fd_context {
 
 	/* blitter: */
 	bool (*blit)(struct fd_context *ctx, const struct pipe_blit_info *info);
-
-	/* simple gpu "memcpy": */
-	void (*mem_to_mem)(struct fd_ringbuffer *ring, struct pipe_resource *dst,
-			unsigned dst_off, struct pipe_resource *src, unsigned src_off,
-			unsigned sizedwords);
 
 	/* handling for barriers: */
 	void (*framebuffer_barrier)(struct fd_context *ctx);

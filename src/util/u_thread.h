@@ -35,6 +35,13 @@
 
 #ifdef HAVE_PTHREAD
 #include <signal.h>
+#ifdef PTHREAD_SETAFFINITY_IN_NP_HEADER
+#include <pthread_np.h>
+#endif
+#endif
+
+#ifdef __FreeBSD__
+#define cpu_set_t cpuset_t
 #endif
 
 static inline thrd_t u_thread_create(int (*routine)(void *), void *param)
@@ -62,7 +69,7 @@ static inline thrd_t u_thread_create(int (*routine)(void *), void *param)
 static inline void u_thread_setname( const char *name )
 {
 #if defined(HAVE_PTHREAD)
-#if DETECT_OS_LINUX
+#if DETECT_OS_LINUX || DETECT_OS_CYGWIN
    pthread_setname_np(pthread_self(), name);
 #elif DETECT_OS_FREEBSD || DETECT_OS_OPENBSD
    pthread_set_name_np(pthread_self(), name);

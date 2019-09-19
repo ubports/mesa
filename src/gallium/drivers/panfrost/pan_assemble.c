@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "pan_bo.h"
 #include "pan_context.h"
 
 #include "compiler/nir/nir.h"
@@ -41,8 +42,10 @@ panfrost_shader_compile(
                 enum pipe_shader_ir ir_type,
                 const void *ir,
                 gl_shader_stage stage,
-                struct panfrost_shader_state *state)
+                struct panfrost_shader_state *state,
+                uint64_t *outputs_written)
 {
+        struct panfrost_screen *screen = pan_screen(ctx->base.screen);
         uint8_t *dst;
 
         nir_shader *s;
@@ -80,7 +83,9 @@ panfrost_shader_compile(
          * I bet someone just thought that would be a cute pun. At least,
          * that's how I'd do it. */
 
-        meta->shader = panfrost_upload(&ctx->shaders, dst, size) | program.first_tag;
+        state->bo = panfrost_bo_create(screen, size, PAN_BO_EXECUTE);
+        memcpy(state->bo->cpu, dst, size);
+        meta->shader = state->bo->gpu | program.first_tag;
 
         util_dynarray_fini(&program.compiled);
 
@@ -115,6 +120,9 @@ panfrost_shader_compile(
         state->reads_point_coord = false;
         state->helper_invocations = s->info.fs.needs_helper_invocations;
 
+        if (outputs_written)
+                *outputs_written = s->info.outputs_written;
+
         /* Separate as primary uniform count is truncated */
         state->uniform_count = program.uniform_count;
 
@@ -138,28 +146,25 @@ panfrost_shader_compile(
                 /* Check for special cases, otherwise assume general varying */
 
                 if (location == VARYING_SLOT_POS) {
-                        v.index = 1;
-                        v.format = MALI_VARYING_POS;
+                        if (stage == MESA_SHADER_FRAGMENT)
+                                state->reads_frag_coord = true;
+                        else
+                                v.format = MALI_VARYING_POS;
                 } else if (location == VARYING_SLOT_PSIZ) {
-                        v.index = 2;
                         v.format = MALI_R16F;
                         v.swizzle = default_vec1_swizzle;
 
                         state->writes_point_size = true;
                 } else if (location == VARYING_SLOT_PNTC) {
-                        v.index = 3;
                         v.format = MALI_RG16F;
                         v.swizzle = default_vec2_swizzle;
 
                         state->reads_point_coord = true;
                 } else if (location == VARYING_SLOT_FACE) {
-                        v.index = 4;
                         v.format = MALI_R32I;
                         v.swizzle = default_vec1_swizzle;
 
                         state->reads_face = true;
-                } else {
-                        v.index = 0;
                 }
 
                 state->varyings[i] = v;

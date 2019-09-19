@@ -41,11 +41,23 @@
 #include "util/u_transfer_helper.h"
 #include "util/u_gen_mipmap.h"
 
+#include "pan_bo.h"
 #include "pan_context.h"
 #include "pan_screen.h"
 #include "pan_resource.h"
 #include "pan_util.h"
 #include "pan_tiling.h"
+
+static void
+panfrost_resource_reset_damage(struct panfrost_resource *pres)
+{
+        /* We set the damage extent to the full resource size but keep the
+         * damage box empty so that the FB content is reloaded by default.
+         */
+        memset(&pres->damage, 0, sizeof(pres->damage));
+        pres->damage.extent.maxx = pres->base.width0;
+        pres->damage.extent.maxy = pres->base.height0;
+}
 
 static struct pipe_resource *
 panfrost_resource_from_handle(struct pipe_screen *pscreen,
@@ -70,9 +82,10 @@ panfrost_resource_from_handle(struct pipe_screen *pscreen,
         pipe_reference_init(&prsc->reference, 1);
         prsc->screen = pscreen;
 
-        rsc->bo = panfrost_drm_import_bo(screen, whandle->handle);
+        rsc->bo = panfrost_bo_import(screen, whandle->handle);
         rsc->slices[0].stride = whandle->stride;
         rsc->slices[0].initialized = true;
+        panfrost_resource_reset_damage(rsc);
 
         if (screen->ro) {
                 rsc->scanout =
@@ -121,7 +134,7 @@ panfrost_resource_get_handle(struct pipe_screen *pscreen,
 
                         return true;
                 } else {
-                        int fd = panfrost_drm_export_bo(screen, rsrc->bo);
+                        int fd = panfrost_bo_export(rsrc->bo);
 
                         if (fd < 0)
                                 return false;
@@ -400,7 +413,74 @@ panfrost_resource_create_bo(struct panfrost_screen *screen, struct panfrost_reso
 
         /* We create a BO immediately but don't bother mapping, since we don't
          * care to map e.g. FBOs which the CPU probably won't touch */
-        pres->bo = panfrost_drm_create_bo(screen, bo_size, PAN_ALLOCATE_DELAY_MMAP);
+        pres->bo = panfrost_bo_create(screen, bo_size, PAN_BO_DELAY_MMAP);
+}
+
+void
+panfrost_resource_set_damage_region(struct pipe_screen *screen,
+                                    struct pipe_resource *res,
+                                    unsigned int nrects,
+                                    const struct pipe_box *rects)
+{
+        struct panfrost_resource *pres = pan_resource(res);
+        struct pipe_box *damage_rect = &pres->damage.biggest_rect;
+        struct pipe_scissor_state *damage_extent = &pres->damage.extent;
+        unsigned int i;
+
+	if (!nrects) {
+		panfrost_resource_reset_damage(pres);
+		return;
+	}
+
+        /* We keep track of 2 different things here:
+         * 1 the damage extent: the quad including all damage regions. Will be
+         *   used restrict the rendering area
+         * 2 the biggest damage rectangle: when there are more than one damage
+         *   rect we keep the biggest one and will generate 4 wallpaper quads
+         *   out of it (see panfrost_draw_wallpaper() for more details). We
+         *   might want to do something smarter at some point.
+         *
+         *                _________________________________
+         *                |                               |
+         *                |    _________________________  |
+         *                |   | rect1|         _________| |
+         *                |   |______|_____   | rect 3: | |
+         *                |   |    | rect2 |  | biggest | |
+         *                |   |    |_______|  |  rect   | |
+         *                |   |_______________|_________| |
+         *                |        damage extent          |
+         *                |_______________________________|
+         *                            resource
+         */
+        memset(&pres->damage, 0, sizeof(pres->damage));
+        damage_extent->minx = 0xffff;
+        damage_extent->miny = 0xffff;
+        for (i = 0; i < nrects; i++) {
+                int x = rects[i].x, w = rects[i].width, h = rects[i].height;
+                int y = res->height0 - (rects[i].y + h);
+
+                /* Clamp x,y,w,h to prevent negative values. */
+                if (x < 0) {
+                        h += x;
+                        x = 0;
+                }
+                if (y < 0) {
+                        w += y;
+                        y = 0;
+                }
+                w = MAX2(w, 0);
+                h = MAX2(h, 0);
+
+                if (damage_rect->width * damage_rect->height < w * h)
+                       u_box_2d(x, y, w, h, damage_rect);
+
+                damage_extent->minx = MIN2(damage_extent->minx, x);
+                damage_extent->miny = MIN2(damage_extent->miny, y);
+                damage_extent->maxx = MAX2(damage_extent->maxx,
+                                           MIN2(x + w, res->width0));
+                damage_extent->maxy = MAX2(damage_extent->maxy,
+                                           MIN2(y + h, res->height0));
+        }
 }
 
 static struct pipe_resource *
@@ -437,26 +517,9 @@ panfrost_resource_create(struct pipe_screen *screen,
         util_range_init(&so->valid_buffer_range);
 
         panfrost_resource_create_bo(pscreen, so);
+        panfrost_resource_reset_damage(so);
+
         return (struct pipe_resource *)so;
-}
-
-void
-panfrost_bo_reference(struct panfrost_bo *bo)
-{
-        if (bo)
-                pipe_reference(NULL, &bo->reference);
-}
-
-void
-panfrost_bo_unreference(struct pipe_screen *screen, struct panfrost_bo *bo)
-{
-        if (!bo)
-                return;
-
-        /* When the reference count goes to zero, we need to cleanup */
-
-        if (pipe_reference(&bo->reference, NULL))
-                panfrost_drm_release_bo(pan_screen(screen), bo, true);
 }
 
 static void
@@ -470,7 +533,7 @@ panfrost_resource_destroy(struct pipe_screen *screen,
                 renderonly_scanout_destroy(rsrc->scanout, pscreen->ro);
 
         if (rsrc->bo)
-                panfrost_bo_unreference(screen, rsrc->bo);
+                panfrost_bo_unreference(rsrc->bo);
 
         util_range_destroy(&rsrc->valid_buffer_range);
         ralloc_free(rsrc);
@@ -498,11 +561,7 @@ panfrost_transfer_map(struct pipe_context *pctx,
         *out_transfer = &transfer->base;
 
         /* If we haven't already mmaped, now's the time */
-
-        if (!bo->cpu) {
-                struct panfrost_screen *screen = pan_screen(pctx->screen);
-                panfrost_drm_mmap_bo(screen, bo);
-        }
+        panfrost_bo_mmap(bo);
 
         /* Check if we're bound for rendering and this is a read pixels. If so,
          * we need to flush */
@@ -689,8 +748,8 @@ panfrost_generate_mipmap(
          * reorder-type optimizations in place. But for now prioritize
          * correctness. */
 
-        struct panfrost_job *job = panfrost_get_job_for_fbo(ctx);
-        bool has_draws = job->last_job.gpu;
+        struct panfrost_batch *batch = panfrost_get_batch_for_fbo(ctx);
+        bool has_draws = batch->last_job.gpu;
 
         if (has_draws)
                 panfrost_flush(pctx, NULL, PIPE_FLUSH_END_OF_FRAME);
@@ -780,8 +839,8 @@ panfrost_resource_hint_layout(
 
         /* If we grew in size, reallocate the BO */
         if (new_size > rsrc->bo->size) {
-                panfrost_drm_release_bo(screen, rsrc->bo, true);
-                rsrc->bo = panfrost_drm_create_bo(screen, new_size, PAN_ALLOCATE_DELAY_MMAP);
+                panfrost_bo_unreference(rsrc->bo);
+                rsrc->bo = panfrost_bo_create(screen, new_size, PAN_BO_DELAY_MMAP);
         }
 }
 
@@ -827,9 +886,7 @@ void
 panfrost_resource_context_init(struct pipe_context *pctx)
 {
         pctx->transfer_map = u_transfer_helper_transfer_map;
-        pctx->transfer_flush_region = u_transfer_helper_transfer_flush_region;
         pctx->transfer_unmap = u_transfer_helper_transfer_unmap;
-        pctx->buffer_subdata = u_default_buffer_subdata;
         pctx->create_surface = panfrost_create_surface;
         pctx->surface_destroy = panfrost_surface_destroy;
         pctx->resource_copy_region = util_resource_copy_region;

@@ -441,8 +441,9 @@ static void schedule_insert_ready_list(sched_ctx *ctx,
 
    struct list_head *insert_pos = &ctx->ready_list;
    list_for_each_entry(gpir_node, node, &ctx->ready_list, list) {
-      if (insert_node->sched.dist > node->sched.dist ||
-          gpir_op_infos[insert_node->op].schedule_first) {
+      if ((insert_node->sched.dist > node->sched.dist ||
+          gpir_op_infos[insert_node->op].schedule_first) &&
+          !gpir_op_infos[node->op].schedule_first) {
          insert_pos = &node->list;
          break;
       }
@@ -1154,7 +1155,8 @@ static bool can_use_complex(gpir_node *node)
          continue;
 
       gpir_node *succ = dep->succ;
-      if (succ->type != gpir_node_type_alu)
+      if (succ->type != gpir_node_type_alu ||
+          !succ->sched.instr)
          continue;
 
       /* Note: this must be consistent with gpir_codegen_{mul,add}_slot{0,1}
@@ -1330,10 +1332,14 @@ static void place_move(sched_ctx *ctx, gpir_node *node)
 /* For next-max nodes, not every node can be offloaded to a move in the
  * complex slot. If we run out of non-complex slots, then such nodes cannot
  * have moves placed for them. There should always be sufficient
- * complex-capable nodes so that this isn't a problem.
+ * complex-capable nodes so that this isn't a problem. We also disallow moves
+ * for schedule_first nodes here.
  */
 static bool can_place_move(sched_ctx *ctx, gpir_node *node)
 {
+   if (gpir_op_infos[node->op].schedule_first)
+      return false;
+
    if (!node->sched.next_max_node)
       return true;
 
@@ -1570,6 +1576,29 @@ static bool schedule_block(gpir_block *block)
    return true;
 }
 
+static void add_fake_dep(gpir_node *node, gpir_node *dep_node,
+                         gpir_node *last_written[])
+{
+      gpir_node_foreach_pred(node, dep) {
+         if (dep->type == GPIR_DEP_INPUT) {
+            int index = dep->pred->value_reg;
+            if (index >= 0 && last_written[index]) {
+               gpir_node_add_dep(last_written[index], dep_node,
+                                 GPIR_DEP_WRITE_AFTER_READ);
+            }
+            if (gpir_op_infos[dep->pred->op].schedule_first) {
+               /* Insert fake dependencies for any schedule_first children on
+                * this node as well. This guarantees that as soon as
+                * "dep_node" is ready to schedule, all of its schedule_first
+                * children, grandchildren, etc. are ready so that they can be
+                * scheduled as soon as possible.
+                */
+               add_fake_dep(dep->pred, dep_node, last_written);
+            }
+         }
+      }
+}
+
 static void schedule_build_dependency(gpir_block *block)
 {
    gpir_node *last_written[GPIR_VALUE_REG_NUM + GPIR_PHYSICAL_REG_NUM] = {0};
@@ -1623,15 +1652,7 @@ static void schedule_build_dependency(gpir_block *block)
             gpir_node_add_dep(last_written[index], node, GPIR_DEP_WRITE_AFTER_READ);
          }
       } else {
-         gpir_node_foreach_pred(node, dep) {
-            if (dep->type == GPIR_DEP_INPUT) {
-               int index = dep->pred->value_reg;
-               if (index >= 0 && last_written[index]) {
-                  gpir_node_add_dep(last_written[index], node,
-                                    GPIR_DEP_WRITE_AFTER_READ);
-               }
-            }
-         }
+         add_fake_dep(node, node, last_written);
       }
 
       if (node->value_reg >= 0)

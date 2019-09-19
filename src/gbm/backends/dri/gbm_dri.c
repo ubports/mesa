@@ -110,6 +110,18 @@ dri_get_buffers_with_format(__DRIdrawable * driDrawable,
                                    count, out_count, surf->dri_private);
 }
 
+static unsigned
+dri_get_capability(void *loaderPrivate, enum dri_loader_cap cap)
+{
+   /* Note: loaderPrivate is _EGLDisplay* */
+   switch (cap) {
+   case DRI_LOADER_CAP_FP16:
+      return 1;
+   default:
+      return 0;
+   }
+}
+
 static int
 image_get_buffers(__DRIdrawable *driDrawable,
                   unsigned int format,
@@ -207,11 +219,12 @@ static const __DRIimageLookupExtension image_lookup_extension = {
 };
 
 static const __DRIdri2LoaderExtension dri2_loader_extension = {
-   .base = { __DRI_DRI2_LOADER, 3 },
+   .base = { __DRI_DRI2_LOADER, 4 },
 
    .getBuffers              = dri_get_buffers,
    .flushFrontBuffer        = dri_flush_front_buffer,
    .getBuffersWithFormat    = dri_get_buffers_with_format,
+   .getCapability           = dri_get_capability,
 };
 
 static const __DRIimageLoaderExtension image_loader_extension = {
@@ -478,51 +491,75 @@ dri_screen_create_sw(struct gbm_dri_device *dri)
 static const struct gbm_dri_visual gbm_dri_visuals_table[] = {
    {
      GBM_FORMAT_R8, __DRI_IMAGE_FORMAT_R8,
-     { 0x000000ff, 0x00000000, 0x00000000, 0x00000000 },
+     { 0, -1, -1, -1 },
+     { 8, 0, 0, 0 },
    },
    {
      GBM_FORMAT_GR88, __DRI_IMAGE_FORMAT_GR88,
-     { 0x000000ff, 0x0000ff00, 0x00000000, 0x00000000 },
+     { 0, 8, -1, -1 },
+     { 8, 8, 0, 0 },
    },
    {
      GBM_FORMAT_ARGB1555, __DRI_IMAGE_FORMAT_ARGB1555,
-     { 0x00007c00, 0x000003e0, 0x0000001f, 0x00008000 },
+     { 10, 5, 0, 11 },
+     { 5, 5, 5, 1 },
    },
    {
      GBM_FORMAT_RGB565, __DRI_IMAGE_FORMAT_RGB565,
-     { 0x0000f800, 0x000007e0, 0x0000001f, 0x00000000 },
+     { 11, 5, 0, -1 },
+     { 5, 6, 5, 0 },
    },
    {
      GBM_FORMAT_XRGB8888, __DRI_IMAGE_FORMAT_XRGB8888,
-     { 0x00ff0000, 0x0000ff00, 0x000000ff, 0x00000000 },
+     { 16, 8, 0, -1 },
+     { 8, 8, 8, 0 },
    },
    {
      GBM_FORMAT_ARGB8888, __DRI_IMAGE_FORMAT_ARGB8888,
-     { 0x00ff0000, 0x0000ff00, 0x000000ff, 0xff000000 },
+     { 16, 8, 0, 24 },
+     { 8, 8, 8, 8 },
    },
    {
      GBM_FORMAT_XBGR8888, __DRI_IMAGE_FORMAT_XBGR8888,
-     { 0x000000ff, 0x0000ff00, 0x00ff0000, 0x00000000 },
+     { 0, 8, 16, -1 },
+     { 8, 8, 8, 0 },
    },
    {
      GBM_FORMAT_ABGR8888, __DRI_IMAGE_FORMAT_ABGR8888,
-     { 0x000000ff, 0x0000ff00, 0x00ff0000, 0xff000000 },
+     { 0, 8, 16, 24 },
+     { 8, 8, 8, 8 },
    },
    {
      GBM_FORMAT_XRGB2101010, __DRI_IMAGE_FORMAT_XRGB2101010,
-     { 0x3ff00000, 0x000ffc00, 0x000003ff, 0x00000000 },
+     { 20, 10, 0, -1 },
+     { 10, 10, 10, 0 },
    },
    {
      GBM_FORMAT_ARGB2101010, __DRI_IMAGE_FORMAT_ARGB2101010,
-     { 0x3ff00000, 0x000ffc00, 0x000003ff, 0xc0000000 },
+     { 20, 10, 0, 30 },
+     { 10, 10, 10, 2 },
    },
    {
      GBM_FORMAT_XBGR2101010, __DRI_IMAGE_FORMAT_XBGR2101010,
-     { 0x000003ff, 0x000ffc00, 0x3ff00000, 0x00000000 },
+     { 0, 10, 20, -1 },
+     { 10, 10, 10, 0 },
    },
    {
      GBM_FORMAT_ABGR2101010, __DRI_IMAGE_FORMAT_ABGR2101010,
-     { 0x000003ff, 0x000ffc00, 0x3ff00000, 0xc0000000 },
+     { 0, 10, 20, 30 },
+     { 10, 10, 10, 2 },
+   },
+   {
+     GBM_FORMAT_XBGR16161616F, __DRI_IMAGE_FORMAT_XBGR16161616F,
+     { 0, 16, 32, -1 },
+     { 16, 16, 16, 0 },
+     true,
+   },
+   {
+     GBM_FORMAT_ABGR16161616F, __DRI_IMAGE_FORMAT_ABGR16161616F,
+     { 0, 16, 32, 48 },
+     { 16, 16, 16, 16 },
+     true,
    },
 };
 

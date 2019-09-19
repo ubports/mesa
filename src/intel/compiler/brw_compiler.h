@@ -654,6 +654,9 @@ struct brw_stage_prog_data {
 
    unsigned program_size;
 
+   /** Does this program pull from any UBO or other constant buffers? */
+   bool has_ubo_pull;
+
    /**
     * Register where the thread expects to find input data from the URB
     * (typically uniforms, followed by vertex or fragment attributes).
@@ -879,6 +882,7 @@ struct brw_cs_prog_data {
    unsigned local_size[3];
    unsigned simd_size;
    unsigned threads;
+   unsigned slm_size;
    bool uses_barrier;
    bool uses_num_work_groups;
 
@@ -1240,6 +1244,15 @@ DEFINE_PROG_DATA_DOWNCAST(clip)
 DEFINE_PROG_DATA_DOWNCAST(sf)
 #undef DEFINE_PROG_DATA_DOWNCAST
 
+struct brw_compile_stats {
+   uint32_t dispatch_width; /**< 0 for vec4 */
+   uint32_t instructions;
+   uint32_t loops;
+   uint32_t cycles;
+   uint32_t spills;
+   uint32_t fills;
+};
+
 /** @} */
 
 struct brw_compiler *
@@ -1278,6 +1291,7 @@ brw_compile_vs(const struct brw_compiler *compiler, void *log_data,
                struct brw_vs_prog_data *prog_data,
                struct nir_shader *shader,
                int shader_time_index,
+               struct brw_compile_stats *stats,
                char **error_str);
 
 /**
@@ -1293,6 +1307,7 @@ brw_compile_tcs(const struct brw_compiler *compiler,
                 struct brw_tcs_prog_data *prog_data,
                 struct nir_shader *nir,
                 int shader_time_index,
+                struct brw_compile_stats *stats,
                 char **error_str);
 
 /**
@@ -1307,8 +1322,8 @@ brw_compile_tes(const struct brw_compiler *compiler, void *log_data,
                 const struct brw_vue_map *input_vue_map,
                 struct brw_tes_prog_data *prog_data,
                 struct nir_shader *shader,
-                struct gl_program *prog,
                 int shader_time_index,
+                struct brw_compile_stats *stats,
                 char **error_str);
 
 /**
@@ -1324,6 +1339,7 @@ brw_compile_gs(const struct brw_compiler *compiler, void *log_data,
                struct nir_shader *shader,
                struct gl_program *prog,
                int shader_time_index,
+               struct brw_compile_stats *stats,
                char **error_str);
 
 /**
@@ -1369,12 +1385,12 @@ brw_compile_fs(const struct brw_compiler *compiler, void *log_data,
                const struct brw_wm_prog_key *key,
                struct brw_wm_prog_data *prog_data,
                struct nir_shader *shader,
-               struct gl_program *prog,
                int shader_time_index8,
                int shader_time_index16,
                int shader_time_index32,
                bool allow_spilling,
                bool use_rep_send, struct brw_vue_map *vue_map,
+               struct brw_compile_stats *stats, /**< Array of three stats */
                char **error_str);
 
 /**
@@ -1389,6 +1405,7 @@ brw_compile_cs(const struct brw_compiler *compiler, void *log_data,
                struct brw_cs_prog_data *prog_data,
                const struct nir_shader *shader,
                int shader_time_index,
+               struct brw_compile_stats *stats,
                char **error_str);
 
 void brw_debug_key_recompile(const struct brw_compiler *c, void *log,

@@ -42,15 +42,6 @@
 #include <iostream>
 
 //////////////////////////////////////////////////////////////////////////
-/// @brief Helper macro to generate a bitmask
-static INLINE uint32_t GenMask(uint32_t numBits)
-{
-    SWR_ASSERT(
-        numBits <= (sizeof(uint32_t) * 8), "Too many bits (%d) for %s", numBits, __FUNCTION__);
-    return ((1U << numBits) - 1);
-}
-
-//////////////////////////////////////////////////////////////////////////
 /// @brief FE handler for SwrSync.
 /// @param pContext - pointer to SWR context.
 /// @param pDC - pointer to draw context.
@@ -400,7 +391,7 @@ uint32_t GetNumVerts(PRIMITIVE_TOPOLOGY mode, uint32_t numPrims)
 /// @brief Return number of verts per primitive.
 /// @param topology - topology
 /// @param includeAdjVerts - include adjacent verts in primitive vertices
-INLINE uint32_t NumVertsPerPrim(PRIMITIVE_TOPOLOGY topology, bool includeAdjVerts)
+uint32_t NumVertsPerPrim(PRIMITIVE_TOPOLOGY topology, bool includeAdjVerts)
 {
     uint32_t numVerts = 0;
     switch (topology)
@@ -587,7 +578,7 @@ static void StreamOut(
         {
             bool  nullTileAccessed = false;
             void* pWriteOffset     = pDC->pContext->pfnTranslateGfxptrForWrite(
-                GetPrivateState(pDC), soContext.pBuffer[i]->pWriteOffset, &nullTileAccessed);
+                GetPrivateState(pDC), soContext.pBuffer[i]->pWriteOffset, &nullTileAccessed, pWorkerData);
             *((uint32_t*)pWriteOffset) = soContext.pBuffer[i]->streamOffset * sizeof(uint32_t);
         }
 
@@ -860,21 +851,13 @@ static void GeometryShaderStage(DRAW_CONTEXT* pDC,
     gsContext.inputVertStride = pState->inputVertStride;
     for (uint32_t slot = 0; slot < pState->numInputAttribs; ++slot)
     {
-        uint32_t srcAttribSlot = pState->srcVertexAttribOffset + slot;
-        uint32_t attribSlot    = pState->vertexAttribOffset + slot;
-        pa.Assemble(srcAttribSlot, attrib);
+        uint32_t attribOffset = slot + pState->vertexAttribOffset;
+        pa.Assemble(attribOffset, attrib);
 
         for (uint32_t i = 0; i < numVertsPerPrim; ++i)
         {
-            gsContext.pVerts[attribSlot + pState->inputVertStride * i] = attrib[i];
+            gsContext.pVerts[attribOffset + pState->inputVertStride * i] = attrib[i];
         }
-    }
-
-    // assemble position
-    pa.Assemble(VERTEX_POSITION_SLOT, attrib);
-    for (uint32_t i = 0; i < numVertsPerPrim; ++i)
-    {
-        gsContext.pVerts[VERTEX_POSITION_SLOT + pState->inputVertStride * i] = attrib[i];
     }
 
     // record valid prims from the frontend to avoid over binning the newly generated
@@ -882,7 +865,7 @@ static void GeometryShaderStage(DRAW_CONTEXT* pDC,
 #if USE_SIMD16_FRONTEND
     uint32_t numInputPrims = numPrims_simd8;
 #else
-    uint32_t          numInputPrims = pa.NumPrims();
+    uint32_t numInputPrims = pa.NumPrims();
 #endif
 
     for (uint32_t instance = 0; instance < pState->instanceCount; ++instance)

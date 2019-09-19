@@ -61,7 +61,7 @@ void *si_get_blitter_vs(struct si_context *sctx, enum blitter_attrib_type type,
 		return NULL;
 
 	/* Tell the shader to load VS inputs from SGPRs: */
-	ureg_property(ureg, TGSI_PROPERTY_VS_BLIT_SGPRS, vs_blit_property);
+	ureg_property(ureg, TGSI_PROPERTY_VS_BLIT_SGPRS_AMD, vs_blit_property);
 	ureg_property(ureg, TGSI_PROPERTY_VS_WINDOW_SPACE_POSITION, true);
 
 	/* This is just a pass-through shader with 1-3 MOV instructions. */
@@ -105,9 +105,9 @@ void *si_create_fixed_func_tcs(struct si_context *sctx)
 		return NULL;
 
 	outer = ureg_DECL_system_value(ureg,
-				       TGSI_SEMANTIC_DEFAULT_TESSOUTER_SI, 0);
+				       TGSI_SEMANTIC_TESS_DEFAULT_OUTER_LEVEL, 0);
 	inner = ureg_DECL_system_value(ureg,
-				       TGSI_SEMANTIC_DEFAULT_TESSINNER_SI, 0);
+				       TGSI_SEMANTIC_TESS_DEFAULT_INNER_LEVEL, 0);
 
 	tessouter = ureg_DECL_output(ureg, TGSI_SEMANTIC_TESSOUTER, 0);
 	tessinner = ureg_DECL_output(ureg, TGSI_SEMANTIC_TESSINNER, 0);
@@ -152,8 +152,8 @@ void *si_create_dma_compute_shader(struct pipe_context *ctx,
 
 	struct ureg_src value;
 	if (!is_copy) {
-		ureg_property(ureg, TGSI_PROPERTY_CS_USER_DATA_DWORDS, inst_dwords[0]);
-		value = ureg_DECL_system_value(ureg, TGSI_SEMANTIC_CS_USER_DATA, 0);
+		ureg_property(ureg, TGSI_PROPERTY_CS_USER_DATA_COMPONENTS_AMD, inst_dwords[0]);
+		value = ureg_DECL_system_value(ureg, TGSI_SEMANTIC_CS_USER_DATA_AMD, 0);
 	}
 
 	struct ureg_src tid = ureg_DECL_system_value(ureg, TGSI_SEMANTIC_THREAD_ID, 0);

@@ -140,6 +140,7 @@ struct COMPUTE_DESC
     uint32_t threadGroupCountX;
     uint32_t threadGroupCountY;
     uint32_t threadGroupCountZ;
+    bool     enableThreadDispatch;
 };
 
 typedef void (*PFN_WORK_FUNC)(DRAW_CONTEXT* pDC,
@@ -330,12 +331,17 @@ OSALIGNLINE(struct) API_STATE
 
 class MacroTileMgr;
 class DispatchQueue;
+class HOTTILE;
 
 struct RenderOutputBuffers
 {
     uint8_t* pColor[SWR_NUM_RENDERTARGETS];
     uint8_t* pDepth;
     uint8_t* pStencil;
+
+    HOTTILE* pColorHotTile[SWR_NUM_RENDERTARGETS];
+    HOTTILE* pDepthHotTile;
+    HOTTILE* pStencilHotTile;
 };
 
 // Plane equation A/B/C coeffs used to evaluate I/J barycentric coords
@@ -529,6 +535,8 @@ struct SWR_CONTEXT
     PFN_TRANSLATE_GFXPTR_FOR_READ  pfnTranslateGfxptrForRead;
     PFN_TRANSLATE_GFXPTR_FOR_WRITE pfnTranslateGfxptrForWrite;
     PFN_MAKE_GFXPTR                pfnMakeGfxPtr;
+    PFN_CREATE_MEMORY_CONTEXT      pfnCreateMemoryContext;
+    PFN_DESTROY_MEMORY_CONTEXT     pfnDestroyMemoryContext;
     PFN_UPDATE_SO_WRITE_OFFSET     pfnUpdateSoWriteOffset;
     PFN_UPDATE_STATS               pfnUpdateStats;
     PFN_UPDATE_STATS_FE            pfnUpdateStatsFE;
@@ -551,6 +559,9 @@ struct SWR_CONTEXT
 
     // ArchRast thread contexts.
     HANDLE* pArContext;
+
+    // handle to external memory for worker datas to create memory contexts
+    HANDLE hExternalMemory;
 
     BucketManager *pBucketMgr;
 };

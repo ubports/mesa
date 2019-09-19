@@ -340,6 +340,27 @@ struct blitter_context *util_blitter_create(struct pipe_context *pipe)
    return &ctx->base;
 }
 
+void *util_blitter_get_noop_blend_state(struct blitter_context *blitter)
+{
+   struct blitter_context_priv *ctx = (struct blitter_context_priv*)blitter;
+
+   return ctx->blend[0][0];
+}
+
+void *util_blitter_get_noop_dsa_state(struct blitter_context *blitter)
+{
+   struct blitter_context_priv *ctx = (struct blitter_context_priv*)blitter;
+
+   return ctx->dsa_keep_depth_stencil;
+}
+
+void *util_blitter_get_discard_rasterizer_state(struct blitter_context *blitter)
+{
+   struct blitter_context_priv *ctx = (struct blitter_context_priv*)blitter;
+
+   return ctx->rs_discard_state;
+}
+
 static void bind_vs_pos_only(struct blitter_context_priv *ctx,
                              unsigned num_so_channels)
 {

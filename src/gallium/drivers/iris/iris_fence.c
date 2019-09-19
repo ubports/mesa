@@ -184,6 +184,8 @@ iris_fence_flush(struct pipe_context *ctx,
       iris_syncpt_reference(screen, &fence->syncpt[fence->count++],
                             ice->batches[b].last_syncpt);
    }
+
+   iris_fence_reference(ctx->screen, out_fence, NULL);
    *out_fence = fence;
 }
 
@@ -206,24 +208,25 @@ iris_fence_await(struct pipe_context *ctx,
 #define MSEC_PER_SEC (1000)
 
 static uint64_t
+gettime_ns(void)
+{
+   struct timespec current;
+   clock_gettime(CLOCK_MONOTONIC, &current);
+   return (uint64_t)current.tv_sec * NSEC_PER_SEC + current.tv_nsec;
+}
+
+static uint64_t
 rel2abs(uint64_t timeout)
 {
-   struct timespec ts;
-   uint64_t now;
-
-   if (!timeout)
+   if (timeout == 0)
       return 0;
 
-   if (timeout == PIPE_TIMEOUT_INFINITE)
-      return INT64_MAX;
+   uint64_t current_time = gettime_ns();
+   uint64_t max_timeout = (uint64_t) INT64_MAX - current_time;
 
-   clock_gettime(CLOCK_MONOTONIC, &ts);
-   now = ts.tv_sec * NSEC_PER_SEC + ts.tv_nsec;
+   timeout = MIN2(max_timeout, timeout);
 
-   if (now > INT64_MAX - timeout)
-      return INT64_MAX;
-
-   return now + timeout;
+   return current_time + timeout;
 }
 
 static bool
@@ -244,7 +247,7 @@ iris_fence_finish(struct pipe_screen *p_screen,
    struct drm_syncobj_wait args = {
       .handles = (uintptr_t)handles,
       .count_handles = fence->count,
-      .timeout_nsec = rel2abs(timeout), /* XXX */
+      .timeout_nsec = rel2abs(timeout),
       .flags = DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL
    };
    return gen_ioctl(screen->fd, DRM_IOCTL_SYNCOBJ_WAIT, &args) == 0;

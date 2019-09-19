@@ -54,6 +54,9 @@ struct mir_op_props alu_opcode_props[256] = {
         [midgard_alu_op_ftrunc]          = {"ftrunc", UNITS_ADD},
         [midgard_alu_op_ffloor]		 = {"ffloor", UNITS_ADD},
         [midgard_alu_op_fceil]		 = {"fceil", UNITS_ADD},
+
+        /* Multiplies the X/Y components of the first arg and adds the second
+         * arg. Like other LUTs, it must be scalarized. */
         [midgard_alu_op_ffma]		 = {"ffma", UNIT_VLUT},
 
         /* Though they output a scalar, they need to run on a vector unit
@@ -170,8 +173,8 @@ struct mir_op_props alu_opcode_props[256] = {
 };
 
 const char *load_store_opcode_names[256] = {
-        [midgard_op_st_cubemap_coords] = "st_cubemap_coords",
-        [midgard_op_ld_global_id] = "ld_global_id",
+        [midgard_op_ld_cubemap_coords] = "ld_cubemap_coords",
+        [midgard_op_ld_compute_id] = "ld_compute_id",
         [midgard_op_ldst_perspective_division_z] = "ldst_perspective_division_z",
         [midgard_op_ldst_perspective_division_w] = "ldst_perspective_division_w",
 
@@ -202,12 +205,14 @@ const char *load_store_opcode_names[256] = {
         [midgard_op_ld_vary_32i] = "ld_vary_32i",
         [midgard_op_ld_vary_32u] = "ld_vary_32u",
 
+        [midgard_op_ld_color_buffer_8] = "ld_color_buffer_8",
         [midgard_op_ld_color_buffer_16] = "ld_color_buffer_16",
 
-        [midgard_op_ld_uniform_16] = "ld_uniform_16",
-        [midgard_op_ld_uniform_32] = "ld_uniform_32",
-        [midgard_op_ld_uniform_32i] = "ld_uniform_32i",
-        [midgard_op_ld_color_buffer_8] = "ld_color_buffer_8",
+        [midgard_op_ld_ubo_char] = "ld_ubo_char",
+        [midgard_op_ld_ubo_char2] = "ld_ubo_char2",
+        [midgard_op_ld_ubo_char4] = "ld_ubo_char4",
+        [midgard_op_ld_ubo_short4] = "ld_ubo_short4",
+        [midgard_op_ld_ubo_int4] = "ld_ubo_int4",
 
         [midgard_op_st_char] = "st_char",
         [midgard_op_st_char2] = "st_char2",

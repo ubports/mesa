@@ -145,7 +145,6 @@ enum {
 
 	/* Shader compiler options the shader cache should be aware of: */
 	DBG_FS_CORRECT_DERIVS_AFTER_KILL,
-	DBG_UNSAFE_MATH,
 	DBG_SI_SCHED,
 	DBG_GISEL,
 	DBG_W32_GE,
@@ -176,6 +175,7 @@ enum {
 
 	/* 3D engine options: */
 	DBG_NO_GFX,
+	DBG_NO_NGG,
 	DBG_ALWAYS_PD,
 	DBG_PD,
 	DBG_NO_PD,
@@ -288,7 +288,6 @@ struct si_texture {
 	struct si_resource		buffer;
 
 	struct radeon_surf		surface;
-	uint64_t			size;
 	struct si_texture		*flushed_depth_texture;
 
 	/* One texture allocation can contain these buffers:
@@ -300,20 +299,14 @@ struct si_texture {
 	 * - displayable DCC buffer (if the DCC buffer is not displayable)
 	 * - DCC retile mapping buffer (if the DCC buffer is not displayable)
 	 */
-	uint64_t			fmask_offset;
-	uint64_t			cmask_offset;
 	uint64_t			cmask_base_address_reg;
 	struct si_resource		*cmask_buffer;
-	uint64_t			dcc_offset; /* 0 = disabled */
-	uint64_t			display_dcc_offset;
-	uint64_t			dcc_retile_map_offset;
 	unsigned			cb_color_info; /* fast clear enable bit */
 	unsigned			color_clear_value[2];
 	unsigned			last_msaa_resolve_target_micro_mode;
 	unsigned			num_level0_transfers;
 
 	/* Depth buffer compression and fast clear. */
-	uint64_t			htile_offset;
 	float				depth_clear_value;
 	uint16_t			dirty_level_mask; /* each bit says if that mipmap is compressed */
 	uint16_t			stencil_dirty_level_mask; /* each bit says if that mipmap is compressed */
@@ -492,19 +485,15 @@ struct si_screen {
 	unsigned			eqaa_force_coverage_samples;
 	unsigned			eqaa_force_z_samples;
 	unsigned			eqaa_force_color_samples;
-	bool				has_clear_state;
-	bool				has_distributed_tess;
 	bool				has_draw_indirect_multi;
 	bool				has_out_of_order_rast;
 	bool				assume_no_z_fights;
 	bool				commutative_blend_add;
-	bool				has_gfx9_scissor_bug;
-	bool				has_msaa_sample_loc_bug;
-	bool				has_ls_vgpr_init_bug;
-	bool				has_dcc_constant_encode;
 	bool				dpbb_allowed;
 	bool				dfsm_allowed;
 	bool				llvm_has_working_vgpr_indexing;
+	bool				use_ngg;
+	bool				use_ngg_streamout;
 
 	struct {
 #define OPT_BOOL(name, dflt, description) bool name:1;
@@ -514,10 +503,7 @@ struct si_screen {
 	/* Whether shaders are monolithic (1-part) or separate (3-part). */
 	bool				use_monolithic_shaders;
 	bool				record_llvm_ir;
-	bool				has_rbplus;     /* if RB+ registers exist */
-	bool				rbplus_allowed; /* if RB+ is allowed */
 	bool				dcc_msaa_allowed;
-	bool				cpdma_prefetch_writes_memory;
 
 	struct slab_parent_pool		pool_transfers;
 
@@ -886,6 +872,9 @@ struct si_context {
 	void (*emit_cache_flush)(struct si_context *ctx);
 
 	struct blitter_context		*blitter;
+	void				*noop_blend;
+	void				*noop_dsa;
+	void				*discard_rasterizer_state;
 	void				*custom_dsa_flush;
 	void				*custom_blend_resolve;
 	void				*custom_blend_fmask_decompress;
@@ -1082,6 +1071,8 @@ struct si_context {
 	struct si_resource	*scratch_buffer;
 	unsigned		scratch_waves;
 	unsigned		spi_tmpring_size;
+	unsigned		max_seen_scratch_bytes_per_wave;
+	unsigned		max_seen_compute_scratch_bytes_per_wave;
 
 	struct si_resource	*compute_scratch_buffer;
 
@@ -1552,7 +1543,7 @@ si_texture_reference(struct si_texture **ptr, struct si_texture *res)
 static inline bool
 vi_dcc_enabled(struct si_texture *tex, unsigned level)
 {
-	return tex->dcc_offset && level < tex->surface.num_dcc_levels;
+	return tex->surface.dcc_offset && level < tex->surface.num_dcc_levels;
 }
 
 static inline unsigned
@@ -1749,13 +1740,13 @@ si_htile_enabled(struct si_texture *tex, unsigned level, unsigned zs_mask)
 	if (zs_mask == PIPE_MASK_S && tex->htile_stencil_disabled)
 		return false;
 
-	return tex->htile_offset && level == 0;
+	return tex->surface.htile_offset && level == 0;
 }
 
 static inline bool
 vi_tc_compat_htile_enabled(struct si_texture *tex, unsigned level, unsigned zs_mask)
 {
-	assert(!tex->tc_compatible_htile || tex->htile_offset);
+	assert(!tex->tc_compatible_htile || tex->surface.htile_offset);
 	return tex->tc_compatible_htile && si_htile_enabled(tex, level, zs_mask);
 }
 
@@ -1908,7 +1899,8 @@ static inline unsigned si_get_wave_size(struct si_screen *sscreen,
 		return sscreen->compute_wave_size;
 	else if (shader_type == PIPE_SHADER_FRAGMENT)
 		return sscreen->ps_wave_size;
-	else if ((shader_type == PIPE_SHADER_TESS_EVAL && es && !ngg) ||
+	else if ((shader_type == PIPE_SHADER_VERTEX && es && !ngg) ||
+		 (shader_type == PIPE_SHADER_TESS_EVAL && es && !ngg) ||
 		 (shader_type == PIPE_SHADER_GEOMETRY && !ngg)) /* legacy GS only supports Wave64 */
 		return 64;
 	else

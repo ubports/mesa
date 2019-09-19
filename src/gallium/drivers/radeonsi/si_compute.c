@@ -128,7 +128,7 @@ static void si_create_compute_state_async(void *job, int thread_index)
 
 		si_nir_opts(sel->nir);
 		si_nir_scan_shader(sel->nir, &sel->info);
-		si_lower_nir(sel, sscreen->compute_wave_size);
+		si_lower_nir(sel);
 	}
 
 	/* Store the declared LDS size into tgsi_shader_info for the shader
@@ -145,9 +145,9 @@ static void si_create_compute_state_async(void *job, int thread_index)
 		sel->info.uses_block_size &&
 		sel->info.properties[TGSI_PROPERTY_CS_FIXED_BLOCK_WIDTH] == 0;
 	program->num_cs_user_data_dwords =
-		sel->info.properties[TGSI_PROPERTY_CS_USER_DATA_DWORDS];
+		sel->info.properties[TGSI_PROPERTY_CS_USER_DATA_COMPONENTS_AMD];
 
-	void *ir_binary = si_get_ir_binary(sel);
+	void *ir_binary = si_get_ir_binary(sel, false, false);
 
 	/* Try to load the shader from the shader cache. */
 	mtx_lock(&sscreen->shader_cache_mutex);
@@ -232,7 +232,7 @@ static void *si_create_compute_state(
 	program->input_size = cso->req_input_mem;
 
 	if (cso->ir_type != PIPE_SHADER_IR_NATIVE) {
-		if (sscreen->options.always_nir &&
+		if (sscreen->options.enable_nir &&
 		    cso->ir_type == PIPE_SHADER_IR_TGSI) {
 			program->ir_type = PIPE_SHADER_IR_NIR;
 			sel->nir = tgsi_to_nir(cso->prog, ctx->screen);
@@ -318,7 +318,22 @@ static void si_set_global_binding(
 	struct si_context *sctx = (struct si_context*)ctx;
 	struct si_compute *program = sctx->cs_shader_state.program;
 
-	assert(first + n <= MAX_GLOBAL_BUFFERS);
+	if (first + n > program->max_global_buffers) {
+		unsigned old_max = program->max_global_buffers;
+		program->max_global_buffers = first + n;
+		program->global_buffers =
+			realloc(program->global_buffers,
+				program->max_global_buffers *
+				sizeof(program->global_buffers[0]));
+		if (!program->global_buffers) {
+			fprintf(stderr, "radeonsi: failed to allocate compute global_buffers\n");
+			return;
+		}
+
+		memset(&program->global_buffers[old_max], 0,
+		       (program->max_global_buffers - old_max) *
+		       sizeof(program->global_buffers[0]));
+	}
 
 	if (!resources) {
 		for (i = 0; i < n; i++) {
@@ -407,7 +422,8 @@ static bool si_setup_compute_scratch_buffer(struct si_context *sctx,
 			si_aligned_buffer_create(&sctx->screen->b,
 						 SI_RESOURCE_FLAG_UNMAPPABLE,
 						 PIPE_USAGE_DEFAULT,
-						 scratch_needed, 256);
+						 scratch_needed,
+						 sctx->screen->info.pte_fragment_size);
 
 		if (!sctx->compute_scratch_buffer)
 			return false;
@@ -516,9 +532,13 @@ static bool si_switch_compute_shader(struct si_context *sctx,
 	COMPUTE_DBG(sctx->screen, "COMPUTE_PGM_RSRC1: 0x%08x "
 		"COMPUTE_PGM_RSRC2: 0x%08x\n", config->rsrc1, config->rsrc2);
 
+	sctx->max_seen_compute_scratch_bytes_per_wave =
+		MAX2(sctx->max_seen_compute_scratch_bytes_per_wave,
+		     config->scratch_bytes_per_wave);
+
 	radeon_set_sh_reg(cs, R_00B860_COMPUTE_TMPRING_SIZE,
 	          S_00B860_WAVES(sctx->scratch_waves)
-	             | S_00B860_WAVESIZE(config->scratch_bytes_per_wave >> 10));
+	             | S_00B860_WAVESIZE(sctx->max_seen_compute_scratch_bytes_per_wave >> 10));
 
 	sctx->cs_shader_state.emitted_program = program;
 	sctx->cs_shader_state.offset = offset;
@@ -912,7 +932,7 @@ static void si_launch_grid(
 		return;
 
 	/* Global buffers */
-	for (i = 0; i < MAX_GLOBAL_BUFFERS; i++) {
+	for (i = 0; i < program->max_global_buffers; i++) {
 		struct si_resource *buffer =
 			si_resource(program->global_buffers[i]);
 		if (!buffer) {
@@ -951,6 +971,10 @@ void si_destroy_compute(struct si_compute *program)
 				    &sel->ready);
 		util_queue_fence_destroy(&sel->ready);
 	}
+
+	for (unsigned i = 0; i < program->max_global_buffers; i++)
+		pipe_resource_reference(&program->global_buffers[i], NULL);
+	FREE(program->global_buffers);
 
 	si_shader_destroy(&program->shader);
 	ralloc_free(program->sel.nir);

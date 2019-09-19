@@ -143,7 +143,8 @@ GENXML_XML_FILES = \
 	genxml/gen8.xml \
 	genxml/gen9.xml \
 	genxml/gen10.xml \
-	genxml/gen11.xml
+	genxml/gen11.xml \
+	genxml/gen12.xml
 
 GENXML_GENERATED_PACK_FILES = \
 	genxml/gen4_pack.h \
@@ -155,7 +156,8 @@ GENXML_GENERATED_PACK_FILES = \
 	genxml/gen8_pack.h \
 	genxml/gen9_pack.h \
 	genxml/gen10_pack.h \
-	genxml/gen11_pack.h
+	genxml/gen11_pack.h \
+	genxml/gen12_pack.h
 
 GENXML_GENERATED_FILES = \
 	$(GENXML_GENERATED_PACK_FILES) \
@@ -214,6 +216,10 @@ ISL_GEN10_FILES = \
 	isl/isl_surface_state.c
 
 ISL_GEN11_FILES = \
+	isl/isl_emit_depth_stencil.c \
+	isl/isl_surface_state.c
+
+ISL_GEN12_FILES = \
 	isl/isl_emit_depth_stencil.c \
 	isl/isl_surface_state.c
 
@@ -313,6 +319,10 @@ VULKAN_GEN10_FILES := \
 	$(VULKAN_GENX_FILES)
 
 VULKAN_GEN11_FILES := \
+	vulkan/gen8_cmd_buffer.c \
+	$(VULKAN_GENX_FILES)
+
+VULKAN_GEN12_FILES := \
 	vulkan/gen8_cmd_buffer.c \
 	$(VULKAN_GENX_FILES)
 

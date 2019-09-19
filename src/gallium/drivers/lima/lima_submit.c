@@ -128,6 +128,7 @@ bool lima_submit_start(struct lima_submit *submit, void *frame, uint32_t size)
       .bos = VOID2U64(util_dynarray_begin(&submit->gem_bos)),
       .frame = VOID2U64(frame),
       .frame_size = size,
+      .out_sync = submit->out_sync,
    };
 
    if (submit->in_sync_fd >= 0) {
@@ -155,6 +156,8 @@ bool lima_submit_start(struct lima_submit *submit, void *frame, uint32_t size)
 bool lima_submit_wait(struct lima_submit *submit, uint64_t timeout_ns)
 {
    int64_t abs_timeout = os_time_get_absolute_timeout(timeout_ns);
+   if (abs_timeout == OS_TIMEOUT_INFINITE)
+      abs_timeout = INT64_MAX;
 
    return !drmSyncobjWait(submit->screen->fd, &submit->out_sync, 1, abs_timeout, 0, NULL);
 }

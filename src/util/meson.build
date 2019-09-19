@@ -23,6 +23,8 @@ inc_util = include_directories('.')
 subdir('xmlpool')
 
 files_mesa_util = files(
+  'anon_file.h',
+  'anon_file.c',
   'bigmath.h',
   'bitscan.c',
   'bitscan.h',
@@ -36,6 +38,8 @@ files_mesa_util = files(
   'debug.h',
   'disk_cache.c',
   'disk_cache.h',
+  'double.c',
+  'double.h',
   'fast_idiv_by_const.c',
   'fast_idiv_by_const.h',
   'format_r11g11b10f.h',
@@ -76,6 +80,8 @@ files_mesa_util = files(
   'simple_mtx.h',
   'slab.c',
   'slab.h',
+  'softfloat.c',
+  'softfloat.h',
   'string_buffer.c',
   'string_buffer.h',
   'strndup.h',
@@ -132,11 +138,23 @@ format_srgb = custom_target(
   capture : true,
 )
 
+deps_for_libmesa_util = [
+  dep_zlib,
+  dep_clock,
+  dep_thread,
+  dep_atomic,
+  dep_m,
+]
+
+if with_platform_android
+  deps_for_libmesa_util += dep_android
+endif
+
 _libmesa_util = static_library(
   'mesa_util',
   [files_mesa_util, format_srgb],
   include_directories : inc_common,
-  dependencies : [dep_zlib, dep_clock, dep_thread, dep_atomic, dep_m],
+  dependencies : deps_for_libmesa_util,
   c_args : [c_msvc_compat_args, c_vis_args],
   build_by_default : false
 )

@@ -279,9 +279,10 @@ LLVMValueRef si_llvm_bound_index(struct si_shader_context *ctx,
 void si_llvm_context_init(struct si_shader_context *ctx,
 			  struct si_screen *sscreen,
 			  struct ac_llvm_compiler *compiler,
-			  unsigned wave_size);
-void si_llvm_context_set_tgsi(struct si_shader_context *ctx,
-			      struct si_shader *shader);
+			  unsigned wave_size,
+			  unsigned ballot_mask_bits);
+void si_llvm_context_set_ir(struct si_shader_context *ctx,
+			    struct si_shader *shader);
 
 void si_llvm_create_func(struct si_shader_context *ctx,
 			 const char *name,
@@ -341,7 +342,7 @@ LLVMValueRef si_get_bounded_indirect_index(struct si_shader_context *ctx,
 					   int rel_index, unsigned num);
 LLVMValueRef si_get_sample_id(struct si_shader_context *ctx);
 
-void si_shader_context_init_alu(struct lp_build_tgsi_context *bld_base);
+void si_shader_context_init_alu(struct si_shader_context *ctx);
 void si_shader_context_init_mem(struct si_shader_context *ctx);
 
 LLVMValueRef si_load_sampler_desc(struct si_shader_context *ctx,

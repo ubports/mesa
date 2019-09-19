@@ -194,10 +194,68 @@ fs_visitor::emit_interpolation_setup_gen4()
     */
    this->wpos_w = vgrf(glsl_type::float_type);
    abld.emit(FS_OPCODE_LINTERP, wpos_w, delta_xy,
-             interp_reg(VARYING_SLOT_POS, 3));
+             component(interp_reg(VARYING_SLOT_POS, 3), 0));
    /* Compute the pixel 1/W value from wpos.w. */
    this->pixel_w = vgrf(glsl_type::float_type);
    abld.emit(SHADER_OPCODE_RCP, this->pixel_w, wpos_w);
+}
+
+static unsigned
+brw_rnd_mode_from_nir(unsigned mode, unsigned *mask)
+{
+   unsigned brw_mode = 0;
+   *mask = 0;
+
+   if ((FLOAT_CONTROLS_ROUNDING_MODE_RTZ_FP16 |
+        FLOAT_CONTROLS_ROUNDING_MODE_RTZ_FP32 |
+        FLOAT_CONTROLS_ROUNDING_MODE_RTZ_FP64) &
+       mode) {
+      brw_mode |= BRW_RND_MODE_RTZ << BRW_CR0_RND_MODE_SHIFT;
+      *mask |= BRW_CR0_RND_MODE_MASK;
+   }
+   if ((FLOAT_CONTROLS_ROUNDING_MODE_RTE_FP16 |
+        FLOAT_CONTROLS_ROUNDING_MODE_RTE_FP32 |
+        FLOAT_CONTROLS_ROUNDING_MODE_RTE_FP64) &
+       mode) {
+      brw_mode |= BRW_RND_MODE_RTNE << BRW_CR0_RND_MODE_SHIFT;
+      *mask |= BRW_CR0_RND_MODE_MASK;
+   }
+   if (mode & FLOAT_CONTROLS_DENORM_PRESERVE_FP16) {
+      brw_mode |= BRW_CR0_FP16_DENORM_PRESERVE;
+      *mask |= BRW_CR0_FP16_DENORM_PRESERVE;
+   }
+   if (mode & FLOAT_CONTROLS_DENORM_PRESERVE_FP32) {
+      brw_mode |= BRW_CR0_FP32_DENORM_PRESERVE;
+      *mask |= BRW_CR0_FP32_DENORM_PRESERVE;
+   }
+   if (mode & FLOAT_CONTROLS_DENORM_PRESERVE_FP64) {
+      brw_mode |= BRW_CR0_FP64_DENORM_PRESERVE;
+      *mask |= BRW_CR0_FP64_DENORM_PRESERVE;
+   }
+   if (mode & FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP16)
+      *mask |= BRW_CR0_FP16_DENORM_PRESERVE;
+   if (mode & FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP32)
+      *mask |= BRW_CR0_FP32_DENORM_PRESERVE;
+   if (mode & FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP64)
+      *mask |= BRW_CR0_FP64_DENORM_PRESERVE;
+   if (mode == FLOAT_CONTROLS_DEFAULT_FLOAT_CONTROL_MODE)
+      *mask |= BRW_CR0_FP_MODE_MASK;
+
+   return brw_mode;
+}
+
+void
+fs_visitor::emit_shader_float_controls_execution_mode()
+{
+   unsigned execution_mode = this->nir->info.float_controls_execution_mode;
+   if (execution_mode == FLOAT_CONTROLS_DEFAULT_FLOAT_CONTROL_MODE)
+      return;
+
+   fs_builder abld = bld.annotate("shader floats control execution mode");
+   unsigned mask = 0;
+   unsigned mode = brw_rnd_mode_from_nir(execution_mode, &mask);
+   abld.emit(SHADER_OPCODE_FLOAT_CONTROL_MODE, bld.null_reg_ud(),
+             brw_imm_d(mode), brw_imm_d(mask));
 }
 
 /** Emits the interpolation for the varying inputs. */
@@ -890,13 +948,12 @@ fs_visitor::fs_visitor(const struct brw_compiler *compiler, void *log_data,
                        void *mem_ctx,
                        const brw_base_prog_key *key,
                        struct brw_stage_prog_data *prog_data,
-                       struct gl_program *prog,
                        const nir_shader *shader,
                        unsigned dispatch_width,
                        int shader_time_index,
                        const struct brw_vue_map *input_vue_map)
    : backend_shader(compiler, log_data, mem_ctx, shader, prog_data),
-     key(key), gs_compile(NULL), prog_data(prog_data), prog(prog),
+     key(key), gs_compile(NULL), prog_data(prog_data),
      input_vue_map(input_vue_map),
      dispatch_width(dispatch_width),
      shader_time_index(shader_time_index),
@@ -914,7 +971,7 @@ fs_visitor::fs_visitor(const struct brw_compiler *compiler, void *log_data,
    : backend_shader(compiler, log_data, mem_ctx, shader,
                     &prog_data->base.base),
      key(&c->key.base), gs_compile(c),
-     prog_data(&prog_data->base.base), prog(NULL),
+     prog_data(&prog_data->base.base),
      dispatch_width(8),
      shader_time_index(shader_time_index),
      bld(fs_builder(this, dispatch_width).at_end())

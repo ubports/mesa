@@ -51,9 +51,6 @@
 #include <time.h>
 
 #include "errno.h"
-#ifndef ETIME
-#define ETIME ETIMEDOUT
-#endif
 #include "common/gen_clflush.h"
 #include "dev/gen_debug.h"
 #include "common/gen_gem.h"
@@ -173,10 +170,27 @@ key_uint_equal(const void *a, const void *b)
 }
 
 static struct iris_bo *
-hash_find_bo(struct hash_table *ht, unsigned int key)
+find_and_ref_external_bo(struct hash_table *ht, unsigned int key)
 {
    struct hash_entry *entry = _mesa_hash_table_search(ht, &key);
-   return entry ? (struct iris_bo *) entry->data : NULL;
+   struct iris_bo *bo = entry ? entry->data : NULL;
+
+   if (bo) {
+      assert(bo->external);
+      assert(!bo->reusable);
+
+      /* Being non-reusable, the BO cannot be in the cache lists, but it
+       * may be in the zombie list if it had reached zero references, but
+       * we hadn't yet closed it...and then reimported the same BO.  If it
+       * is, then remove it since it's now been resurrected.
+       */
+      if (bo->head.prev || bo->head.next)
+         list_del(&bo->head);
+
+      iris_bo_reference(bo);
+   }
+
+   return bo;
 }
 
 /**
@@ -628,11 +642,9 @@ iris_bo_gem_create_from_name(struct iris_bufmgr *bufmgr,
     * provides a sufficiently fast match.
     */
    mtx_lock(&bufmgr->lock);
-   bo = hash_find_bo(bufmgr->name_table, handle);
-   if (bo) {
-      iris_bo_reference(bo);
+   bo = find_and_ref_external_bo(bufmgr->name_table, handle);
+   if (bo)
       goto out;
-   }
 
    struct drm_gem_open open_arg = { .name = handle };
    int ret = gen_ioctl(bufmgr->fd, DRM_IOCTL_GEM_OPEN, &open_arg);
@@ -646,11 +658,9 @@ iris_bo_gem_create_from_name(struct iris_bufmgr *bufmgr,
     * object from the kernel before by looking through the list
     * again for a matching gem_handle
     */
-   bo = hash_find_bo(bufmgr->handle_table, open_arg.handle);
-   if (bo) {
-      iris_bo_reference(bo);
+   bo = find_and_ref_external_bo(bufmgr->handle_table, open_arg.handle);
+   if (bo)
       goto out;
-   }
 
    bo = bo_calloc();
    if (!bo)
@@ -697,6 +707,18 @@ bo_close(struct iris_bo *bo)
 {
    struct iris_bufmgr *bufmgr = bo->bufmgr;
 
+   if (bo->external) {
+      struct hash_entry *entry;
+
+      if (bo->global_name) {
+         entry = _mesa_hash_table_search(bufmgr->name_table, &bo->global_name);
+         _mesa_hash_table_remove(bufmgr->name_table, entry);
+      }
+
+      entry = _mesa_hash_table_search(bufmgr->handle_table, &bo->gem_handle);
+      _mesa_hash_table_remove(bufmgr->handle_table, entry);
+   }
+
    /* Close this object */
    struct drm_gem_close close = { .handle = bo->gem_handle };
    int ret = gen_ioctl(bufmgr->fd, DRM_IOCTL_GEM_CLOSE, &close);
@@ -727,18 +749,6 @@ bo_free(struct iris_bo *bo)
    if (bo->map_gtt) {
       VG_NOACCESS(bo->map_gtt, bo->size);
       munmap(bo->map_gtt, bo->size);
-   }
-
-   if (bo->external) {
-      struct hash_entry *entry;
-
-      if (bo->global_name) {
-         entry = _mesa_hash_table_search(bufmgr->name_table, &bo->global_name);
-         _mesa_hash_table_remove(bufmgr->name_table, entry);
-      }
-
-      entry = _mesa_hash_table_search(bufmgr->handle_table, &bo->gem_handle);
-      _mesa_hash_table_remove(bufmgr->handle_table, entry);
    }
 
    if (bo->idle) {
@@ -1275,11 +1285,9 @@ iris_bo_import_dmabuf(struct iris_bufmgr *bufmgr, int prime_fd)
     * for named buffers, we must not create two bo's pointing at the same
     * kernel object
     */
-   bo = hash_find_bo(bufmgr->handle_table, handle);
-   if (bo) {
-      iris_bo_reference(bo);
+   bo = find_and_ref_external_bo(bufmgr->handle_table, handle);
+   if (bo)
       goto out;
-   }
 
    bo = bo_calloc();
    if (!bo)
@@ -1297,15 +1305,13 @@ iris_bo_import_dmabuf(struct iris_bufmgr *bufmgr, int prime_fd)
       bo->size = ret;
 
    bo->bufmgr = bufmgr;
-
-   bo->gem_handle = handle;
-   _mesa_hash_table_insert(bufmgr->handle_table, &bo->gem_handle, bo);
-
    bo->name = "prime";
    bo->reusable = false;
    bo->external = true;
    bo->kflags = EXEC_OBJECT_SUPPORTS_48B_ADDRESS | EXEC_OBJECT_PINNED;
    bo->gtt_offset = vma_alloc(bufmgr, IRIS_MEMZONE_OTHER, bo->size, 1);
+   bo->gem_handle = handle;
+   _mesa_hash_table_insert(bufmgr->handle_table, &bo->gem_handle, bo);
 
    struct drm_i915_gem_get_tiling get_tiling = { .handle = bo->gem_handle };
    if (gen_ioctl(bufmgr->fd, DRM_IOCTL_I915_GEM_GET_TILING, &get_tiling))
@@ -1331,6 +1337,7 @@ iris_bo_make_external_locked(struct iris_bo *bo)
    if (!bo->external) {
       _mesa_hash_table_insert(bo->bufmgr->handle_table, &bo->gem_handle, bo);
       bo->external = true;
+      bo->reusable = false;
    }
 }
 
@@ -1339,8 +1346,10 @@ iris_bo_make_external(struct iris_bo *bo)
 {
    struct iris_bufmgr *bufmgr = bo->bufmgr;
 
-   if (bo->external)
+   if (bo->external) {
+      assert(!bo->reusable);
       return;
+   }
 
    mtx_lock(&bufmgr->lock);
    iris_bo_make_external_locked(bo);
@@ -1357,8 +1366,6 @@ iris_bo_export_dmabuf(struct iris_bo *bo, int *prime_fd)
    if (drmPrimeHandleToFD(bufmgr->fd, bo->gem_handle,
                           DRM_CLOEXEC, prime_fd) != 0)
       return -errno;
-
-   bo->reusable = false;
 
    return 0;
 }
@@ -1389,8 +1396,6 @@ iris_bo_flink(struct iris_bo *bo, uint32_t *name)
          _mesa_hash_table_insert(bufmgr->name_table, &bo->global_name, bo);
       }
       mtx_unlock(&bufmgr->lock);
-
-      bo->reusable = false;
    }
 
    *name = bo->global_name;
@@ -1562,7 +1567,7 @@ iris_gtt_size(int fd)
  * \param fd File descriptor of the opened DRM device.
  */
 struct iris_bufmgr *
-iris_bufmgr_init(struct gen_device_info *devinfo, int fd)
+iris_bufmgr_init(struct gen_device_info *devinfo, int fd, bool bo_reuse)
 {
    uint64_t gtt_size = iris_gtt_size(fd);
    if (gtt_size <= IRIS_MEMZONE_OTHER_START)
@@ -1591,6 +1596,7 @@ iris_bufmgr_init(struct gen_device_info *devinfo, int fd)
    list_inithead(&bufmgr->zombie_list);
 
    bufmgr->has_llc = devinfo->has_llc;
+   bufmgr->bo_reuse = bo_reuse;
 
    STATIC_ASSERT(IRIS_MEMZONE_SHADER_START == 0ull);
    const uint64_t _4GB = 1ull << 32;
@@ -1613,9 +1619,6 @@ iris_bufmgr_init(struct gen_device_info *devinfo, int fd)
    util_vma_heap_init(&bufmgr->vma_allocator[IRIS_MEMZONE_OTHER],
                       IRIS_MEMZONE_OTHER_START,
                       (gtt_size - _4GB) - IRIS_MEMZONE_OTHER_START);
-
-   // XXX: driconf
-   bufmgr->bo_reuse = env_var_as_boolean("bo_reuse", true);
 
    init_cache_buckets(bufmgr);
 

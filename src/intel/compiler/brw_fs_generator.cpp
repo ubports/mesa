@@ -30,6 +30,7 @@
 #include "brw_eu.h"
 #include "brw_fs.h"
 #include "brw_cfg.h"
+#include "util/mesa-sha1.h"
 
 static enum brw_reg_file
 brw_file_from_reg(fs_reg *reg)
@@ -84,6 +85,8 @@ brw_reg_from_fs_reg(const struct gen_device_info *devinfo, fs_inst *inst,
          const unsigned phys_width = compressed ? inst->exec_size / 2 :
                                      inst->exec_size;
 
+         const unsigned max_hw_width = 16;
+
          /* XXX - The equation above is strictly speaking not correct on
           *       hardware that supports unbalanced GRF writes -- On Gen9+
           *       each decompressed chunk of the instruction may have a
@@ -96,7 +99,7 @@ brw_reg_from_fs_reg(const struct gen_device_info *devinfo, fs_inst *inst,
             brw_reg = brw_vecn_reg(1, brw_file_from_reg(reg), reg->nr, 0);
             brw_reg = stride(brw_reg, reg->stride, 1, 0);
          } else {
-            const unsigned width = MIN2(reg_width, phys_width);
+            const unsigned width = MIN3(reg_width, phys_width, max_hw_width);
             brw_reg = brw_vecn_reg(width, brw_file_from_reg(reg), reg->nr, 0);
             brw_reg = stride(brw_reg, width * reg->stride, width, reg->stride);
          }
@@ -297,8 +300,6 @@ fs_generator::fire_fb_write(fs_inst *inst,
                             struct brw_reg implied_header,
                             GLuint nr)
 {
-   uint32_t msg_control;
-
    struct brw_wm_prog_data *prog_data = brw_wm_prog_data(this->prog_data);
 
    if (devinfo->gen < 6) {
@@ -312,30 +313,7 @@ fs_generator::fire_fb_write(fs_inst *inst,
       brw_pop_insn_state(p);
    }
 
-   if (inst->opcode == FS_OPCODE_REP_FB_WRITE) {
-      assert(inst->group == 0 && inst->exec_size == 16);
-      msg_control = BRW_DATAPORT_RENDER_TARGET_WRITE_SIMD16_SINGLE_SOURCE_REPLICATED;
-
-   } else if (prog_data->dual_src_blend) {
-      assert(inst->exec_size == 8);
-
-      if (inst->group % 16 == 0)
-         msg_control = BRW_DATAPORT_RENDER_TARGET_WRITE_SIMD8_DUAL_SOURCE_SUBSPAN01;
-      else if (inst->group % 16 == 8)
-         msg_control = BRW_DATAPORT_RENDER_TARGET_WRITE_SIMD8_DUAL_SOURCE_SUBSPAN23;
-      else
-         unreachable("Invalid dual-source FB write instruction group");
-
-   } else {
-      assert(inst->group == 0 || (inst->group == 16 && inst->exec_size == 16));
-
-      if (inst->exec_size == 16)
-         msg_control = BRW_DATAPORT_RENDER_TARGET_WRITE_SIMD16_SINGLE_SOURCE;
-      else if (inst->exec_size == 8)
-         msg_control = BRW_DATAPORT_RENDER_TARGET_WRITE_SIMD8_SINGLE_SOURCE_SUBSPAN01;
-      else
-         unreachable("Invalid FB write execution size");
-   }
+   uint32_t msg_control = brw_fb_write_msg_control(inst, prog_data);
 
    /* We assume render targets start at 0, because headerless FB write
     * messages set "Render Target Index" to 0.  Using a different binding
@@ -819,7 +797,7 @@ fs_generator::generate_linterp(fs_inst *inst,
     */
    struct brw_reg delta_x = src[0];
    struct brw_reg delta_y = offset(src[0], inst->exec_size / 8);
-   struct brw_reg interp = stride(src[1], 0, 1, 0);
+   struct brw_reg interp = src[1];
    brw_inst *i[2];
 
    /* nir_lower_interpolation() will do the lowering to MAD instructions for
@@ -1663,7 +1641,8 @@ fs_generator::enable_debug(const char *shader_name)
 }
 
 int
-fs_generator::generate_code(const cfg_t *cfg, int dispatch_width)
+fs_generator::generate_code(const cfg_t *cfg, int dispatch_width,
+                            struct brw_compile_stats *stats)
 {
    /* align to 64 byte boundary. */
    while (p->next_insn_offset % 64)
@@ -2162,8 +2141,17 @@ fs_generator::generate_code(const cfg_t *cfg, int dispatch_width)
          assert(src[2].type == BRW_REGISTER_TYPE_UD);
          const unsigned component = src[1].ud;
          const unsigned cluster_size = src[2].ud;
+         unsigned vstride = cluster_size;
+         unsigned width = cluster_size;
+
+         /* The maximum exec_size is 32, but the maximum width is only 16. */
+         if (inst->exec_size == width) {
+            vstride = 0;
+            width = 1;
+         }
+
          struct brw_reg strided = stride(suboffset(src[0], component),
-                                         cluster_size, cluster_size, 0);
+                                         vstride, width, 0);
          if (type_sz(src[0].type) > 4 &&
              (devinfo->is_cherryview || gen_device_info_is_9lp(devinfo))) {
             /* IVB has an issue (which we found empirically) where it reads
@@ -2241,9 +2229,22 @@ fs_generator::generate_code(const cfg_t *cfg, int dispatch_width)
          brw_DIM(p, dst, retype(src[0], BRW_REGISTER_TYPE_F));
          break;
 
-      case SHADER_OPCODE_RND_MODE:
+      case SHADER_OPCODE_RND_MODE: {
          assert(src[0].file == BRW_IMMEDIATE_VALUE);
-         brw_rounding_mode(p, (brw_rnd_mode) src[0].d);
+         /*
+          * Changes the floating point rounding mode updating the control
+          * register field defined at cr0.0[5-6] bits.
+          */
+         enum brw_rnd_mode mode =
+            (enum brw_rnd_mode) (src[0].d << BRW_CR0_RND_MODE_SHIFT);
+         brw_float_controls_mode(p, mode, BRW_CR0_RND_MODE_MASK);
+      }
+         break;
+
+      case SHADER_OPCODE_FLOAT_CONTROL_MODE:
+         assert(src[0].file == BRW_IMMEDIATE_VALUE);
+         assert(src[1].file == BRW_IMMEDIATE_VALUE);
+         brw_float_controls_mode(p, src[0].d, src[1].d);
          break;
 
       default:
@@ -2290,13 +2291,21 @@ fs_generator::generate_code(const cfg_t *cfg, int dispatch_width)
    int after_size = p->next_insn_offset - start_offset;
 
    if (unlikely(debug_flag)) {
-      fprintf(stderr, "Native code for %s\n"
+      unsigned char sha1[21];
+      char sha1buf[41];
+
+      _mesa_sha1_compute(p->store + start_offset / sizeof(brw_inst),
+                         after_size, sha1);
+      _mesa_sha1_format(sha1buf, sha1);
+
+      fprintf(stderr, "Native code for %s (sha1 %s)\n"
               "SIMD%d shader: %d instructions. %d loops. %u cycles. "
               "%d:%d spills:fills. "
               "scheduled with mode %s. "
               "Promoted %u constants. "
               "Compacted %d to %d bytes (%.0f%%)\n",
-              shader_name, dispatch_width, before_size / 16,
+              shader_name, sha1buf,
+              dispatch_width, before_size / 16,
               loop_count, cfg->cycle_count,
               spill_count, fill_count,
               shader_stats.scheduler_mode,
@@ -2304,7 +2313,12 @@ fs_generator::generate_code(const cfg_t *cfg, int dispatch_width)
               before_size, after_size,
               100.0f * (before_size - after_size) / before_size);
 
-      dump_assembly(p->store, disasm_info);
+      /* overriding the shader makes disasm_info invalid */
+      if (!brw_try_override_assembly(p, start_offset, sha1buf)) {
+         dump_assembly(p->store, disasm_info);
+      } else {
+         fprintf(stderr, "Successfully overrode shader with sha1 %s\n\n", sha1buf);
+      }
    }
    ralloc_free(disasm_info);
    assert(validated);
@@ -2322,6 +2336,14 @@ fs_generator::generate_code(const cfg_t *cfg, int dispatch_width)
                               shader_stats.scheduler_mode,
                               shader_stats.promoted_constants,
                               before_size, after_size);
+   if (stats) {
+      stats->dispatch_width = dispatch_width;
+      stats->instructions = before_size / 16;
+      stats->loops = loop_count;
+      stats->cycles = cfg->cycle_count;
+      stats->spills = spill_count;
+      stats->fills = fill_count;
+   }
 
    return start_offset;
 }

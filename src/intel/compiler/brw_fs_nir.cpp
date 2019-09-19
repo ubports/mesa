@@ -34,6 +34,8 @@ using namespace brw;
 void
 fs_visitor::emit_nir_code()
 {
+   emit_shader_float_controls_execution_mode();
+
    /* emit the arrays used for inputs and outputs - load/store intrinsics will
     * be converted to reads/writes of these arrays
     */
@@ -684,6 +686,16 @@ brw_rnd_mode_from_nir_op (const nir_op op) {
    }
 }
 
+static brw_rnd_mode
+brw_rnd_mode_from_execution_mode(unsigned execution_mode)
+{
+   if (nir_has_any_rounding_mode_rtne(execution_mode))
+      return BRW_RND_MODE_RTNE;
+   if (nir_has_any_rounding_mode_rtz(execution_mode))
+      return BRW_RND_MODE_RTZ;
+   return BRW_RND_MODE_UNSPECIFIED;
+}
+
 fs_reg
 fs_visitor::prepare_alu_destination_and_sources(const fs_builder &bld,
                                                 nir_alu_instr *instr,
@@ -987,6 +999,8 @@ fs_visitor::nir_emit_alu(const fs_builder &bld, nir_alu_instr *instr,
 {
    struct brw_wm_prog_key *fs_key = (struct brw_wm_prog_key *) this->key;
    fs_inst *inst;
+   unsigned execution_mode =
+      bld.shader->nir->info.float_controls_execution_mode;
 
    fs_reg op[4];
    fs_reg result = prepare_alu_destination_and_sources(bld, instr, op, need_dest);
@@ -1046,10 +1060,17 @@ fs_visitor::nir_emit_alu(const fs_builder &bld, nir_alu_instr *instr,
 
    case nir_op_f2f16_rtne:
    case nir_op_f2f16_rtz:
-      bld.emit(SHADER_OPCODE_RND_MODE, bld.null_reg_ud(),
-               brw_imm_d(brw_rnd_mode_from_nir_op(instr->op)));
-      /* fallthrough */
-   case nir_op_f2f16:
+   case nir_op_f2f16: {
+      brw_rnd_mode rnd = BRW_RND_MODE_UNSPECIFIED;
+
+      if (nir_op_f2f16 == instr->op)
+         rnd = brw_rnd_mode_from_execution_mode(execution_mode);
+      else
+         rnd = brw_rnd_mode_from_nir_op(instr->op);
+
+      if (BRW_RND_MODE_UNSPECIFIED != rnd)
+         bld.emit(SHADER_OPCODE_RND_MODE, bld.null_reg_ud(), brw_imm_d(rnd));
+
       /* In theory, it would be better to use BRW_OPCODE_F32TO16. Depending
        * on the HW gen, it is a special hw opcode or just a MOV, and
        * brw_F32TO16 (at brw_eu_emit) would do the work to chose.
@@ -1063,6 +1084,7 @@ fs_visitor::nir_emit_alu(const fs_builder &bld, nir_alu_instr *instr,
       inst = bld.MOV(result, op[0]);
       inst->saturate = instr->dest.saturate;
       break;
+   }
 
    case nir_op_b2i8:
    case nir_op_b2i16:
@@ -1085,7 +1107,6 @@ fs_visitor::nir_emit_alu(const fs_builder &bld, nir_alu_instr *instr,
    case nir_op_f2u64:
    case nir_op_i2i32:
    case nir_op_u2u32:
-   case nir_op_f2f32:
    case nir_op_f2i32:
    case nir_op_f2u32:
    case nir_op_i2f16:
@@ -1132,6 +1153,21 @@ fs_visitor::nir_emit_alu(const fs_builder &bld, nir_alu_instr *instr,
       inst = bld.MOV(result, op[0]);
       if (instr->op == nir_op_fabs)
          inst->saturate = instr->dest.saturate;
+      break;
+
+   case nir_op_f2f32:
+      if (nir_has_any_rounding_mode_enabled(execution_mode)) {
+         brw_rnd_mode rnd =
+            brw_rnd_mode_from_execution_mode(execution_mode);
+         bld.emit(SHADER_OPCODE_RND_MODE, bld.null_reg_ud(),
+                  brw_imm_d(rnd));
+      }
+
+      if (op[0].type == BRW_REGISTER_TYPE_HF)
+         assert(type_sz(result.type) < 8); /* brw_nir_lower_conversions */
+
+      inst = bld.MOV(result, op[0]);
+      inst->saturate = instr->dest.saturate;
       break;
 
    case nir_op_fsign:
@@ -1196,8 +1232,15 @@ fs_visitor::nir_emit_alu(const fs_builder &bld, nir_alu_instr *instr,
       inst->saturate = instr->dest.saturate;
       break;
 
-   case nir_op_iadd:
    case nir_op_fadd:
+      if (nir_has_any_rounding_mode_enabled(execution_mode)) {
+         brw_rnd_mode rnd =
+            brw_rnd_mode_from_execution_mode(execution_mode);
+         bld.emit(SHADER_OPCODE_RND_MODE, bld.null_reg_ud(),
+                  brw_imm_d(rnd));
+      }
+      /* fallthrough */
+   case nir_op_iadd:
       inst = bld.ADD(result, op[0], op[1]);
       inst->saturate = instr->dest.saturate;
       break;
@@ -1213,6 +1256,13 @@ fs_visitor::nir_emit_alu(const fs_builder &bld, nir_alu_instr *instr,
             emit_fsign(bld, instr, result, op, i);
             return;
          }
+      }
+
+      if (nir_has_any_rounding_mode_enabled(execution_mode)) {
+         brw_rnd_mode rnd =
+            brw_rnd_mode_from_execution_mode(execution_mode);
+         bld.emit(SHADER_OPCODE_RND_MODE, bld.null_reg_ud(),
+                  brw_imm_d(rnd));
       }
 
       inst = bld.MUL(result, op[0], op[1]);
@@ -1600,11 +1650,15 @@ fs_visitor::nir_emit_alu(const fs_builder &bld, nir_alu_instr *instr,
    case nir_op_pack_half_2x16:
       unreachable("not reached: should be handled by lower_packing_builtins");
 
+   case nir_op_unpack_half_2x16_split_x_flush_to_zero:
+      assert(FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP16 & execution_mode);
    case nir_op_unpack_half_2x16_split_x:
       inst = bld.emit(BRW_OPCODE_F16TO32, result,
                       subscript(op[0], BRW_REGISTER_TYPE_UW, 0));
       inst->saturate = instr->dest.saturate;
       break;
+   case nir_op_unpack_half_2x16_split_y_flush_to_zero:
+      assert(FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP16 & execution_mode);
    case nir_op_unpack_half_2x16_split_y:
       inst = bld.emit(BRW_OPCODE_F16TO32, result,
                       subscript(op[0], BRW_REGISTER_TYPE_UW, 1));
@@ -1744,6 +1798,13 @@ fs_visitor::nir_emit_alu(const fs_builder &bld, nir_alu_instr *instr,
       break;
 
    case nir_op_ffma:
+      if (nir_has_any_rounding_mode_enabled(execution_mode)) {
+         brw_rnd_mode rnd =
+            brw_rnd_mode_from_execution_mode(execution_mode);
+         bld.emit(SHADER_OPCODE_RND_MODE, bld.null_reg_ud(),
+                  brw_imm_d(rnd));
+      }
+
       inst = bld.MAD(result, op[2], op[1], op[0]);
       inst->saturate = instr->dest.saturate;
       break;
@@ -3632,8 +3693,8 @@ fs_visitor::nir_emit_fs_intrinsic(const fs_builder &bld,
 
       for (unsigned int i = 0; i < instr->num_components; i++) {
          fs_reg interp =
-            interp_reg(nir_intrinsic_base(instr),
-                       nir_intrinsic_component(instr) + i);
+            component(interp_reg(nir_intrinsic_base(instr),
+                                 nir_intrinsic_component(instr) + i), 0);
          interp.type = BRW_REGISTER_TYPE_F;
          dest.type = BRW_REGISTER_TYPE_F;
 
@@ -3652,20 +3713,6 @@ fs_visitor::nir_emit_fs_intrinsic(const fs_builder &bld,
       nir_emit_intrinsic(bld, instr);
       break;
    }
-}
-
-static int
-get_op_for_atomic_add(nir_intrinsic_instr *instr, unsigned src)
-{
-   if (nir_src_is_const(instr->src[src])) {
-      int64_t add_val = nir_src_as_int(instr->src[src]);
-      if (add_val == 1)
-         return BRW_AOP_INC;
-      else if (add_val == -1)
-         return BRW_AOP_DEC;
-   }
-
-   return BRW_AOP_ADD;
 }
 
 void
@@ -3721,43 +3768,21 @@ fs_visitor::nir_emit_cs_intrinsic(const fs_builder &bld,
    }
 
    case nir_intrinsic_shared_atomic_add:
-      nir_emit_shared_atomic(bld, get_op_for_atomic_add(instr, 1), instr);
-      break;
    case nir_intrinsic_shared_atomic_imin:
-      nir_emit_shared_atomic(bld, BRW_AOP_IMIN, instr);
-      break;
    case nir_intrinsic_shared_atomic_umin:
-      nir_emit_shared_atomic(bld, BRW_AOP_UMIN, instr);
-      break;
    case nir_intrinsic_shared_atomic_imax:
-      nir_emit_shared_atomic(bld, BRW_AOP_IMAX, instr);
-      break;
    case nir_intrinsic_shared_atomic_umax:
-      nir_emit_shared_atomic(bld, BRW_AOP_UMAX, instr);
-      break;
    case nir_intrinsic_shared_atomic_and:
-      nir_emit_shared_atomic(bld, BRW_AOP_AND, instr);
-      break;
    case nir_intrinsic_shared_atomic_or:
-      nir_emit_shared_atomic(bld, BRW_AOP_OR, instr);
-      break;
    case nir_intrinsic_shared_atomic_xor:
-      nir_emit_shared_atomic(bld, BRW_AOP_XOR, instr);
-      break;
    case nir_intrinsic_shared_atomic_exchange:
-      nir_emit_shared_atomic(bld, BRW_AOP_MOV, instr);
-      break;
    case nir_intrinsic_shared_atomic_comp_swap:
-      nir_emit_shared_atomic(bld, BRW_AOP_CMPWR, instr);
+      nir_emit_shared_atomic(bld, brw_aop_for_nir_intrinsic(instr), instr);
       break;
    case nir_intrinsic_shared_atomic_fmin:
-      nir_emit_shared_atomic_float(bld, BRW_AOP_FMIN, instr);
-      break;
    case nir_intrinsic_shared_atomic_fmax:
-      nir_emit_shared_atomic_float(bld, BRW_AOP_FMAX, instr);
-      break;
    case nir_intrinsic_shared_atomic_fcomp_swap:
-      nir_emit_shared_atomic_float(bld, BRW_AOP_FCMPWR, instr);
+      nir_emit_shared_atomic_float(bld, brw_aop_for_nir_intrinsic(instr), instr);
       break;
 
    case nir_intrinsic_load_shared: {
@@ -3972,8 +3997,10 @@ fs_visitor::nir_emit_intrinsic(const fs_builder &bld, nir_intrinsic_instr *instr
    case nir_intrinsic_image_load:
    case nir_intrinsic_image_store:
    case nir_intrinsic_image_atomic_add:
-   case nir_intrinsic_image_atomic_min:
-   case nir_intrinsic_image_atomic_max:
+   case nir_intrinsic_image_atomic_imin:
+   case nir_intrinsic_image_atomic_umin:
+   case nir_intrinsic_image_atomic_imax:
+   case nir_intrinsic_image_atomic_umax:
    case nir_intrinsic_image_atomic_and:
    case nir_intrinsic_image_atomic_or:
    case nir_intrinsic_image_atomic_xor:
@@ -3982,8 +4009,10 @@ fs_visitor::nir_emit_intrinsic(const fs_builder &bld, nir_intrinsic_instr *instr
    case nir_intrinsic_bindless_image_load:
    case nir_intrinsic_bindless_image_store:
    case nir_intrinsic_bindless_image_atomic_add:
-   case nir_intrinsic_bindless_image_atomic_min:
-   case nir_intrinsic_bindless_image_atomic_max:
+   case nir_intrinsic_bindless_image_atomic_imin:
+   case nir_intrinsic_bindless_image_atomic_umin:
+   case nir_intrinsic_bindless_image_atomic_imax:
+   case nir_intrinsic_bindless_image_atomic_umax:
    case nir_intrinsic_bindless_image_atomic_and:
    case nir_intrinsic_bindless_image_atomic_or:
    case nir_intrinsic_bindless_image_atomic_xor:
@@ -3995,7 +4024,6 @@ fs_visitor::nir_emit_intrinsic(const fs_builder &bld, nir_intrinsic_instr *instr
 
       /* Get some metadata from the image intrinsic. */
       const nir_intrinsic_info *info = &nir_intrinsic_infos[instr->intrinsic];
-      const GLenum format = nir_intrinsic_format(instr);
 
       fs_reg srcs[SURFACE_LOGICAL_NUM_SRCS];
 
@@ -4003,8 +4031,10 @@ fs_visitor::nir_emit_intrinsic(const fs_builder &bld, nir_intrinsic_instr *instr
       case nir_intrinsic_image_load:
       case nir_intrinsic_image_store:
       case nir_intrinsic_image_atomic_add:
-      case nir_intrinsic_image_atomic_min:
-      case nir_intrinsic_image_atomic_max:
+      case nir_intrinsic_image_atomic_imin:
+      case nir_intrinsic_image_atomic_umin:
+      case nir_intrinsic_image_atomic_imax:
+      case nir_intrinsic_image_atomic_umax:
       case nir_intrinsic_image_atomic_and:
       case nir_intrinsic_image_atomic_or:
       case nir_intrinsic_image_atomic_xor:
@@ -4040,51 +4070,11 @@ fs_visitor::nir_emit_intrinsic(const fs_builder &bld, nir_intrinsic_instr *instr
          bld.emit(SHADER_OPCODE_TYPED_SURFACE_WRITE_LOGICAL,
                   fs_reg(), srcs, SURFACE_LOGICAL_NUM_SRCS);
       } else {
-         int op;
          unsigned num_srcs = info->num_srcs;
-
-         switch (instr->intrinsic) {
-         case nir_intrinsic_image_atomic_add:
-         case nir_intrinsic_bindless_image_atomic_add:
+         int op = brw_aop_for_nir_intrinsic(instr);
+         if (op == BRW_AOP_INC || op == BRW_AOP_DEC) {
             assert(num_srcs == 4);
-
-            op = get_op_for_atomic_add(instr, 3);
-
-            if (op != BRW_AOP_ADD)
-               num_srcs = 3;
-            break;
-         case nir_intrinsic_image_atomic_min:
-         case nir_intrinsic_bindless_image_atomic_min:
-            assert(format == GL_R32UI || format == GL_R32I);
-            op = (format == GL_R32I) ? BRW_AOP_IMIN : BRW_AOP_UMIN;
-            break;
-         case nir_intrinsic_image_atomic_max:
-         case nir_intrinsic_bindless_image_atomic_max:
-            assert(format == GL_R32UI || format == GL_R32I);
-            op = (format == GL_R32I) ? BRW_AOP_IMAX : BRW_AOP_UMAX;
-            break;
-         case nir_intrinsic_image_atomic_and:
-         case nir_intrinsic_bindless_image_atomic_and:
-            op = BRW_AOP_AND;
-            break;
-         case nir_intrinsic_image_atomic_or:
-         case nir_intrinsic_bindless_image_atomic_or:
-            op = BRW_AOP_OR;
-            break;
-         case nir_intrinsic_image_atomic_xor:
-         case nir_intrinsic_bindless_image_atomic_xor:
-            op = BRW_AOP_XOR;
-            break;
-         case nir_intrinsic_image_atomic_exchange:
-         case nir_intrinsic_bindless_image_atomic_exchange:
-            op = BRW_AOP_MOV;
-            break;
-         case nir_intrinsic_image_atomic_comp_swap:
-         case nir_intrinsic_bindless_image_atomic_comp_swap:
-            op = BRW_AOP_CMPWR;
-            break;
-         default:
-            unreachable("Not reachable.");
+            num_srcs = 3;
          }
 
          srcs[SURFACE_LOGICAL_SRC_IMM_ARG] = brw_imm_ud(op);
@@ -4333,6 +4323,8 @@ fs_visitor::nir_emit_intrinsic(const fs_builder &bld, nir_intrinsic_instr *instr
          for (int i = 0; i < instr->num_components; i++)
             VARYING_PULL_CONSTANT_LOAD(bld, offset(dest, bld, i), surf_index,
                                        base_offset, i * type_sz(dest.type));
+
+         prog_data->has_ubo_pull = true;
       } else {
          /* Even if we are loading doubles, a pull constant load will load
           * a 32-bit vec4, so should only reserve vgrf space for that. If we
@@ -4371,6 +4363,8 @@ fs_visitor::nir_emit_intrinsic(const fs_builder &bld, nir_intrinsic_instr *instr
                break;
             }
          }
+
+         prog_data->has_ubo_pull = true;
 
          const unsigned block_sz = 64; /* Fetch one cacheline at a time. */
          const fs_builder ubld = bld.exec_all().group(block_sz / 4, 0);
@@ -4456,43 +4450,21 @@ fs_visitor::nir_emit_intrinsic(const fs_builder &bld, nir_intrinsic_instr *instr
       break;
 
    case nir_intrinsic_global_atomic_add:
-      nir_emit_global_atomic(bld, get_op_for_atomic_add(instr, 1), instr);
-      break;
    case nir_intrinsic_global_atomic_imin:
-      nir_emit_global_atomic(bld, BRW_AOP_IMIN, instr);
-      break;
    case nir_intrinsic_global_atomic_umin:
-      nir_emit_global_atomic(bld, BRW_AOP_UMIN, instr);
-      break;
    case nir_intrinsic_global_atomic_imax:
-      nir_emit_global_atomic(bld, BRW_AOP_IMAX, instr);
-      break;
    case nir_intrinsic_global_atomic_umax:
-      nir_emit_global_atomic(bld, BRW_AOP_UMAX, instr);
-      break;
    case nir_intrinsic_global_atomic_and:
-      nir_emit_global_atomic(bld, BRW_AOP_AND, instr);
-      break;
    case nir_intrinsic_global_atomic_or:
-      nir_emit_global_atomic(bld, BRW_AOP_OR, instr);
-      break;
    case nir_intrinsic_global_atomic_xor:
-      nir_emit_global_atomic(bld, BRW_AOP_XOR, instr);
-      break;
    case nir_intrinsic_global_atomic_exchange:
-      nir_emit_global_atomic(bld, BRW_AOP_MOV, instr);
-      break;
    case nir_intrinsic_global_atomic_comp_swap:
-      nir_emit_global_atomic(bld, BRW_AOP_CMPWR, instr);
+      nir_emit_global_atomic(bld, brw_aop_for_nir_intrinsic(instr), instr);
       break;
    case nir_intrinsic_global_atomic_fmin:
-      nir_emit_global_atomic_float(bld, BRW_AOP_FMIN, instr);
-      break;
    case nir_intrinsic_global_atomic_fmax:
-      nir_emit_global_atomic_float(bld, BRW_AOP_FMAX, instr);
-      break;
    case nir_intrinsic_global_atomic_fcomp_swap:
-      nir_emit_global_atomic_float(bld, BRW_AOP_FCMPWR, instr);
+      nir_emit_global_atomic_float(bld, brw_aop_for_nir_intrinsic(instr), instr);
       break;
 
    case nir_intrinsic_load_ssbo: {
@@ -4586,43 +4558,21 @@ fs_visitor::nir_emit_intrinsic(const fs_builder &bld, nir_intrinsic_instr *instr
    }
 
    case nir_intrinsic_ssbo_atomic_add:
-      nir_emit_ssbo_atomic(bld, get_op_for_atomic_add(instr, 2), instr);
-      break;
    case nir_intrinsic_ssbo_atomic_imin:
-      nir_emit_ssbo_atomic(bld, BRW_AOP_IMIN, instr);
-      break;
    case nir_intrinsic_ssbo_atomic_umin:
-      nir_emit_ssbo_atomic(bld, BRW_AOP_UMIN, instr);
-      break;
    case nir_intrinsic_ssbo_atomic_imax:
-      nir_emit_ssbo_atomic(bld, BRW_AOP_IMAX, instr);
-      break;
    case nir_intrinsic_ssbo_atomic_umax:
-      nir_emit_ssbo_atomic(bld, BRW_AOP_UMAX, instr);
-      break;
    case nir_intrinsic_ssbo_atomic_and:
-      nir_emit_ssbo_atomic(bld, BRW_AOP_AND, instr);
-      break;
    case nir_intrinsic_ssbo_atomic_or:
-      nir_emit_ssbo_atomic(bld, BRW_AOP_OR, instr);
-      break;
    case nir_intrinsic_ssbo_atomic_xor:
-      nir_emit_ssbo_atomic(bld, BRW_AOP_XOR, instr);
-      break;
    case nir_intrinsic_ssbo_atomic_exchange:
-      nir_emit_ssbo_atomic(bld, BRW_AOP_MOV, instr);
-      break;
    case nir_intrinsic_ssbo_atomic_comp_swap:
-      nir_emit_ssbo_atomic(bld, BRW_AOP_CMPWR, instr);
+      nir_emit_ssbo_atomic(bld, brw_aop_for_nir_intrinsic(instr), instr);
       break;
    case nir_intrinsic_ssbo_atomic_fmin:
-      nir_emit_ssbo_atomic_float(bld, BRW_AOP_FMIN, instr);
-      break;
    case nir_intrinsic_ssbo_atomic_fmax:
-      nir_emit_ssbo_atomic_float(bld, BRW_AOP_FMAX, instr);
-      break;
    case nir_intrinsic_ssbo_atomic_fcomp_swap:
-      nir_emit_ssbo_atomic_float(bld, BRW_AOP_FCMPWR, instr);
+      nir_emit_ssbo_atomic_float(bld, brw_aop_for_nir_intrinsic(instr), instr);
       break;
 
    case nir_intrinsic_get_buffer_size: {

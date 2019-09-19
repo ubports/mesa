@@ -129,6 +129,7 @@ enum lima_ctx_buff {
    lima_ctx_buff_pp_uniform_array,
    lima_ctx_buff_pp_uniform,
    lima_ctx_buff_pp_tex_desc,
+   lima_ctx_buff_pp_stack,
    lima_ctx_buff_num,
 };
 
@@ -242,6 +243,10 @@ struct lima_context {
    struct lima_submit *pp_submit;
 
    int id;
+
+   struct pipe_debug_callback debug;
+
+   int pp_max_stack_size;
 };
 
 static inline struct lima_context *

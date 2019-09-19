@@ -57,6 +57,7 @@
 #include "util/u_vector.h"
 #include "util/u_math.h"
 #include "util/vma.h"
+#include "util/xmlconfig.h"
 #include "vk_alloc.h"
 #include "vk_debug_report.h"
 
@@ -1009,6 +1010,9 @@ struct anv_instance {
     bool                                        pipeline_cache_enabled;
 
     struct vk_debug_report_instance             debug_report_callbacks;
+
+    struct driOptionCache                       dri_options;
+    struct driOptionCache                       available_dri_options;
 };
 
 VkResult anv_init_wsi(struct anv_physical_device *physical_device);
@@ -1054,6 +1058,8 @@ anv_pipeline_cache_upload_kernel(struct anv_pipeline_cache *cache,
                                  uint32_t constant_data_size,
                                  const struct brw_stage_prog_data *prog_data,
                                  uint32_t prog_data_size,
+                                 const struct brw_compile_stats *stats,
+                                 uint32_t num_stats,
                                  const struct nir_xfb_info *xfb_info,
                                  const struct anv_pipeline_bind_map *bind_map);
 
@@ -1072,6 +1078,8 @@ anv_device_upload_kernel(struct anv_device *device,
                          uint32_t constant_data_size,
                          const struct brw_stage_prog_data *prog_data,
                          uint32_t prog_data_size,
+                         const struct brw_compile_stats *stats,
+                         uint32_t num_stats,
                          const struct nir_xfb_info *xfb_info,
                          const struct anv_pipeline_bind_map *bind_map);
 
@@ -1134,6 +1142,8 @@ struct anv_device {
     struct blorp_context                        blorp;
 
     struct anv_state                            border_colors;
+
+    struct anv_state                            slice_hash;
 
     struct anv_queue                            queue;
 
@@ -1499,6 +1509,11 @@ _anv_combine_address(struct anv_batch *batch, void *location,
 /* Ice Lake MOCS defines are duplicates of Skylake MOCS defines. */
 #define GEN11_MOCS GEN9_MOCS
 #define GEN11_EXTERNAL_MOCS GEN9_EXTERNAL_MOCS
+
+/* TigerLake MOCS */
+#define GEN12_MOCS GEN9_MOCS
+/* TC=1/LLC Only, LeCC=1/Uncacheable, LRUM=0, L3CC=1/Uncacheable */
+#define GEN12_EXTERNAL_MOCS (3 << 1)
 
 struct anv_device_memory {
    struct list_head                             link;
@@ -1947,13 +1962,56 @@ enum anv_cmd_dirty_bits {
    ANV_CMD_DIRTY_DYNAMIC_STENCIL_COMPARE_MASK      = 1 << 6, /* VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK */
    ANV_CMD_DIRTY_DYNAMIC_STENCIL_WRITE_MASK        = 1 << 7, /* VK_DYNAMIC_STATE_STENCIL_WRITE_MASK */
    ANV_CMD_DIRTY_DYNAMIC_STENCIL_REFERENCE         = 1 << 8, /* VK_DYNAMIC_STATE_STENCIL_REFERENCE */
-   ANV_CMD_DIRTY_DYNAMIC_ALL                       = (1 << 9) - 1,
    ANV_CMD_DIRTY_PIPELINE                          = 1 << 9,
    ANV_CMD_DIRTY_INDEX_BUFFER                      = 1 << 10,
    ANV_CMD_DIRTY_RENDER_TARGETS                    = 1 << 11,
    ANV_CMD_DIRTY_XFB_ENABLE                        = 1 << 12,
+   ANV_CMD_DIRTY_DYNAMIC_LINE_STIPPLE              = 1 << 13, /* VK_DYNAMIC_STATE_LINE_STIPPLE_EXT */
 };
 typedef uint32_t anv_cmd_dirty_mask_t;
+
+#define ANV_CMD_DIRTY_DYNAMIC_ALL                  \
+   (ANV_CMD_DIRTY_DYNAMIC_VIEWPORT |               \
+    ANV_CMD_DIRTY_DYNAMIC_SCISSOR |                \
+    ANV_CMD_DIRTY_DYNAMIC_LINE_WIDTH |             \
+    ANV_CMD_DIRTY_DYNAMIC_DEPTH_BIAS |             \
+    ANV_CMD_DIRTY_DYNAMIC_BLEND_CONSTANTS |        \
+    ANV_CMD_DIRTY_DYNAMIC_DEPTH_BOUNDS |           \
+    ANV_CMD_DIRTY_DYNAMIC_STENCIL_COMPARE_MASK |   \
+    ANV_CMD_DIRTY_DYNAMIC_STENCIL_WRITE_MASK |     \
+    ANV_CMD_DIRTY_DYNAMIC_STENCIL_REFERENCE |      \
+    ANV_CMD_DIRTY_DYNAMIC_LINE_STIPPLE)
+
+static inline enum anv_cmd_dirty_bits
+anv_cmd_dirty_bit_for_vk_dynamic_state(VkDynamicState vk_state)
+{
+   switch (vk_state) {
+   case VK_DYNAMIC_STATE_VIEWPORT:
+      return ANV_CMD_DIRTY_DYNAMIC_VIEWPORT;
+   case VK_DYNAMIC_STATE_SCISSOR:
+      return ANV_CMD_DIRTY_DYNAMIC_SCISSOR;
+   case VK_DYNAMIC_STATE_LINE_WIDTH:
+      return ANV_CMD_DIRTY_DYNAMIC_LINE_WIDTH;
+   case VK_DYNAMIC_STATE_DEPTH_BIAS:
+      return ANV_CMD_DIRTY_DYNAMIC_DEPTH_BIAS;
+   case VK_DYNAMIC_STATE_BLEND_CONSTANTS:
+      return ANV_CMD_DIRTY_DYNAMIC_BLEND_CONSTANTS;
+   case VK_DYNAMIC_STATE_DEPTH_BOUNDS:
+      return ANV_CMD_DIRTY_DYNAMIC_DEPTH_BOUNDS;
+   case VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK:
+      return ANV_CMD_DIRTY_DYNAMIC_STENCIL_COMPARE_MASK;
+   case VK_DYNAMIC_STATE_STENCIL_WRITE_MASK:
+      return ANV_CMD_DIRTY_DYNAMIC_STENCIL_WRITE_MASK;
+   case VK_DYNAMIC_STATE_STENCIL_REFERENCE:
+      return ANV_CMD_DIRTY_DYNAMIC_STENCIL_REFERENCE;
+   case VK_DYNAMIC_STATE_LINE_STIPPLE_EXT:
+      return ANV_CMD_DIRTY_DYNAMIC_LINE_STIPPLE;
+   default:
+      assert(!"Unsupported dynamic state");
+      return 0;
+   }
+}
+
 
 enum anv_pipe_bits {
    ANV_PIPE_DEPTH_CACHE_FLUSH_BIT            = (1 << 0),
@@ -2217,13 +2275,18 @@ struct anv_dynamic_state {
       uint32_t                                  front;
       uint32_t                                  back;
    } stencil_reference;
+
+   struct {
+      uint32_t                                  factor;
+      uint16_t                                  pattern;
+   } line_stipple;
 };
 
 extern const struct anv_dynamic_state default_dynamic_state;
 
-void anv_dynamic_state_copy(struct anv_dynamic_state *dest,
-                            const struct anv_dynamic_state *src,
-                            uint32_t copy_mask);
+uint32_t anv_dynamic_state_copy(struct anv_dynamic_state *dest,
+                                const struct anv_dynamic_state *src,
+                                uint32_t copy_mask);
 
 struct anv_surface_state {
    struct anv_state state;
@@ -2372,6 +2435,12 @@ struct anv_cmd_state {
    bool                                         hiz_enabled;
 
    bool                                         conditional_render_enabled;
+
+   /**
+    * Last rendering scale argument provided to
+    * genX(cmd_buffer_emit_hashing_mode)().
+    */
+   unsigned                                     current_hash_scale;
 
    /**
     * Array length is anv_cmd_state::pass::attachment_count. Array content is
@@ -2699,6 +2768,9 @@ struct anv_shader_bin {
    const struct brw_stage_prog_data *prog_data;
    uint32_t prog_data_size;
 
+   struct brw_compile_stats stats[3];
+   uint32_t num_stats;
+
    struct nir_xfb_info *xfb_info;
 
    struct anv_pipeline_bind_map bind_map;
@@ -2711,6 +2783,7 @@ anv_shader_bin_create(struct anv_device *device,
                       const void *constant_data, uint32_t constant_data_size,
                       const struct brw_stage_prog_data *prog_data,
                       uint32_t prog_data_size, const void *prog_data_param,
+                      const struct brw_compile_stats *stats, uint32_t num_stats,
                       const struct nir_xfb_info *xfb_info,
                       const struct anv_pipeline_bind_map *bind_map);
 
@@ -2732,19 +2805,36 @@ anv_shader_bin_unref(struct anv_device *device, struct anv_shader_bin *shader)
       anv_shader_bin_destroy(device, shader);
 }
 
+/* 5 possible simultaneous shader stages and FS may have up to 3 binaries */
+#define MAX_PIPELINE_EXECUTABLES 7
+
+struct anv_pipeline_executable {
+   gl_shader_stage stage;
+
+   struct brw_compile_stats stats;
+
+   char *disasm;
+};
+
 struct anv_pipeline {
    struct anv_device *                          device;
    struct anv_batch                             batch;
    uint32_t                                     batch_data[512];
    struct anv_reloc_list                        batch_relocs;
-   uint32_t                                     dynamic_state_mask;
+   anv_cmd_dirty_mask_t                         dynamic_state_mask;
    struct anv_dynamic_state                     dynamic_state;
 
+   void *                                       mem_ctx;
+
+   VkPipelineCreateFlags                        flags;
    struct anv_subpass *                         subpass;
 
    bool                                         needs_data_cache;
 
    struct anv_shader_bin *                      shaders[MESA_SHADER_STAGES];
+
+   uint32_t                                     num_executables;
+   struct anv_pipeline_executable               executables[MAX_PIPELINE_EXECUTABLES];
 
    struct {
       const struct gen_l3_config *              l3_config;
@@ -3726,6 +3816,9 @@ ANV_DEFINE_NONDISP_HANDLE_CASTS(anv_ycbcr_conversion, VkSamplerYcbcrConversion)
 #  include "anv_genX.h"
 #  undef genX
 #  define genX(x) gen11_##x
+#  include "anv_genX.h"
+#  undef genX
+#  define genX(x) gen12_##x
 #  include "anv_genX.h"
 #  undef genX
 #endif
