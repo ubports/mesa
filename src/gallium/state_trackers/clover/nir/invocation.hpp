@@ -1,5 +1,5 @@
 //
-// Copyright 2016 Francisco Jerez
+// Copyright 2019 Karol Herbst
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
 // copy of this software and associated documentation files (the "Software"),
@@ -20,34 +20,16 @@
 // OTHER DEALINGS IN THE SOFTWARE.
 //
 
-#ifndef CLOVER_LLVM_INVOCATION_HPP
-#define CLOVER_LLVM_INVOCATION_HPP
+#ifndef CLOVER_NIR_INVOCATION_HPP
+#define CLOVER_NIR_INVOCATION_HPP
 
-#include "core/error.hpp"
 #include "core/module.hpp"
-#include "core/program.hpp"
-#include "pipe/p_defines.h"
 
 namespace clover {
-   namespace llvm {
-      module compile_program(const std::string &source,
-                             const header_map &headers,
-                             const device &device,
-                             const std::string &opts,
-                             std::string &r_log);
-
-      module link_program(const std::vector<module> &modules,
-                          const device &device,
-                          const std::string &opts,
-                          std::string &r_log);
-
-#ifdef HAVE_CLOVER_SPIRV
-      module compile_to_spirv(const std::string &source,
-                              const header_map &headers,
-                              const device &dev,
-                              const std::string &opts,
-                              std::string &r_log);
-#endif
+   class device;
+   namespace nir {
+      // converts a given spirv module to nir
+      module spirv_to_nir(const module &mod, const device &dev, std::string &r_log);
    }
 }
 

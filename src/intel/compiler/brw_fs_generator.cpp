@@ -587,12 +587,13 @@ fs_generator::generate_shuffle(fs_inst *inst,
             struct brw_reg gdst = suboffset(dst, group);
             struct brw_reg dst_d = retype(spread(gdst, 2),
                                           BRW_REGISTER_TYPE_D);
+            assert(dst.hstride == 1);
             brw_MOV(p, dst_d,
                     retype(brw_VxH_indirect(0, 0), BRW_REGISTER_TYPE_D));
             brw_MOV(p, byte_offset(dst_d, 4),
                     retype(brw_VxH_indirect(0, 4), BRW_REGISTER_TYPE_D));
          } else {
-            brw_MOV(p, suboffset(dst, group),
+            brw_MOV(p, suboffset(dst, group * dst.hstride),
                     retype(brw_VxH_indirect(0, 0), src.type));
          }
       }
@@ -2133,7 +2134,6 @@ fs_generator::generate_code(const cfg_t *cfg, int dispatch_width,
          break;
 
       case SHADER_OPCODE_CLUSTER_BROADCAST: {
-         assert(src[0].type == dst.type);
          assert(!src[0].negate && !src[0].abs);
          assert(src[1].file == BRW_IMMEDIATE_VALUE);
          assert(src[1].type == BRW_REGISTER_TYPE_UD);
@@ -2170,6 +2170,7 @@ fs_generator::generate_code(const cfg_t *cfg, int dispatch_width,
              * indirect here to handle adding 4 bytes to the offset and avoid
              * the extra ADD to the register file.
              */
+            assert(src[0].type == dst.type);
             brw_MOV(p, subscript(dst, BRW_REGISTER_TYPE_D, 0),
                        subscript(strided, BRW_REGISTER_TYPE_D, 0));
             brw_MOV(p, subscript(dst, BRW_REGISTER_TYPE_D, 1),

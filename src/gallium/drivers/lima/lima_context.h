@@ -107,7 +107,7 @@ struct lima_context_vertex_buffer {
 
 struct lima_context_viewport_state {
    struct pipe_viewport_state transform;
-   float x, y, width, height;
+   float left, right, bottom, top;
    float near, far;
 };
 
@@ -159,12 +159,6 @@ struct lima_ctx_plb_pp_stream {
    uint32_t offset[4];
 };
 
-struct lima_damage_state {
-   struct pipe_scissor_state *region;
-   unsigned num_region;
-   bool aligned;
-};
-
 struct lima_pp_stream_state {
    struct lima_bo *bo;
    uint32_t bo_offset;
@@ -213,7 +207,6 @@ struct lima_context {
    struct pipe_stencil_ref stencil_ref;
    struct lima_context_constant_buffer const_buffer[PIPE_SHADER_TYPES];
    struct lima_texture_stateobj tex_stateobj;
-   struct lima_damage_state damage;
    struct lima_pp_stream_state pp_stream;
 
    unsigned min_index;

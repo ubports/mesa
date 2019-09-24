@@ -51,6 +51,13 @@
 #include "wayland-drm-client-protocol.h"
 #include "linux-dmabuf-unstable-v1-client-protocol.h"
 
+/* cheesy workaround until wayland 1.18 is released */
+#if WAYLAND_VERSION_MAJOR > 1 || \
+   (WAYLAND_VERSION_MAJOR == 1 && WAYLAND_VERSION_MINOR < 18)
+#define WL_SHM_FORMAT_ABGR16161616F 0x48344241
+#define WL_SHM_FORMAT_XBGR16161616F 0x48344258
+#endif
+
 /*
  * The index of entries in this table is used as a bitmask in
  * dri2_dpy->formats, which tracks the formats supported by our server.
@@ -73,53 +80,67 @@ static const struct dri2_wl_visual {
    unsigned int rgba_sizes[4];
 } dri2_wl_visuals[] = {
    {
-     "XRGB2101010",
-     WL_DRM_FORMAT_XRGB2101010, WL_SHM_FORMAT_XRGB2101010,
-     __DRI_IMAGE_FORMAT_XRGB2101010, __DRI_IMAGE_FORMAT_XBGR2101010, 32,
-     { 20, 10, 0, -1 },
-     { 10, 10, 10, 0 },
+      "ABGR16F",
+      WL_DRM_FORMAT_ABGR16F, WL_SHM_FORMAT_ABGR16161616F,
+      __DRI_IMAGE_FORMAT_ABGR16161616F, 0, 64,
+      { 0, 16, 32, 48 },
+      { 16, 16, 16, 16 },
    },
    {
-     "ARGB2101010",
-     WL_DRM_FORMAT_ARGB2101010, WL_SHM_FORMAT_ARGB2101010,
-     __DRI_IMAGE_FORMAT_ARGB2101010, __DRI_IMAGE_FORMAT_ABGR2101010, 32,
-     { 20, 10, 0, 30 },
-     { 10, 10, 10, 2 },
+      "XBGR16F",
+      WL_DRM_FORMAT_XBGR16F, WL_SHM_FORMAT_XBGR16161616F,
+      __DRI_IMAGE_FORMAT_XBGR16161616F, 0, 64,
+      { 0, 16, 32, -1 },
+      { 16, 16, 16, 0 },
    },
    {
-     "XBGR2101010",
-     WL_DRM_FORMAT_XBGR2101010, WL_SHM_FORMAT_XBGR2101010,
-     __DRI_IMAGE_FORMAT_XBGR2101010, __DRI_IMAGE_FORMAT_XRGB2101010, 32,
-     { 0, 10, 20, -1 },
-     { 10, 10, 10, 0 },
+      "XRGB2101010",
+      WL_DRM_FORMAT_XRGB2101010, WL_SHM_FORMAT_XRGB2101010,
+      __DRI_IMAGE_FORMAT_XRGB2101010, __DRI_IMAGE_FORMAT_XBGR2101010, 32,
+      { 20, 10, 0, -1 },
+      { 10, 10, 10, 0 },
    },
    {
-     "ABGR2101010",
-     WL_DRM_FORMAT_ABGR2101010, WL_SHM_FORMAT_ABGR2101010,
-     __DRI_IMAGE_FORMAT_ABGR2101010, __DRI_IMAGE_FORMAT_ARGB2101010, 32,
-     { 0, 10, 20, 30 },
-     { 10, 10, 10, 2 },
+      "ARGB2101010",
+      WL_DRM_FORMAT_ARGB2101010, WL_SHM_FORMAT_ARGB2101010,
+      __DRI_IMAGE_FORMAT_ARGB2101010, __DRI_IMAGE_FORMAT_ABGR2101010, 32,
+      { 20, 10, 0, 30 },
+      { 10, 10, 10, 2 },
    },
    {
-     "XRGB8888",
-     WL_DRM_FORMAT_XRGB8888, WL_SHM_FORMAT_XRGB8888,
-     __DRI_IMAGE_FORMAT_XRGB8888, __DRI_IMAGE_FORMAT_NONE, 32,
-     { 16, 8, 0, -1 },
-     { 8, 8, 8, 0 },
+      "XBGR2101010",
+      WL_DRM_FORMAT_XBGR2101010, WL_SHM_FORMAT_XBGR2101010,
+      __DRI_IMAGE_FORMAT_XBGR2101010, __DRI_IMAGE_FORMAT_XRGB2101010, 32,
+      { 0, 10, 20, -1 },
+      { 10, 10, 10, 0 },
    },
    {
-     "ARGB8888",
-     WL_DRM_FORMAT_ARGB8888, WL_SHM_FORMAT_ARGB8888,
-     __DRI_IMAGE_FORMAT_ARGB8888, __DRI_IMAGE_FORMAT_NONE, 32,
-     { 16, 8, 0, 24 },
-     { 8, 8, 8, 8 },
+      "ABGR2101010",
+      WL_DRM_FORMAT_ABGR2101010, WL_SHM_FORMAT_ABGR2101010,
+      __DRI_IMAGE_FORMAT_ABGR2101010, __DRI_IMAGE_FORMAT_ARGB2101010, 32,
+      { 0, 10, 20, 30 },
+      { 10, 10, 10, 2 },
    },
    {
-     "RGB565",
-     WL_DRM_FORMAT_RGB565, WL_SHM_FORMAT_RGB565,
-     __DRI_IMAGE_FORMAT_RGB565, __DRI_IMAGE_FORMAT_NONE, 16,
-     { 11, 5, 0, -1 },
-     { 5, 6, 5, 0 },
+      "XRGB8888",
+      WL_DRM_FORMAT_XRGB8888, WL_SHM_FORMAT_XRGB8888,
+      __DRI_IMAGE_FORMAT_XRGB8888, __DRI_IMAGE_FORMAT_NONE, 32,
+      { 16, 8, 0, -1 },
+      { 8, 8, 8, 0 },
+   },
+   {
+      "ARGB8888",
+      WL_DRM_FORMAT_ARGB8888, WL_SHM_FORMAT_ARGB8888,
+      __DRI_IMAGE_FORMAT_ARGB8888, __DRI_IMAGE_FORMAT_NONE, 32,
+      { 16, 8, 0, 24 },
+      { 8, 8, 8, 8 },
+   },
+   {
+      "RGB565",
+      WL_DRM_FORMAT_RGB565, WL_SHM_FORMAT_RGB565,
+      __DRI_IMAGE_FORMAT_RGB565, __DRI_IMAGE_FORMAT_NONE, 16,
+      { 11, 5, 0, -1 },
+      { 5, 6, 5, 0 },
    },
 };
 
@@ -791,19 +812,32 @@ dri2_wl_flush_front_buffer(__DRIdrawable * driDrawable, void *loaderPrivate)
    (void) loaderPrivate;
 }
 
+static unsigned
+dri2_wl_get_capability(void *loaderPrivate, enum dri_loader_cap cap)
+{
+   switch (cap) {
+   case DRI_LOADER_CAP_FP16:
+      return 1;
+   default:
+      return 0;
+   }
+}
+
 static const __DRIdri2LoaderExtension dri2_loader_extension = {
-   .base = { __DRI_DRI2_LOADER, 3 },
+   .base = { __DRI_DRI2_LOADER, 4 },
 
    .getBuffers           = dri2_wl_get_buffers,
    .flushFrontBuffer     = dri2_wl_flush_front_buffer,
    .getBuffersWithFormat = dri2_wl_get_buffers_with_format,
+   .getCapability        = dri2_wl_get_capability,
 };
 
 static const __DRIimageLoaderExtension image_loader_extension = {
-   .base = { __DRI_IMAGE_LOADER, 1 },
+   .base = { __DRI_IMAGE_LOADER, 2 },
 
    .getBuffers          = image_get_buffers,
    .flushFrontBuffer    = dri2_wl_flush_front_buffer,
+   .getCapability       = dri2_wl_get_capability,
 };
 
 static void

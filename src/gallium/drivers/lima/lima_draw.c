@@ -141,10 +141,10 @@ struct lima_render_state {
 #define PLBU_CMD_BLOCK_STRIDE(block_w) PLBU_CMD((block_w) & 0xff, 0x30000000)
 #define PLBU_CMD_ARRAY_ADDRESS(gp_stream, block_num) \
    PLBU_CMD(gp_stream, 0x28000000 | ((block_num) - 1) | 1)
-#define PLBU_CMD_VIEWPORT_X(v) PLBU_CMD(v, 0x10000107)
-#define PLBU_CMD_VIEWPORT_W(v) PLBU_CMD(v, 0x10000108)
-#define PLBU_CMD_VIEWPORT_Y(v) PLBU_CMD(v, 0x10000105)
-#define PLBU_CMD_VIEWPORT_H(v) PLBU_CMD(v, 0x10000106)
+#define PLBU_CMD_VIEWPORT_LEFT(v) PLBU_CMD(v, 0x10000107)
+#define PLBU_CMD_VIEWPORT_RIGHT(v) PLBU_CMD(v, 0x10000108)
+#define PLBU_CMD_VIEWPORT_BOTTOM(v) PLBU_CMD(v, 0x10000105)
+#define PLBU_CMD_VIEWPORT_TOP(v) PLBU_CMD(v, 0x10000106)
 #define PLBU_CMD_ARRAYS_SEMAPHORE_BEGIN() PLBU_CMD(0x00010002, 0x60000000)
 #define PLBU_CMD_ARRAYS_SEMAPHORE_END() PLBU_CMD(0x00010001, 0x60000000)
 #define PLBU_CMD_PRIMITIVE_SETUP(low_prim, cull, index_size) \
@@ -210,23 +210,36 @@ lima_ctx_dirty(struct lima_context *ctx)
    return ctx->plbu_cmd_array.size;
 }
 
+static inline struct lima_damage_region *
+lima_ctx_get_damage(struct lima_context *ctx)
+{
+   if (!ctx->framebuffer.base.nr_cbufs)
+      return NULL;
+
+   struct lima_surface *surf = lima_surface(ctx->framebuffer.base.cbufs[0]);
+   struct lima_resource *res = lima_resource(surf->base.texture);
+   return &res->damage;
+}
+
 static bool
 lima_fb_need_reload(struct lima_context *ctx)
 {
    /* Depth buffer is always discarded */
    if (!ctx->framebuffer.base.nr_cbufs)
       return false;
-   if (ctx->damage.region) {
-      /* for EGL_KHR_partial_update we just want to reload the
-       * region not aligned to tile boundary */
-      if (!ctx->damage.aligned)
-         return true;
+
+   struct lima_surface *surf = lima_surface(ctx->framebuffer.base.cbufs[0]);
+   struct lima_resource *res = lima_resource(surf->base.texture);
+   if (res->damage.region) {
+      /* for EGL_KHR_partial_update, when EGL_EXT_buffer_age is enabled,
+       * we need to reload damage region, otherwise just want to reload
+       * the region not aligned to tile boundary */
+      //if (!res->damage.aligned)
+      //   return true;
+      return true;
    }
-   else {
-      struct lima_surface *surf = lima_surface(ctx->framebuffer.base.cbufs[0]);
-      if (surf->reload)
+   else if (surf->reload)
          return true;
-   }
 
    return false;
 }
@@ -307,10 +320,10 @@ lima_pack_reload_plbu_cmd(struct lima_context *ctx)
 
    PLBU_CMD_BEGIN(20);
 
-   PLBU_CMD_VIEWPORT_X(0);
-   PLBU_CMD_VIEWPORT_W(fui(fb->base.width));
-   PLBU_CMD_VIEWPORT_Y(0);
-   PLBU_CMD_VIEWPORT_H(fui(fb->base.height));
+   PLBU_CMD_VIEWPORT_LEFT(0);
+   PLBU_CMD_VIEWPORT_RIGHT(fui(fb->base.width));
+   PLBU_CMD_VIEWPORT_BOTTOM(0);
+   PLBU_CMD_VIEWPORT_TOP(fui(fb->base.height));
 
    PLBU_CMD_RSW_VERTEX_ARRAY(
       va + lima_reload_render_state_offset,
@@ -321,74 +334,6 @@ lima_pack_reload_plbu_cmd(struct lima_context *ctx)
 
    PLBU_CMD_INDICES(screen->pp_buffer->va + pp_shared_index_offset);
    PLBU_CMD_INDEXED_DEST(va + lima_reload_gl_pos_offset);
-   PLBU_CMD_DRAW_ELEMENTS(0xf, 0, 3);
-
-   PLBU_CMD_END();
-}
-
-static void
-lima_pack_clear_plbu_cmd(struct lima_context *ctx)
-{
-   #define lima_clear_render_state_offset 0x0000
-   #define lima_clear_shader_offset       0x0040
-   #define lima_clear_buffer_size         0x0080
-
-   void *cpu;
-   unsigned offset;
-   struct pipe_resource *pres = NULL;
-   u_upload_alloc(ctx->uploader, 0, lima_clear_buffer_size,
-                  0x40, &offset, &pres, &cpu);
-
-   struct lima_resource *res = lima_resource(pres);
-   uint32_t va = res->bo->va + offset;
-
-   struct lima_screen *screen = lima_screen(ctx->base.screen);
-   uint32_t gl_pos_va = screen->pp_buffer->va + pp_clear_gl_pos_offset;
-
-   /* const0 clear_color, mov.v1 $0 ^const0.xxxx, stop */
-   uint32_t clear_shader[] = {
-      0x00021025, 0x0000000c,
-      (ctx->clear.color_16pc << 12) | 0x000007cf,
-      ctx->clear.color_16pc >> 12,
-      ctx->clear.color_16pc >> 44,
-   };
-   memcpy(cpu + lima_clear_shader_offset, &clear_shader,
-          sizeof(clear_shader));
-
-   uint32_t clear_shader_va = va + lima_clear_shader_offset;
-   uint32_t clear_shader_first_instr_size = clear_shader[0] & 0x1f;
-
-   struct lima_render_state clear_render_state = {
-      .blend_color_bg = 0x00800080,
-      .blend_color_ra = 0x00ff0080,
-      .alpha_blend = 0xfc321892,
-      .depth_test = 0x0000003e,
-      .depth_range = 0xffff0000,
-      .stencil_front = 0x00000007,
-      .stencil_back = 0x00000007,
-      .multi_sample = 0x0000f007,
-      .shader_address = clear_shader_va | clear_shader_first_instr_size,
-   };
-   memcpy(cpu + lima_clear_render_state_offset, &clear_render_state,
-          sizeof(clear_render_state));
-
-   PLBU_CMD_BEGIN(22);
-
-   PLBU_CMD_VIEWPORT_X(0);
-   PLBU_CMD_VIEWPORT_W(0x45800000);
-   PLBU_CMD_VIEWPORT_Y(0);
-   PLBU_CMD_VIEWPORT_H(0x45800000);
-
-   struct pipe_scissor_state *scissor = &ctx->scissor;
-   PLBU_CMD_SCISSORS(scissor->minx, scissor->maxx, scissor->miny, scissor->maxy);
-
-   PLBU_CMD_RSW_VERTEX_ARRAY(va + lima_clear_render_state_offset, gl_pos_va);
-
-   PLBU_CMD_UNKNOWN2();
-   PLBU_CMD_UNKNOWN1();
-
-   PLBU_CMD_INDICES(screen->pp_buffer->va + pp_shared_index_offset);
-   PLBU_CMD_INDEXED_DEST(gl_pos_va);
    PLBU_CMD_DRAW_ELEMENTS(0xf, 0, 3);
 
    PLBU_CMD_END();
@@ -430,19 +375,6 @@ lima_is_scissor_zero(struct lima_context *ctx)
    return
       scissor->minx == scissor->maxx
       && scissor->miny == scissor->maxy;
-}
-
-static bool
-lima_is_scissor_full_fb(struct lima_context *ctx)
-{
-   if (!ctx->rasterizer || !ctx->rasterizer->base.scissor)
-      return true;
-
-   struct pipe_scissor_state *scissor = &ctx->scissor;
-   struct lima_context_framebuffer *fb = &ctx->framebuffer;
-   return
-      scissor->minx == 0 && scissor->maxx == fb->base.width &&
-      scissor->miny == 0 && scissor->maxy == fb->base.height;
 }
 
 static void
@@ -510,9 +442,9 @@ lima_get_pp_stream_size(int num_pp, int tiled_w, int tiled_h, uint32_t *off)
 }
 
 static bool
-inside_damage_region(int x, int y, struct lima_damage_state *ds)
+inside_damage_region(int x, int y, struct lima_damage_region *ds)
 {
-   if (!ds->region)
+   if (!ds || !ds->region)
       return true;
 
    for (int i = 0; i < ds->num_region; i++) {
@@ -531,6 +463,7 @@ lima_update_pp_stream(struct lima_context *ctx, int off_x, int off_y,
 {
    struct lima_pp_stream_state *ps = &ctx->pp_stream;
    struct lima_context_framebuffer *fb = &ctx->framebuffer;
+   struct lima_damage_region *damage = lima_ctx_get_damage(ctx);
    struct lima_screen *screen = lima_screen(ctx->base.screen);
    int i, num_pp = screen->num_pp;
 
@@ -556,7 +489,7 @@ lima_update_pp_stream(struct lima_context *ctx, int off_x, int off_y,
          x += off_x;
          y += off_y;
 
-         if (!inside_damage_region(x, y, &ctx->damage))
+         if (!inside_damage_region(x, y, damage))
             continue;
 
          int pp = index % num_pp;
@@ -586,20 +519,11 @@ lima_update_pp_stream(struct lima_context *ctx, int off_x, int off_y,
 static void
 lima_update_damage_pp_stream(struct lima_context *ctx)
 {
-   struct lima_damage_state *ds = &ctx->damage;
-   struct pipe_scissor_state max = ds->region[0];
+   struct lima_damage_region *ds = lima_ctx_get_damage(ctx);
+   struct pipe_scissor_state *bound = &ds->bound;
 
-   /* find a max region to cover all the damage region */
-   for (int i = 1; i < ds->num_region; i++) {
-      struct pipe_scissor_state *ss = ds->region + i;
-      max.minx = MIN2(max.minx, ss->minx);
-      max.miny = MIN2(max.miny, ss->miny);
-      max.maxx = MAX2(max.maxx, ss->maxx);
-      max.maxy = MAX2(max.maxy, ss->maxy);
-   }
-
-   int tiled_w = max.maxx - max.minx;
-   int tiled_h = max.maxy - max.miny;
+   int tiled_w = bound->maxx - bound->minx;
+   int tiled_h = bound->maxy - bound->miny;
    struct lima_screen *screen = lima_screen(ctx->base.screen);
    int size = lima_get_pp_stream_size(
       screen->num_pp, tiled_w, tiled_h, ctx->pp_stream.offset);
@@ -613,7 +537,7 @@ lima_update_damage_pp_stream(struct lima_context *ctx)
    ctx->pp_stream.bo = res->bo;
    ctx->pp_stream.bo_offset = offset;
 
-   lima_update_pp_stream(ctx, max.minx, max.miny, tiled_w, tiled_h);
+   lima_update_pp_stream(ctx, bound->minx, bound->miny, tiled_w, tiled_h);
 
    lima_submit_add_bo(ctx->pp_submit, res->bo, LIMA_SUBMIT_BO_READ);
    pipe_resource_reference(&pres, NULL);
@@ -671,7 +595,8 @@ lima_update_submit_bo(struct lima_context *ctx)
       ctx->plb_gp_size, false, "gp plb stream at va %x\n",
       ctx->plb_gp_stream->va + ctx->plb_index * ctx->plb_gp_size);
 
-   if (ctx->damage.region)
+   struct lima_damage_region *damage = lima_ctx_get_damage(ctx);
+   if (damage && damage->region)
       lima_update_damage_pp_stream(ctx);
    else if (ctx->plb_pp_stream)
       lima_update_full_pp_stream(ctx);
@@ -696,16 +621,13 @@ lima_clear(struct pipe_context *pctx, unsigned buffers,
            const union pipe_color_union *color, double depth, unsigned stencil)
 {
    struct lima_context *ctx = lima_context(pctx);
-   bool full_fb_clear = lima_is_scissor_full_fb(ctx);
 
-   if (full_fb_clear) {
-      lima_flush(ctx);
+   lima_flush(ctx);
 
-      /* no need to reload if cleared */
-      if (ctx->framebuffer.base.nr_cbufs && (buffers & PIPE_CLEAR_COLOR0)) {
-         struct lima_surface *surf = lima_surface(ctx->framebuffer.base.cbufs[0]);
-         surf->reload = false;
-      }
+   /* no need to reload if cleared */
+   if (ctx->framebuffer.base.nr_cbufs && (buffers & PIPE_CLEAR_COLOR0)) {
+      struct lima_surface *surf = lima_surface(ctx->framebuffer.base.cbufs[0]);
+      surf->reload = false;
    }
 
    struct lima_context_clear *clear = &ctx->clear;
@@ -734,10 +656,6 @@ lima_clear(struct pipe_context *pctx, unsigned buffers,
    lima_update_submit_bo(ctx);
 
    lima_pack_head_plbu_cmd(ctx);
-
-   /* partial clear */
-   if (!full_fb_clear)
-      lima_pack_clear_plbu_cmd(ctx);
 
    ctx->dirty |= LIMA_CONTEXT_DIRTY_CLEAR;
 }
@@ -858,10 +776,10 @@ lima_pack_plbu_cmd(struct lima_context *ctx, const struct pipe_draw_info *info)
 
    PLBU_CMD_BEGIN(30);
 
-   PLBU_CMD_VIEWPORT_X(fui(ctx->viewport.x));
-   PLBU_CMD_VIEWPORT_W(fui(ctx->viewport.width));
-   PLBU_CMD_VIEWPORT_Y(fui(ctx->viewport.y));
-   PLBU_CMD_VIEWPORT_H(fui(ctx->viewport.height));
+   PLBU_CMD_VIEWPORT_LEFT(fui(ctx->viewport.left));
+   PLBU_CMD_VIEWPORT_RIGHT(fui(ctx->viewport.right));
+   PLBU_CMD_VIEWPORT_BOTTOM(fui(ctx->viewport.bottom));
+   PLBU_CMD_VIEWPORT_TOP(fui(ctx->viewport.top));
 
    if (!info->index_size)
       PLBU_CMD_ARRAYS_SEMAPHORE_BEGIN();
