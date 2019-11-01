@@ -56,6 +56,9 @@ emit_mrt(struct fd_ringbuffer *ring, struct pipe_framebuffer_state *pfb,
 	unsigned srgb_cntl = 0;
 	unsigned i;
 
+	bool layered = false;
+	unsigned type = 0;
+
 	for (i = 0; i < pfb->nr_cbufs; i++) {
 		enum a6xx_color_fmt format = 0;
 		enum a3xx_color_swap swap = WZYX;
@@ -102,7 +105,20 @@ emit_mrt(struct fd_ringbuffer *ring, struct pipe_framebuffer_state *pfb,
 		else
 			tile_mode = rsc->tile_mode;
 
-		debug_assert(psurf->u.tex.first_layer == psurf->u.tex.last_layer);
+		if (psurf->u.tex.first_layer < psurf->u.tex.last_layer) {
+			layered = true;
+			if (psurf->texture->target == PIPE_TEXTURE_2D_ARRAY && psurf->texture->nr_samples > 0)
+				type = MULTISAMPLE_ARRAY;
+			else if (psurf->texture->target == PIPE_TEXTURE_2D_ARRAY)
+				type = ARRAY;
+			else if (psurf->texture->target == PIPE_TEXTURE_CUBE)
+				type = CUBEMAP;
+			else if (psurf->texture->target == PIPE_TEXTURE_3D)
+				type = ARRAY;
+
+			stride /= pfb->samples;
+		}
+
 		debug_assert((offset + slice->size0) <= fd_bo_size(rsc->bo));
 
 		OUT_PKT4(ring, REG_A6XX_RB_MRT_BUF_INFO(i), 6);
@@ -156,6 +172,10 @@ emit_mrt(struct fd_ringbuffer *ring, struct pipe_framebuffer_state *pfb,
 			A6XX_SP_FS_RENDER_COMPONENTS_RT5(mrt_comp[5]) |
 			A6XX_SP_FS_RENDER_COMPONENTS_RT6(mrt_comp[6]) |
 			A6XX_SP_FS_RENDER_COMPONENTS_RT7(mrt_comp[7]));
+
+	OUT_PKT4(ring, REG_A6XX_GRAS_LAYER_CNTL, 1);
+	OUT_RING(ring, COND(layered, A6XX_GRAS_LAYER_CNTL_LAYERED |
+					A6XX_GRAS_LAYER_CNTL_TYPE(type)));
 }
 
 static void
@@ -622,6 +642,7 @@ emit_binning_pass(struct fd_batch *batch)
 {
 	struct fd_ringbuffer *ring = batch->gmem;
 	struct fd_gmem_stateobj *gmem = &batch->ctx->gmem;
+	struct fd6_context *fd6_ctx = fd6_context(batch->ctx);
 
 	uint32_t x1 = gmem->minx;
 	uint32_t y1 = gmem->miny;
@@ -649,10 +670,10 @@ emit_binning_pass(struct fd_batch *batch)
 	update_vsc_pipe(batch);
 
 	OUT_PKT4(ring, REG_A6XX_PC_UNKNOWN_9805, 1);
-	OUT_RING(ring, 0x1);
+	OUT_RING(ring, fd6_ctx->magic.PC_UNKNOWN_9805);
 
 	OUT_PKT4(ring, REG_A6XX_SP_UNKNOWN_A0F8, 1);
-	OUT_RING(ring, 0x1);
+	OUT_RING(ring, fd6_ctx->magic.SP_UNKNOWN_A0F8);
 
 	OUT_PKT7(ring, CP_EVENT_WRITE, 1);
 	OUT_RING(ring, UNK_2C);
@@ -697,7 +718,7 @@ emit_binning_pass(struct fd_batch *batch)
 	OUT_WFI5(ring);
 
 	OUT_PKT4(ring, REG_A6XX_RB_CCU_CNTL, 1);
-	OUT_RING(ring, 0x7c400004);        /* RB_CCU_CNTL */
+	OUT_RING(ring, fd6_ctx->magic.RB_CCU_CNTL_gmem);
 }
 
 static void
@@ -751,10 +772,9 @@ fd6_emit_tile_init(struct fd_batch *batch)
 	OUT_PKT7(ring, CP_SKIP_IB2_ENABLE_GLOBAL, 1);
 	OUT_RING(ring, 0x0);
 
-	/* 0x10000000 for BYPASS.. 0x7c13c080 for GMEM: */
 	fd_wfi(batch, ring);
 	OUT_PKT4(ring, REG_A6XX_RB_CCU_CNTL, 1);
-	OUT_RING(ring, 0x7c400004);   /* RB_CCU_CNTL */
+	OUT_RING(ring, fd6_context(ctx)->magic.RB_CCU_CNTL_gmem);
 
 	emit_zs(ring, pfb->zsbuf, &ctx->gmem);
 	emit_mrt(ring, pfb, &ctx->gmem);
@@ -781,6 +801,9 @@ fd6_emit_tile_init(struct fd_batch *batch)
 		 * the reset of these cmds:
 		 */
 
+// NOTE a618 not setting .USE_VIZ .. from a quick check on a630, it
+// does not appear that this bit changes much (ie. it isn't actually
+// .USE_VIZ like previous gens)
 		set_bin_size(ring, gmem->bin_w, gmem->bin_h,
 				A6XX_RB_BIN_CONTROL_USE_VIZ | 0x6000000);
 
@@ -788,10 +811,10 @@ fd6_emit_tile_init(struct fd_batch *batch)
 		OUT_RING(ring, 0x0);
 
 		OUT_PKT4(ring, REG_A6XX_PC_UNKNOWN_9805, 1);
-		OUT_RING(ring, 0x1);
+		OUT_RING(ring, fd6_context(ctx)->magic.PC_UNKNOWN_9805);
 
 		OUT_PKT4(ring, REG_A6XX_SP_UNKNOWN_A0F8, 1);
-		OUT_RING(ring, 0x1);
+		OUT_RING(ring, fd6_context(ctx)->magic.SP_UNKNOWN_A0F8);
 
 		OUT_PKT7(ring, CP_SKIP_IB2_ENABLE_GLOBAL, 1);
 		OUT_RING(ring, 0x1);
@@ -949,6 +972,8 @@ emit_blit(struct fd_batch *batch,
 	enum pipe_format pfmt = psurf->format;
 	uint32_t offset, ubwc_offset;
 	bool ubwc_enabled;
+
+	debug_assert(psurf->u.tex.first_layer == psurf->u.tex.last_layer);
 
 	/* separate stencil case: */
 	if (stencil) {
@@ -1441,20 +1466,9 @@ fd6_emit_sysmem_prep(struct fd_batch *batch)
 	fd6_event_write(batch, ring, PC_CCU_INVALIDATE_COLOR, false);
 	fd6_cache_inv(batch, ring);
 
-#if 0
-	OUT_PKT4(ring, REG_A6XX_PC_POWER_CNTL, 1);
-	OUT_RING(ring, 0x00000003);   /* PC_POWER_CNTL */
-#endif
-
-#if 0
-	OUT_PKT4(ring, REG_A6XX_VFD_POWER_CNTL, 1);
-	OUT_RING(ring, 0x00000003);   /* VFD_POWER_CNTL */
-#endif
-
-	/* 0x10000000 for BYPASS.. 0x7c13c080 for GMEM: */
 	fd_wfi(batch, ring);
 	OUT_PKT4(ring, REG_A6XX_RB_CCU_CNTL, 1);
-	OUT_RING(ring, 0x10000000);   /* RB_CCU_CNTL */
+	OUT_RING(ring, fd6_context(batch->ctx)->magic.RB_CCU_CNTL_bypass);
 
 	/* enable stream-out, with sysmem there is only one pass: */
 	OUT_PKT4(ring, REG_A6XX_VPC_SO_OVERRIDE, 1);

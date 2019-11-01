@@ -498,8 +498,6 @@ static int si_get_shader_param(struct pipe_screen* pscreen,
 	case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTERS:
 	case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTER_BUFFERS:
 		return 0;
-	case PIPE_SHADER_CAP_SCALAR_ISA:
-		return 1;
 	}
 	return 0;
 }
@@ -524,6 +522,7 @@ static const struct nir_shader_compiler_options nir_options = {
 	.lower_extract_byte = true,
 	.lower_extract_word = true,
 	.lower_rotate = true,
+	.lower_to_scalar = true,
 	.optimize_sample_mask_in = true,
 	.max_unroll_iterations = 32,
 	.use_interpolated_input_intrinsics = true,
@@ -668,9 +667,25 @@ static int si_get_video_param(struct pipe_screen *screen,
 	case PIPE_VIDEO_CAP_NPOT_TEXTURES:
 		return 1;
 	case PIPE_VIDEO_CAP_MAX_WIDTH:
-		return (sscreen->info.family < CHIP_TONGA) ? 2048 : 4096;
+		switch (codec) {
+		case PIPE_VIDEO_FORMAT_HEVC:
+		case PIPE_VIDEO_FORMAT_VP9:
+			return (sscreen->info.family < CHIP_RENOIR) ?
+			       ((sscreen->info.family < CHIP_TONGA) ? 2048 : 4096) :
+			       8192;
+		default:
+			return (sscreen->info.family < CHIP_TONGA) ? 2048 : 4096;
+		}
 	case PIPE_VIDEO_CAP_MAX_HEIGHT:
-		return (sscreen->info.family < CHIP_TONGA) ? 1152 : 4096;
+		switch (codec) {
+		case PIPE_VIDEO_FORMAT_HEVC:
+		case PIPE_VIDEO_FORMAT_VP9:
+			return (sscreen->info.family < CHIP_RENOIR) ?
+			       ((sscreen->info.family < CHIP_TONGA) ? 1152 : 4096) :
+			       4352;
+		default:
+			return (sscreen->info.family < CHIP_TONGA) ? 1152 : 4096;
+		}
 	case PIPE_VIDEO_CAP_PREFERED_FORMAT:
 		if (profile == PIPE_VIDEO_PROFILE_HEVC_MAIN_10 ||
 		    profile == PIPE_VIDEO_PROFILE_VP9_PROFILE2)

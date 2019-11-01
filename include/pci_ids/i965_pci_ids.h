@@ -1,11 +1,3 @@
-/*
- * IRIS not defined: include all devices supported by i965 or iris
- * IRIS == 0: devices where i965 is supported
- * IRIS == 1: devices where iris is supported, and will be tried before i965
- * IRIS == 2: devices where iris is supported, and will be tried after i965
- */
-#if !defined(IRIS) || IRIS == 0
-/* Only try to load i965. Do not attempt iris. */
 CHIPSET(0x29A2, i965,    "Intel(R) 965G")
 CHIPSET(0x2992, i965,    "Intel(R) 965Q")
 CHIPSET(0x2982, i965,    "Intel(R) 965G")
@@ -103,9 +95,6 @@ CHIPSET(0x22B0, chv,     "Intel(R) HD Graphics (Cherrytrail)")
 CHIPSET(0x22B1, chv,     "Intel(R) HD Graphics XXX (Braswell)") /* Overridden in brw_get_renderer_string */
 CHIPSET(0x22B2, chv,     "Intel(R) HD Graphics (Cherryview)")
 CHIPSET(0x22B3, chv,     "Intel(R) HD Graphics (Cherryview)")
-#endif
-#if !defined(IRIS) || IRIS == 0 || IRIS == 2
-/* First try to load i965, then try iris */
 CHIPSET(0x1602, bdw_gt1, "Intel(R) Broadwell GT1")
 CHIPSET(0x1606, bdw_gt1, "Intel(R) Broadwell GT1")
 CHIPSET(0x160A, bdw_gt1, "Intel(R) Broadwell GT1")
@@ -200,24 +189,27 @@ CHIPSET(0x3EA4, cfl_gt1, "Intel(R) UHD Graphics (Whiskey Lake 3x8 GT1)")
 CHIPSET(0x3EA0, cfl_gt2, "Intel(R) UHD Graphics (Whiskey Lake 3x8 GT2)")
 CHIPSET(0x3EA3, cfl_gt2, "Intel(R) UHD Graphics (Whiskey Lake 3x8 GT2)")
 CHIPSET(0x3EA2, cfl_gt3, "Intel(R) UHD Graphics (Whiskey Lake 3x8 GT3)")
-CHIPSET(0x9B21, cfl_gt1, "Intel(R) HD Graphics (Comet Lake 2x6 GT1)")
-CHIPSET(0x9BA0, cfl_gt1, "Intel(R) HD Graphics (Comet Lake 2x6 GT1)")
-CHIPSET(0x9BA2, cfl_gt1, "Intel(R) HD Graphics (Comet Lake 2x6 GT1)")
-CHIPSET(0x9BA4, cfl_gt1, "Intel(R) HD Graphics (Comet Lake 2x6 GT1)")
-CHIPSET(0x9BA5, cfl_gt1, "Intel(R) HD Graphics (Comet Lake 2x6 GT1)")
-CHIPSET(0x9BA8, cfl_gt1, "Intel(R) HD Graphics (Comet Lake 2x6 GT1)")
-CHIPSET(0x9BAA, cfl_gt1, "Intel(R) HD Graphics (Comet Lake 2x6 GT1)")
-CHIPSET(0x9BAB, cfl_gt1, "Intel(R) HD Graphics (Comet Lake 2x6 GT1)")
-CHIPSET(0x9BAC, cfl_gt1, "Intel(R) HD Graphics (Comet Lake 2x6 GT1)")
-CHIPSET(0x9B41, cfl_gt2, "Intel(R) HD Graphics (Comet Lake 3x8 GT2)")
-CHIPSET(0x9BC0, cfl_gt2, "Intel(R) HD Graphics (Comet Lake 3x8 GT2)")
-CHIPSET(0x9BC2, cfl_gt2, "Intel(R) HD Graphics (Comet Lake 3x8 GT2)")
-CHIPSET(0x9BC4, cfl_gt2, "Intel(R) HD Graphics (Comet Lake 3x8 GT2)")
-CHIPSET(0x9BC5, cfl_gt2, "Intel(R) HD Graphics (Comet Lake 3x8 GT2)")
-CHIPSET(0x9BC8, cfl_gt2, "Intel(R) HD Graphics (Comet Lake 3x8 GT2)")
-CHIPSET(0x9BCA, cfl_gt2, "Intel(R) HD Graphics (Comet Lake 3x8 GT2)")
-CHIPSET(0x9BCB, cfl_gt2, "Intel(R) HD Graphics (Comet Lake 3x8 GT2)")
-CHIPSET(0x9BCC, cfl_gt2, "Intel(R) HD Graphics (Comet Lake 3x8 GT2)")
+CHIPSET(0x9B21, cfl_gt1, "Intel(R) UHD Graphics (Comet Lake 2x6 GT1)")
+CHIPSET(0x9BA0, cfl_gt1, "Intel(R) UHD Graphics (Comet Lake 2x6 GT1)")
+CHIPSET(0x9BA2, cfl_gt1, "Intel(R) UHD Graphics (Comet Lake 2x6 GT1)")
+CHIPSET(0x9BA4, cfl_gt1, "Intel(R) UHD Graphics (Comet Lake 2x6 GT1)")
+CHIPSET(0x9BA5, cfl_gt1, "Intel(R) UHD Graphics (Comet Lake 2x6 GT1)")
+CHIPSET(0x9BA8, cfl_gt1, "Intel(R) UHD Graphics (Comet Lake 2x6 GT1)")
+CHIPSET(0x9BAA, cfl_gt1, "Intel(R) UHD Graphics (Comet Lake 2x6 GT1)")
+CHIPSET(0x9BAB, cfl_gt1, "Intel(R) UHD Graphics (Comet Lake 2x6 GT1)")
+CHIPSET(0x9BAC, cfl_gt1, "Intel(R) UHD Graphics (Comet Lake 2x6 GT1)")
+CHIPSET(0x9B41, cfl_gt2, "Intel(R) UHD Graphics (Comet Lake 3x8 GT2)")
+CHIPSET(0x9BC0, cfl_gt2, "Intel(R) UHD Graphics (Comet Lake 3x8 GT2)")
+CHIPSET(0x9BC2, cfl_gt2, "Intel(R) UHD Graphics (Comet Lake 3x8 GT2)")
+CHIPSET(0x9BC4, cfl_gt2, "Intel(R) UHD Graphics (Comet Lake 3x8 GT2)")
+CHIPSET(0x9BC5, cfl_gt2, "Intel(R) UHD Graphics (Comet Lake 3x8 GT2)")
+CHIPSET(0x9BC6, cfl_gt2, "Intel(R) UHD Graphics (Comet Lake 3x8 GT2)")
+CHIPSET(0x9BC8, cfl_gt2, "Intel(R) UHD Graphics (Comet Lake 3x8 GT2)")
+CHIPSET(0x9BCA, cfl_gt2, "Intel(R) UHD Graphics (Comet Lake 3x8 GT2)")
+CHIPSET(0x9BCB, cfl_gt2, "Intel(R) UHD Graphics (Comet Lake 3x8 GT2)")
+CHIPSET(0x9BCC, cfl_gt2, "Intel(R) UHD Graphics (Comet Lake 3x8 GT2)")
+CHIPSET(0x9BE6, cfl_gt2, "Intel(R) UHD Graphics (Comet Lake 3x8 GT2)")
+CHIPSET(0x9BF6, cfl_gt2, "Intel(R) UHD Graphics (Comet Lake 3x8 GT2)")
 CHIPSET(0x5A49, cnl_2x8, "Intel(R) HD Graphics (Cannonlake 2x8 GT0.5)")
 CHIPSET(0x5A4A, cnl_2x8, "Intel(R) HD Graphics (Cannonlake 2x8 GT0.5)")
 CHIPSET(0x5A41, cnl_3x8, "Intel(R) HD Graphics (Cannonlake 3x8 GT1)")
@@ -248,10 +240,3 @@ CHIPSET(0x4500, ehl_4x8, "Intel(R) HD Graphics (Elkhart Lake 4x8)")
 CHIPSET(0x4571, ehl_4x8, "Intel(R) HD Graphics (Elkhart Lake 4x8)")
 CHIPSET(0x4551, ehl_4x4, "Intel(R) HD Graphics (Elkhart Lake 4x4)")
 CHIPSET(0x4541, ehl_2x4, "Intel(R) HD Graphics (Elkhart Lake 2x4)")
-#endif
-#if !defined(IRIS) || IRIS == 0 || IRIS == 1
-/* First try to load iris, then try i965 */
-#endif
-#if !defined(IRIS) || IRIS == 1
-/* Only try to load iris. Do not attempt i965. */
-#endif

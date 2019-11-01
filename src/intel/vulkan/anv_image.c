@@ -34,6 +34,8 @@
 #include "vk_util.h"
 #include "util/u_math.h"
 
+#include "common/gen_aux_map.h"
+
 #include "vk_format_info.h"
 
 static isl_surf_usage_flags_t
@@ -283,6 +285,15 @@ add_aux_state_tracking_buffer(struct anv_image *image,
       }
    }
 
+   /* Add some padding to make sure the fast clear color state buffer starts at
+    * a 4K alignment. We believe that 256B might be enough, but due to lack of
+    * testing we will leave this as 4K for now.
+    */
+   image->planes[plane].size = ALIGN(image->planes[plane].size, 4096);
+   image->size = ALIGN(image->size, 4096);
+
+   assert(image->planes[plane].offset % 4096 == 0);
+
    image->planes[plane].fast_clear_state_offset =
       image->planes[plane].offset + image->planes[plane].size;
 
@@ -449,7 +460,8 @@ make_surface(const struct anv_device *dev,
          assert(image->planes[plane].aux_surface.isl.size_B == 0);
          ok = isl_surf_get_ccs_surf(&dev->isl_dev,
                                     &image->planes[plane].surface.isl,
-                                    &image->planes[plane].aux_surface.isl, 0);
+                                    &image->planes[plane].aux_surface.isl,
+                                    NULL, 0);
          if (ok) {
 
             /* Disable CCS when it is not useful (i.e., when you can't render
@@ -468,9 +480,6 @@ make_surface(const struct anv_device *dev,
                return VK_SUCCESS;
             }
 
-            add_surface(image, &image->planes[plane].aux_surface, plane);
-            add_aux_state_tracking_buffer(image, plane, dev);
-
             /* For images created without MUTABLE_FORMAT_BIT set, we know that
              * they will always be used with the original format.  In
              * particular, they will always be used with a format that
@@ -482,7 +491,16 @@ make_surface(const struct anv_device *dev,
             if (!(image->usage & VK_IMAGE_USAGE_STORAGE_BIT) &&
                 image->ccs_e_compatible) {
                image->planes[plane].aux_usage = ISL_AUX_USAGE_CCS_E;
+            } else if (dev->info.gen >= 12) {
+               anv_perf_warn(dev->instance, image,
+                             "The CCS_D aux mode is not yet handled on "
+                             "Gen12+. Not allocating a CCS buffer.");
+               image->planes[plane].aux_surface.isl.size_B = 0;
+               return VK_SUCCESS;
             }
+
+            add_surface(image, &image->planes[plane].aux_surface, plane);
+            add_aux_state_tracking_buffer(image, plane, dev);
          }
       }
    } else if ((aspect & VK_IMAGE_ASPECT_ANY_COLOR_BIT_ANV) && image->samples > 1) {
@@ -735,6 +753,17 @@ anv_CreateImage(VkDevice device,
       return anv_image_from_external(device, pCreateInfo, create_info,
                                      pAllocator, pImage);
 
+   bool use_external_format = false;
+   const struct VkExternalFormatANDROID *ext_format =
+      vk_find_struct_const(pCreateInfo->pNext, EXTERNAL_FORMAT_ANDROID);
+
+   /* "If externalFormat is zero, the effect is as if the
+    * VkExternalFormatANDROID structure was not present. Otherwise, the image
+    * will have the specified external format."
+    */
+   if (ext_format && ext_format->externalFormat != 0)
+      use_external_format = true;
+
    const VkNativeBufferANDROID *gralloc_info =
       vk_find_struct_const(pCreateInfo->pNext, NATIVE_BUFFER_ANDROID);
    if (gralloc_info)
@@ -750,6 +779,7 @@ anv_CreateImage(VkDevice device,
    return anv_image_create(device,
       &(struct anv_image_create_info) {
          .vk_info = pCreateInfo,
+         .external_format = use_external_format,
       },
       pAllocator,
       pImage);
@@ -766,10 +796,15 @@ anv_DestroyImage(VkDevice _device, VkImage _image,
       return;
 
    for (uint32_t p = 0; p < image->n_planes; ++p) {
+      if (anv_image_plane_uses_aux_map(device, image, p) &&
+          image->planes[p].address.bo) {
+         gen_aux_map_unmap_range(device->aux_map_ctx,
+                                 image->planes[p].aux_map_surface_address,
+                                 image->planes[p].surface.isl.size_B);
+      }
       if (image->planes[p].bo_is_owned) {
          assert(image->planes[p].address.bo != NULL);
-         anv_bo_cache_release(device, &device->bo_cache,
-                              image->planes[p].address.bo);
+         anv_device_release_bo(device, image->planes[p].address.bo);
       }
    }
 
@@ -785,6 +820,12 @@ static void anv_image_bind_memory_plane(struct anv_device *device,
    assert(!image->planes[plane].bo_is_owned);
 
    if (!memory) {
+      if (anv_image_plane_uses_aux_map(device, image, plane) &&
+          image->planes[plane].address.bo) {
+         gen_aux_map_unmap_range(device->aux_map_ctx,
+                                 image->planes[plane].aux_map_surface_address,
+                                 image->planes[plane].surface.isl.size_B);
+      }
       image->planes[plane].address = ANV_NULL_ADDRESS;
       return;
    }
@@ -793,6 +834,20 @@ static void anv_image_bind_memory_plane(struct anv_device *device,
       .bo = memory->bo,
       .offset = memory_offset,
    };
+
+   if (anv_image_plane_uses_aux_map(device, image, plane)) {
+      image->planes[plane].aux_map_surface_address =
+         anv_address_physical(
+            anv_address_add(image->planes[plane].address,
+                            image->planes[plane].surface.offset));
+
+      gen_aux_map_add_image(device->aux_map_ctx,
+                            &image->planes[plane].surface.isl,
+                            image->planes[plane].aux_map_surface_address,
+                            anv_address_physical(
+                               anv_address_add(image->planes[plane].address,
+                                               image->planes[plane].aux_surface.offset)));
+   }
 }
 
 /* We are binding AHardwareBuffer. Get a description, resolve the
@@ -1169,6 +1224,9 @@ anv_layout_to_fast_clear_type(const struct gen_device_info * const devinfo,
                               const VkImageAspectFlagBits aspect,
                               const VkImageLayout layout)
 {
+   if (INTEL_DEBUG & DEBUG_NO_FAST_CLEAR)
+      return ANV_FAST_CLEAR_NONE;
+
    /* The aspect must be exactly one of the image aspects. */
    assert(util_bitcount(aspect) == 1 && (aspect & image->aspects));
 
@@ -1417,7 +1475,7 @@ anv_image_fill_surface_state(struct anv_device *device,
       if (device->info.gen >= 10 && aux_usage != ISL_AUX_USAGE_NONE) {
          if (aux_usage == ISL_AUX_USAGE_HIZ) {
             clear_address = (struct anv_address) {
-               .bo = &device->hiz_clear_bo,
+               .bo = device->hiz_clear_bo,
                .offset = 0,
             };
          } else {

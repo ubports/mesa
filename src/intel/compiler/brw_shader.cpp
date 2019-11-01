@@ -164,7 +164,7 @@ const char *
 brw_instruction_name(const struct gen_device_info *devinfo, enum opcode op)
 {
    switch (op) {
-   case BRW_OPCODE_ILLEGAL ... BRW_OPCODE_NOP:
+   case 0 ... NUM_BRW_OPCODES - 1:
       /* The DO instruction doesn't exist on Gen6+, but we use it to mark the
        * start of a loop in the IR.
        */
@@ -1042,6 +1042,7 @@ backend_instruction::has_side_effects() const
    case SHADER_OPCODE_SEND:
       return send_has_side_effects;
 
+   case BRW_OPCODE_SYNC:
    case VEC4_OPCODE_UNTYPED_ATOMIC:
    case SHADER_OPCODE_UNTYPED_ATOMIC_LOGICAL:
    case SHADER_OPCODE_UNTYPED_ATOMIC_FLOAT_LOGICAL:

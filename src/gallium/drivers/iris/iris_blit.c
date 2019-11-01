@@ -240,7 +240,7 @@ iris_blorp_surf_for_resource(struct iris_vtable *vtbl,
 
    assert(!iris_resource_unfinished_aux_import(res));
 
-   if (aux_usage == ISL_AUX_USAGE_HIZ &&
+   if (isl_aux_usage_has_hiz(aux_usage) &&
        !iris_resource_level_has_hiz(res, level))
       aux_usage = ISL_AUX_USAGE_NONE;
 
@@ -355,7 +355,7 @@ iris_blit(struct pipe_context *ctx, const struct pipe_blit_info *info)
    enum isl_aux_usage src_aux_usage =
       iris_resource_texture_aux_usage(ice, src_res, src_fmt.fmt, 0);
 
-   if (src_aux_usage == ISL_AUX_USAGE_HIZ)
+   if (iris_resource_level_has_hiz(src_res, info->src.level))
       src_aux_usage = ISL_AUX_USAGE_NONE;
 
    bool src_clear_supported = src_aux_usage != ISL_AUX_USAGE_NONE &&
@@ -453,7 +453,7 @@ iris_blit(struct pipe_context *ctx, const struct pipe_blit_info *info)
       tex_cache_flush_hack(batch, src_fmt.fmt, src_res->surf.format);
 
    if (dst_res->base.target == PIPE_BUFFER)
-      util_range_add(&dst_res->valid_buffer_range, dst_x0, dst_x1);
+      util_range_add(&dst_res->base, &dst_res->valid_buffer_range, dst_x0, dst_x1);
 
    struct blorp_batch blorp_batch;
    blorp_batch_init(&ice->blorp, &blorp_batch, batch, blorp_flags);
@@ -479,16 +479,54 @@ iris_blit(struct pipe_context *ctx, const struct pipe_blit_info *info)
       }
    }
 
+   struct iris_resource *stc_dst = NULL;
+   enum isl_aux_usage stc_src_aux_usage, stc_dst_aux_usage;
    if ((info->mask & PIPE_MASK_S) &&
        util_format_has_stencil(util_format_description(info->dst.format)) &&
        util_format_has_stencil(util_format_description(info->src.format))) {
-      struct iris_resource *src_res, *dst_res, *junk;
+      struct iris_resource *src_res, *junk;
+      struct blorp_surf src_surf, dst_surf;
       iris_get_depth_stencil_resources(info->src.resource, &junk, &src_res);
-      iris_get_depth_stencil_resources(info->dst.resource, &junk, &dst_res);
+      iris_get_depth_stencil_resources(info->dst.resource, &junk, &stc_dst);
+
+      struct iris_format_info src_fmt =
+         iris_format_for_usage(devinfo, src_res->base.format,
+                               ISL_SURF_USAGE_TEXTURE_BIT);
+      stc_src_aux_usage =
+         iris_resource_texture_aux_usage(ice, src_res, src_fmt.fmt, 0);
+
+      struct iris_format_info dst_fmt =
+         iris_format_for_usage(devinfo, stc_dst->base.format,
+                               ISL_SURF_USAGE_RENDER_TARGET_BIT);
+      stc_dst_aux_usage =
+         iris_resource_render_aux_usage(ice, stc_dst, dst_fmt.fmt, false, false);
+
+      /* Resolve destination surface before blit because :
+       *    1. when we try to blit from the same surface, we can't read and
+       *    write to the same surfaces at the same time when we have
+       *    compression enabled so it's safe to resolve surface first and then
+       *    do blit.
+       *    2. While bliting from one surface to another surface, we might be
+       *    mixing compression formats, Our experiments shows that if after
+       *    blit if we set DepthStencilResource flag to 0, blit passes but
+       *    clear fails.
+       *
+       *    XXX: In second case by destructing the compression, we might lose
+       *    some performance.
+       */
+      if (devinfo->gen >= 12)
+         stc_dst_aux_usage = ISL_AUX_USAGE_NONE;
+
+      iris_resource_prepare_access(ice, batch, src_res, info->src.level, 1,
+                                   info->src.box.z, info->src.box.depth,
+                                   stc_src_aux_usage, false);
+      iris_resource_prepare_access(ice, batch, stc_dst, info->dst.level, 1,
+                                   info->dst.box.z, info->dst.box.depth,
+                                   stc_dst_aux_usage, false);
       iris_blorp_surf_for_resource(&ice->vtbl, &src_surf, &src_res->base,
-                                   ISL_AUX_USAGE_NONE, info->src.level, false);
-      iris_blorp_surf_for_resource(&ice->vtbl, &dst_surf, &dst_res->base,
-                                   ISL_AUX_USAGE_NONE, info->dst.level, true);
+                                   stc_src_aux_usage, info->src.level, false);
+      iris_blorp_surf_for_resource(&ice->vtbl, &dst_surf, &stc_dst->base,
+                                   stc_dst_aux_usage, info->dst.level, true);
 
       for (int slice = 0; slice < info->dst.box.depth; slice++) {
          iris_batch_maybe_flush(batch, 1500);
@@ -508,8 +546,15 @@ iris_blit(struct pipe_context *ctx, const struct pipe_blit_info *info)
 
    tex_cache_flush_hack(batch, src_fmt.fmt, src_res->surf.format);
 
-   iris_resource_finish_write(ice, dst_res, info->dst.level, info->dst.box.z,
-                              info->dst.box.depth, dst_aux_usage);
+   if (info->mask & main_mask) {
+      iris_resource_finish_write(ice, dst_res, info->dst.level, info->dst.box.z,
+                                 info->dst.box.depth, dst_aux_usage);
+   }
+
+   if (stc_dst) {
+      iris_resource_finish_write(ice, stc_dst, info->dst.level, info->dst.box.z,
+                                 info->dst.box.depth, stc_dst_aux_usage);
+   }
 
    iris_flush_and_dirty_for_history(ice, batch, (struct iris_resource *)
                                     info->dst.resource,
@@ -521,18 +566,29 @@ static void
 get_copy_region_aux_settings(const struct gen_device_info *devinfo,
                              struct iris_resource *res,
                              enum isl_aux_usage *out_aux_usage,
-                             bool *out_clear_supported)
+                             bool *out_clear_supported,
+                             bool is_render_target)
 {
    switch (res->aux.usage) {
    case ISL_AUX_USAGE_MCS:
+   case ISL_AUX_USAGE_MCS_CCS:
    case ISL_AUX_USAGE_CCS_E:
-      *out_aux_usage = res->aux.usage;
-      /* Prior to Gen9, fast-clear only supported 0/1 clear colors.  Since
-       * we're going to re-interpret the format as an integer format possibly
-       * with a different number of components, we can't handle clear colors
-       * until Gen9.
+      /* A stencil resolve operation must be performed prior to doing resource
+       * copies or used by CPU.
+       * (see HSD 1209978162)
        */
-      *out_clear_supported = devinfo->gen >= 9;
+      if (is_render_target && isl_surf_usage_is_stencil(res->surf.usage)) {
+         *out_aux_usage = ISL_AUX_USAGE_NONE;
+         *out_clear_supported = false;
+      } else {
+         *out_aux_usage = res->aux.usage;
+         /* Prior to Gen9, fast-clear only supported 0/1 clear colors.  Since
+          * we're going to re-interpret the format as an integer format possibly
+          * with a different number of components, we can't handle clear colors
+          * until Gen9.
+          */
+         *out_clear_supported = devinfo->gen >= 9;
+      }
       break;
    default:
       *out_aux_usage = ISL_AUX_USAGE_NONE;
@@ -569,15 +625,15 @@ iris_copy_region(struct blorp_context *blorp,
    enum isl_aux_usage src_aux_usage, dst_aux_usage;
    bool src_clear_supported, dst_clear_supported;
    get_copy_region_aux_settings(devinfo, src_res, &src_aux_usage,
-                                &src_clear_supported);
+                                &src_clear_supported, false);
    get_copy_region_aux_settings(devinfo, dst_res, &dst_aux_usage,
-                                &dst_clear_supported);
+                                &dst_clear_supported, true);
 
    if (iris_batch_references(batch, src_res->bo))
       tex_cache_flush_hack(batch, ISL_FORMAT_UNSUPPORTED, src_res->surf.format);
 
    if (dst->target == PIPE_BUFFER)
-      util_range_add(&dst_res->valid_buffer_range, dstx, dstx + src_box->width);
+      util_range_add(&dst_res->base, &dst_res->valid_buffer_range, dstx, dstx + src_box->width);
 
    if (dst->target == PIPE_BUFFER && src->target == PIPE_BUFFER) {
       struct blorp_address src_addr = {

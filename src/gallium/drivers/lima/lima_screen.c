@@ -229,6 +229,14 @@ get_fragment_shader_param(struct lima_screen *screen,
    case PIPE_SHADER_CAP_MAX_TEMPS:
       return 256; /* need investigate */
 
+   case PIPE_SHADER_CAP_INDIRECT_INPUT_ADDR:
+   case PIPE_SHADER_CAP_INDIRECT_CONST_ADDR:
+      return 1;
+
+   case PIPE_SHADER_CAP_INDIRECT_TEMP_ADDR:
+   case PIPE_SHADER_CAP_INDIRECT_OUTPUT_ADDR:
+      return 0;
+
    default:
       return 0;
    }
@@ -264,6 +272,8 @@ lima_screen_is_format_supported(struct pipe_screen *pscreen,
    case PIPE_BUFFER:
    case PIPE_TEXTURE_1D:
    case PIPE_TEXTURE_2D:
+   case PIPE_TEXTURE_RECT:
+   case PIPE_TEXTURE_CUBE:
       break;
    default:
       return false;
@@ -421,6 +431,8 @@ static const struct debug_named_value debug_options[] = {
           "print shader information for shaderdb" },
         { "nobocache", LIMA_DEBUG_NO_BO_CACHE,
           "disable BO cache" },
+        { "bocache", LIMA_DEBUG_BO_CACHE,
+          "print debug info for BO cache" },
         { NULL }
 };
 

@@ -305,6 +305,8 @@ struct si_texture {
 	unsigned			color_clear_value[2];
 	unsigned			last_msaa_resolve_target_micro_mode;
 	unsigned			num_level0_transfers;
+	unsigned			plane_index; /* other planes are different pipe_resources */
+	unsigned			num_planes;
 
 	/* Depth buffer compression and fast clear. */
 	float				depth_clear_value;
@@ -312,6 +314,7 @@ struct si_texture {
 	uint16_t			stencil_dirty_level_mask; /* each bit says if that mipmap is compressed */
 	enum pipe_format		db_render_format:16;
 	uint8_t				stencil_clear_value;
+	bool				fmask_is_not_identity:1;
 	bool				tc_compatible_htile:1;
 	bool				htile_stencil_disabled:1;
 	bool				depth_cleared:1; /* if it was cleared at least once */
@@ -513,7 +516,7 @@ struct si_screen {
 	/* Auxiliary context. Mainly used to initialize resources.
 	 * It must be locked prior to using and flushed before unlocking. */
 	struct pipe_context		*aux_context;
-	mtx_t				aux_context_lock;
+	simple_mtx_t			aux_context_lock;
 
 	/* This must be in the screen, because UE4 uses one context for
 	 * compilation and another one for rendering.
@@ -526,7 +529,7 @@ struct si_screen {
 	unsigned			num_shader_cache_hits;
 
 	/* GPU load thread. */
-	mtx_t				gpu_load_mutex;
+	simple_mtx_t			gpu_load_mutex;
 	thrd_t				gpu_load_thread;
 	union si_mmio_counters	mmio_counters;
 	volatile unsigned		gpu_load_stop_thread; /* bool */
@@ -562,7 +565,7 @@ struct si_screen {
 		unsigned L2_to_cp;
 	} barrier_flags;
 
-	mtx_t			shader_parts_mutex;
+	simple_mtx_t			shader_parts_mutex;
 	struct si_shader_part		*vs_prologs;
 	struct si_shader_part		*tcs_epilogs;
 	struct si_shader_part		*gs_prologs;
@@ -581,7 +584,7 @@ struct si_screen {
 	 * - GS and CS aren't cached, but it's certainly possible to cache
 	 *   those as well.
 	 */
-	mtx_t			shader_cache_mutex;
+	simple_mtx_t			shader_cache_mutex;
 	struct hash_table		*shader_cache;
 
 	/* Shader compiler queue for multithreaded compilation. */
@@ -892,6 +895,7 @@ struct si_context {
 	void				*cs_clear_render_target;
 	void				*cs_clear_render_target_1d_array;
 	void				*cs_dcc_retile;
+	void				*cs_fmask_expand[3][2]; /* [log2(samples)-1][is_array] */
 	struct si_screen		*screen;
 	struct pipe_debug_callback	debug;
 	struct ac_llvm_compiler		compiler; /* only non-threaded compilation */
@@ -1301,6 +1305,7 @@ void si_compute_clear_render_target(struct pipe_context *ctx,
                                     unsigned width, unsigned height,
 				    bool render_condition_enabled);
 void si_retile_dcc(struct si_context *sctx, struct si_texture *tex);
+void si_compute_expand_fmask(struct pipe_context *ctx, struct pipe_resource *tex);
 void si_init_compute_blit_functions(struct si_context *sctx);
 
 /* si_cp_dma.c */
@@ -1421,12 +1426,12 @@ void si_dispatch_prim_discard_cs_and_draw(struct si_context *sctx,
 					  unsigned input_indexbuf_max_elements);
 void si_initialize_prim_discard_tunables(struct si_context *sctx);
 
+/* si_pipe.c */
+void si_init_compiler(struct si_screen *sscreen, struct ac_llvm_compiler *compiler);
+
 /* si_perfcounters.c */
 void si_init_perfcounters(struct si_screen *screen);
 void si_destroy_perfcounters(struct si_screen *screen);
-
-/* si_pipe.c */
-bool si_check_device_reset(struct si_context *sctx);
 
 /* si_query.c */
 void si_init_screen_query_functions(struct si_screen *sscreen);
@@ -1446,6 +1451,8 @@ void *si_create_copy_image_compute_shader_1d_array(struct pipe_context *ctx);
 void *si_clear_render_target_shader(struct pipe_context *ctx);
 void *si_clear_render_target_shader_1d_array(struct pipe_context *ctx);
 void *si_create_dcc_retile_cs(struct pipe_context *ctx);
+void *si_create_fmask_expand_cs(struct pipe_context *ctx, unsigned num_samples,
+				bool is_array);
 void *si_create_query_result_cs(struct si_context *sctx);
 void *gfx10_create_sh_query_result_cs(struct si_context *sctx);
 
@@ -1684,7 +1691,9 @@ si_make_CB_shader_coherent(struct si_context *sctx, unsigned num_samples,
 		       SI_CONTEXT_INV_VCACHE;
 
 	if (sctx->chip_class >= GFX10) {
-		if (shaders_read_metadata)
+		if (sctx->screen->info.tcc_harvested)
+			sctx->flags |= SI_CONTEXT_INV_L2;
+		else if (shaders_read_metadata)
 			sctx->flags |= SI_CONTEXT_INV_L2_METADATA;
 	} else if (sctx->chip_class == GFX9) {
 		/* Single-sample color is coherent with shaders on GFX9, but
@@ -1710,7 +1719,9 @@ si_make_DB_shader_coherent(struct si_context *sctx, unsigned num_samples,
 		       SI_CONTEXT_INV_VCACHE;
 
 	if (sctx->chip_class >= GFX10) {
-		if (shaders_read_metadata)
+		if (sctx->screen->info.tcc_harvested)
+			sctx->flags |= SI_CONTEXT_INV_L2;
+		else if (shaders_read_metadata)
 			sctx->flags |= SI_CONTEXT_INV_L2_METADATA;
 	} else if (sctx->chip_class == GFX9) {
 		/* Single-sample depth (not stencil) is coherent with shaders

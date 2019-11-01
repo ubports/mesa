@@ -2238,14 +2238,18 @@ static bool si_is_format_supported(struct pipe_screen *screen,
 		return false;
 	}
 
+	if (util_format_get_num_planes(format) >= 2) {
+		return util_format_planar_is_supported(screen, format, target,
+						       sample_count,
+						       storage_sample_count,
+						       usage);
+	}
+
 	if (MAX2(1, sample_count) < MAX2(1, storage_sample_count))
 		return false;
 
 	if (sample_count > 1) {
 		if (!screen->get_param(screen, PIPE_CAP_TEXTURE_MULTISAMPLE))
-			return false;
-
-		if (usage & PIPE_BIND_SHADER_IMAGE)
 			return false;
 
 		/* Only power-of-two sample counts are supported. */
@@ -2828,8 +2832,10 @@ void si_update_fb_dirtiness_after_rendering(struct si_context *sctx)
 		struct pipe_surface *surf = sctx->framebuffer.state.cbufs[i];
 		struct si_texture *tex = (struct si_texture*)surf->texture;
 
-		if (tex->surface.fmask_offset)
+		if (tex->surface.fmask_offset) {
 			tex->dirty_level_mask |= 1 << surf->u.tex.level;
+			tex->fmask_is_not_identity = true;
+		}
 		if (tex->dcc_gather_statistics)
 			tex->separate_dcc_dirty = true;
 	}

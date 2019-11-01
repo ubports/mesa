@@ -35,6 +35,7 @@
 #include "renderonly/renderonly.h"
 #include "util/u_dynarray.h"
 #include "util/bitset.h"
+#include "util/set.h"
 
 #include <panfrost-misc.h>
 #include "pan_allocate.h"
@@ -85,6 +86,9 @@ struct panfrost_screen {
 
         struct renderonly *ro;
 
+        pthread_mutex_t active_bos_lock;
+        struct set *active_bos;
+
         pthread_mutex_t bo_cache_lock;
 
         /* The BO cache is a set of buckets with power-of-two sizes ranging
@@ -101,6 +105,7 @@ pan_screen(struct pipe_screen *p)
 }
 
 struct panfrost_fence *
-panfrost_fence_create(struct panfrost_context *ctx);
+panfrost_fence_create(struct panfrost_context *ctx,
+                      struct util_dynarray *fences);
 
 #endif /* PAN_SCREEN_H */

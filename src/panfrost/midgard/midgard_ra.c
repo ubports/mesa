@@ -61,64 +61,37 @@ static unsigned reg_type_to_mask[WORK_STRIDE] = {
                  0x1, 0x1 << 1, 0x1 << 2, 0x1 << 3       /* x */
 };
 
-static unsigned reg_type_to_swizzle[WORK_STRIDE] = {
-        SWIZZLE(COMPONENT_X, COMPONENT_Y, COMPONENT_Z, COMPONENT_W),
-
-        SWIZZLE(COMPONENT_X, COMPONENT_Y, COMPONENT_Z, COMPONENT_W),
-        SWIZZLE(COMPONENT_Y, COMPONENT_Z, COMPONENT_W, COMPONENT_W),
-
-        SWIZZLE(COMPONENT_X, COMPONENT_Y, COMPONENT_Z, COMPONENT_W),
-        SWIZZLE(COMPONENT_Y, COMPONENT_Z, COMPONENT_Z, COMPONENT_W),
-        SWIZZLE(COMPONENT_Z, COMPONENT_W, COMPONENT_Z, COMPONENT_W),
-
-        SWIZZLE(COMPONENT_X, COMPONENT_Y, COMPONENT_Z, COMPONENT_W),
-        SWIZZLE(COMPONENT_Y, COMPONENT_Y, COMPONENT_Z, COMPONENT_W),
-        SWIZZLE(COMPONENT_Z, COMPONENT_Y, COMPONENT_Z, COMPONENT_W),
-        SWIZZLE(COMPONENT_W, COMPONENT_Y, COMPONENT_Z, COMPONENT_W),
-};
-
 struct phys_reg {
+        /* Physical register: 0-31 */
         unsigned reg;
-        unsigned mask;
-        unsigned swizzle;
+
+        /* Byte offset into the physical register: 0-15 */
+        unsigned offset;
+
+        /* Number of bytes in a component of this register */
+        unsigned size;
 };
 
-/* Given the mask/swizzle of both the register and the original source,
- * compose to find the actual mask/swizzle to give the hardware */
+/* Shift each component up by reg_offset and shift all components horizontally
+ * by dst_offset. TODO: vec8+ */
 
-static unsigned
-compose_writemask(unsigned mask, struct phys_reg reg)
+static void
+offset_swizzle(unsigned *swizzle, unsigned reg_offset, unsigned srcsize, unsigned dst_offset, unsigned dstsize)
 {
-        /* Note: the reg mask is guaranteed to be contiguous. So we shift
-         * into the X place, compose via a simple AND, and shift back */
+        unsigned out[MIR_VEC_COMPONENTS];
 
-        unsigned shift = __builtin_ctz(reg.mask);
-        return ((reg.mask >> shift) & mask) << shift;
-}
+        signed reg_comp = reg_offset / srcsize;
+        signed dst_comp = dst_offset / dstsize;
 
-static unsigned
-compose_swizzle(unsigned swizzle, unsigned mask,
-                struct phys_reg reg, struct phys_reg dst)
-{
-        unsigned out = pan_compose_swizzle(swizzle, reg.swizzle);
+        assert(reg_comp * srcsize == reg_offset);
+        assert(dst_comp * dstsize == dst_offset);
 
-        /* Based on the register mask, we need to adjust over. E.g if we're
-         * writing to yz, a base swizzle of xy__ becomes _xy_. Save the
-         * original first component (x). But to prevent duplicate shifting
-         * (only applies to ALU -- mask param is set to xyzw out on L/S to
-         * prevent changes), we have to account for the shift inherent to the
-         * original writemask */
+        for (signed c = 0; c < MIR_VEC_COMPONENTS; ++c) {
+                signed comp = MAX2(c - dst_comp, 0);
+                out[c] = MIN2(swizzle[comp] + reg_comp, 4 - 1);
+        }
 
-        unsigned rep = out & 0x3;
-        unsigned shift = __builtin_ctz(dst.mask) - __builtin_ctz(mask);
-        unsigned shifted = out << (2*shift);
-
-        /* ..but we fill in the gaps so it appears to replicate */
-
-        for (unsigned s = 0; s < shift; ++s)
-                shifted |= rep << (2*s);
-
-        return shifted;
+        memcpy(swizzle, out, sizeof(out));
 }
 
 /* Helper to return the default phys_reg for a given register */
@@ -128,8 +101,8 @@ default_phys_reg(int reg)
 {
         struct phys_reg r = {
                 .reg = reg,
-                .mask = 0xF, /* xyzw */
-                .swizzle = 0xE4 /* xyzw */
+                .offset = 0,
+                .size = 4
         };
 
         return r;
@@ -139,7 +112,7 @@ default_phys_reg(int reg)
  * register corresponds to */
 
 static struct phys_reg
-index_to_reg(compiler_context *ctx, struct ra_graph *g, unsigned reg)
+index_to_reg(compiler_context *ctx, struct ra_graph *g, unsigned reg, midgard_reg_mode size)
 {
         /* Check for special cases */
         if (reg == ~0)
@@ -163,10 +136,12 @@ index_to_reg(compiler_context *ctx, struct ra_graph *g, unsigned reg)
         else if (phys == SHADOW_R0)
                 phys = 0;
 
+        unsigned bytes = mir_bytes_for_mode(size);
+
         struct phys_reg r = {
                 .reg = phys,
-                .mask = reg_type_to_mask[type],
-                .swizzle = reg_type_to_swizzle[type]
+                .offset = __builtin_ctz(reg_type_to_mask[type]) * bytes,
+                .size = bytes
         };
 
         /* Report that we actually use this register, and return it */
@@ -499,8 +474,7 @@ mir_lower_special_reads(compiler_context *ctx)
                         unsigned idx = spill_idx++;
 
                         midgard_instruction m = hazard_write ?
-                                v_mov(idx, blank_alu_src, i) :
-                                v_mov(i, blank_alu_src, idx);
+                                v_mov(idx, i) : v_mov(i, idx);
 
                         /* Insert move before each read/write, depending on the
                          * hazard we're trying to account for */
@@ -524,8 +498,8 @@ mir_lower_special_reads(compiler_context *ctx)
                                         mir_rewrite_index_dst_single(pre_use, i, idx);
                                 } else {
                                         idx = spill_idx++;
-                                        m = v_mov(i, blank_alu_src, idx);
-                                        m.mask = mir_mask_of_read_components(pre_use, i);
+                                        m = v_mov(i, idx);
+                                        m.mask = mir_from_bytemask(mir_bytemask_of_read_components(pre_use, i), midgard_reg_mode_32);
                                         mir_insert_instruction_before(ctx, pre_use, m);
                                         mir_rewrite_index_src_single(pre_use, i, idx);
                                 }
@@ -541,141 +515,20 @@ mir_lower_special_reads(compiler_context *ctx)
         free(texw);
 }
 
-/* Routines for liveness analysis */
-
 static void
-liveness_gen(uint8_t *live, unsigned node, unsigned max, unsigned mask)
-{
-        if (node >= max)
-                return;
-
-        live[node] |= mask;
-}
-
-static void
-liveness_kill(uint8_t *live, unsigned node, unsigned max, unsigned mask)
-{
-        if (node >= max)
-                return;
-
-        live[node] &= ~mask;
-}
-
-/* Updates live_in for a single instruction */
-
-static void
-liveness_ins_update(uint8_t *live, midgard_instruction *ins, unsigned max)
-{
-        /* live_in[s] = GEN[s] + (live_out[s] - KILL[s]) */
-
-        liveness_kill(live, ins->dest, max, ins->mask);
-
-        mir_foreach_src(ins, src) {
-                unsigned node = ins->src[src];
-                unsigned mask = mir_mask_of_read_components(ins, node);
-
-                liveness_gen(live, node, max, mask);
-        }
-}
-
-/* live_out[s] = sum { p in succ[s] } ( live_in[p] ) */
-
-static void
-liveness_block_live_out(compiler_context *ctx, midgard_block *blk)
-{
-        mir_foreach_successor(blk, succ) {
-                for (unsigned i = 0; i < ctx->temp_count; ++i)
-                        blk->live_out[i] |= succ->live_in[i];
-        }
-}
-
-/* Liveness analysis is a backwards-may dataflow analysis pass. Within a block,
- * we compute live_out from live_in. The intrablock pass is linear-time. It
- * returns whether progress was made. */
-
-static bool
-liveness_block_update(compiler_context *ctx, midgard_block *blk)
-{
-        bool progress = false;
-
-        liveness_block_live_out(ctx, blk);
-
-        uint8_t *live = mem_dup(blk->live_out, ctx->temp_count);
-
-        mir_foreach_instr_in_block_rev(blk, ins)
-                liveness_ins_update(live, ins, ctx->temp_count);
-
-        /* To figure out progress, diff live_in */
-
-        for (unsigned i = 0; (i < ctx->temp_count) && !progress; ++i)
-                progress |= (blk->live_in[i] != live[i]);
-
-        free(blk->live_in);
-        blk->live_in = live;
-
-        return progress;
-}
-
-/* Globally, liveness analysis uses a fixed-point algorithm based on a
- * worklist. We initialize a work list with the exit block. We iterate the work
- * list to compute live_in from live_out for each block on the work list,
- * adding the predecessors of the block to the work list if we made progress.
- */
-
-static void
-mir_compute_liveness(
+mir_compute_interference(
                 compiler_context *ctx,
                 struct ra_graph *g)
 {
-        /* List of midgard_block */
-        struct set *work_list;
-
-        work_list = _mesa_set_create(ctx,
-                        _mesa_hash_pointer,
-                        _mesa_key_pointer_equal);
-
-        /* Allocate */
-
-        mir_foreach_block(ctx, block) {
-                block->live_in = calloc(ctx->temp_count, 1);
-                block->live_out = calloc(ctx->temp_count, 1);
-        }
-
-        /* Initialize the work list with the exit block */
-        struct set_entry *cur;
-
-        midgard_block *exit = mir_exit_block(ctx);
-        cur = _mesa_set_add(work_list, exit);
-
-        /* Iterate the work list */
-
-        do {
-                /* Pop off a block */
-                midgard_block *blk = (struct midgard_block *) cur->key;
-                _mesa_set_remove(work_list, cur);
-
-                /* Update its liveness information */
-                bool progress = liveness_block_update(ctx, blk);
-
-                /* If we made progress, we need to process the predecessors */
-
-                if (progress || (blk == exit)) {
-                        mir_foreach_predecessor(blk, pred)
-                                _mesa_set_add(work_list, pred);
-                }
-        } while((cur = _mesa_set_next_entry(work_list, NULL)) != NULL);
+        /* First, we need liveness information to be computed per block */
+        mir_compute_liveness(ctx);
 
         /* Now that every block has live_in/live_out computed, we can determine
          * interference by walking each block linearly. Take live_out at the
          * end of each block and walk the block backwards. */
 
         mir_foreach_block(ctx, blk) {
-                uint8_t *live = calloc(ctx->temp_count, 1);
-
-                mir_foreach_successor(blk, succ) {
-                        for (unsigned i = 0; i < ctx->temp_count; ++i)
-                                live[i] |= succ->live_in[i];
-                }
+                uint16_t *live = mem_dup(blk->live_out, ctx->temp_count * sizeof(uint16_t));
 
                 mir_foreach_instr_in_block_rev(blk, ins) {
                         /* Mark all registers live after the instruction as
@@ -690,15 +543,10 @@ mir_compute_liveness(
                         }
 
                         /* Update live_in */
-                        liveness_ins_update(live, ins, ctx->temp_count);
+                        mir_liveness_ins_update(live, ins, ctx->temp_count);
                 }
 
                 free(live);
-        }
-
-        mir_foreach_block(ctx, blk) {
-                free(blk->live_in);
-                free(blk->live_out);
         }
 }
 
@@ -796,7 +644,7 @@ allocate_registers(compiler_context *ctx, bool *spilled)
                 ra_set_node_class(g, i, classes[class]);
         }
 
-        mir_compute_liveness(ctx, g);
+        mir_compute_interference(ctx, g);
 
         if (!ra_allocate(g)) {
                 *spilled = true;
@@ -828,21 +676,17 @@ install_registers_instr(
                  if (ins->compact_branch)
                          return;
 
-                struct phys_reg src1 = index_to_reg(ctx, g, ins->src[0]);
-                struct phys_reg src2 = index_to_reg(ctx, g, ins->src[1]);
-                struct phys_reg dest = index_to_reg(ctx, g, ins->dest);
+                struct phys_reg src1 = index_to_reg(ctx, g, ins->src[0], mir_srcsize(ins, 0));
+                struct phys_reg src2 = index_to_reg(ctx, g, ins->src[1], mir_srcsize(ins, 1));
+                struct phys_reg dest = index_to_reg(ctx, g, ins->dest, mir_typesize(ins));
 
-                unsigned uncomposed_mask = ins->mask;
-                ins->mask = compose_writemask(uncomposed_mask, dest);
+                mir_set_bytemask(ins, mir_bytemask(ins) << dest.offset);
 
-                /* Adjust the dest mask if necessary. Mostly this is a no-op
-                 * but it matters for dot products */
-                dest.mask = effective_writemask(&ins->alu, ins->mask);
+                unsigned dest_offset =
+                        GET_CHANNEL_COUNT(alu_opcode_props[ins->alu.op].props) ? 0 :
+                        dest.offset;
 
-                midgard_vector_alu_src mod1 =
-                        vector_alu_from_unsigned(ins->alu.src1);
-                mod1.swizzle = compose_swizzle(mod1.swizzle, uncomposed_mask, src1, dest);
-                ins->alu.src1 = vector_alu_srco_unsigned(mod1);
+                offset_swizzle(ins->swizzle[0], src1.offset, src1.size, dest_offset, dest.size);
 
                 ins->registers.src1_reg = src1.reg;
 
@@ -862,8 +706,7 @@ install_registers_instr(
                 } else {
                         midgard_vector_alu_src mod2 =
                                 vector_alu_from_unsigned(ins->alu.src2);
-                        mod2.swizzle = compose_swizzle(
-                                               mod2.swizzle, uncomposed_mask, src2, dest);
+                        offset_swizzle(ins->swizzle[1], src2.offset, src2.size, dest_offset, dest.size);
                         ins->alu.src2 = vector_alu_srco_unsigned(mod2);
 
                         ins->registers.src2_reg = src2.reg;
@@ -881,54 +724,35 @@ install_registers_instr(
                 bool encodes_src = OP_IS_STORE(ins->load_store.op);
 
                 if (encodes_src) {
-                        struct phys_reg src = index_to_reg(ctx, g, ins->src[0]);
+                        struct phys_reg src = index_to_reg(ctx, g, ins->src[0], mir_srcsize(ins, 0));
                         assert(src.reg == 26 || src.reg == 27);
 
                         ins->load_store.reg = src.reg - 26;
-
-                        unsigned shift = __builtin_ctz(src.mask);
-                        unsigned adjusted_mask = src.mask >> shift;
-                        assert(((adjusted_mask + 1) & adjusted_mask) == 0);
-
-                        unsigned new_swizzle = 0;
-                        for (unsigned q = 0; q < 4; ++q) {
-                                unsigned c = (ins->load_store.swizzle >> (2*q)) & 3;
-                                new_swizzle |= (c + shift) << (2*q);
-                        }
-
-                        ins->load_store.swizzle = compose_swizzle(
-                                                          new_swizzle, src.mask,
-                                                          default_phys_reg(0), src);
+                        offset_swizzle(ins->swizzle[0], src.offset, src.size, 0, 4);
                } else {
-                        struct phys_reg src = index_to_reg(ctx, g, ins->dest);
+                        struct phys_reg dst = index_to_reg(ctx, g, ins->dest, mir_typesize(ins));
 
-                        ins->load_store.reg = src.reg;
-
-                        ins->load_store.swizzle = compose_swizzle(
-                                                          ins->load_store.swizzle, 0xF,
-                                                          default_phys_reg(0), src);
-
-                        ins->mask = compose_writemask(
-                                            ins->mask, src);
+                        ins->load_store.reg = dst.reg;
+                        offset_swizzle(ins->swizzle[0], 0, 4, dst.offset, dst.size);
+                        mir_set_bytemask(ins, mir_bytemask(ins) << dst.offset);
                 }
 
                 /* We also follow up by actual arguments */
 
-                int src2 =
-                        encodes_src ? ins->src[1] : ins->src[0];
+                unsigned src2 = ins->src[1];
+                unsigned src3 = ins->src[2];
 
-                int src3 =
-                        encodes_src ? ins->src[2] : ins->src[1];
-
-                if (src2 >= 0) {
-                        struct phys_reg src = index_to_reg(ctx, g, src2);
-                        unsigned component = __builtin_ctz(src.mask);
+                if (src2 != ~0) {
+                        struct phys_reg src = index_to_reg(ctx, g, src2, mir_srcsize(ins, 1));
+                        unsigned component = src.offset / src.size;
+                        assert(component * src.size == src.offset);
                         ins->load_store.arg_1 |= midgard_ldst_reg(src.reg, component);
                 }
 
-                if (src3 >= 0) {
-                        struct phys_reg src = index_to_reg(ctx, g, src3);
-                        unsigned component = __builtin_ctz(src.mask);
+                if (src3 != ~0) {
+                        struct phys_reg src = index_to_reg(ctx, g, src3, mir_srcsize(ins, 2));
+                        unsigned component = src.offset / src.size;
+                        assert(component * src.size == src.offset);
                         ins->load_store.arg_2 |= midgard_ldst_reg(src.reg, component);
                 }
  
@@ -937,9 +761,9 @@ install_registers_instr(
 
         case TAG_TEXTURE_4: {
                 /* Grab RA results */
-                struct phys_reg dest = index_to_reg(ctx, g, ins->dest);
-                struct phys_reg coord = index_to_reg(ctx, g, ins->src[0]);
-                struct phys_reg lod = index_to_reg(ctx, g, ins->src[1]);
+                struct phys_reg dest = index_to_reg(ctx, g, ins->dest, mir_typesize(ins));
+                struct phys_reg coord = index_to_reg(ctx, g, ins->src[1], mir_srcsize(ins, 1));
+                struct phys_reg lod = index_to_reg(ctx, g, ins->src[2], mir_srcsize(ins, 2));
 
                 assert(dest.reg == 28 || dest.reg == 29);
                 assert(coord.reg == 28 || coord.reg == 29);
@@ -948,24 +772,22 @@ install_registers_instr(
                 ins->texture.in_reg_full = 1;
                 ins->texture.in_reg_upper = 0;
                 ins->texture.in_reg_select = coord.reg - 28;
-                ins->texture.in_reg_swizzle =
-                        compose_swizzle(ins->texture.in_reg_swizzle, 0xF, coord, dest);
+                offset_swizzle(ins->swizzle[1], coord.offset, coord.size, 0, 4);
 
                 /* Next, install the destination */
                 ins->texture.out_full = 1;
                 ins->texture.out_upper = 0;
                 ins->texture.out_reg_select = dest.reg - 28;
-                ins->texture.swizzle =
-                        compose_swizzle(ins->texture.swizzle, dest.mask, dest, dest);
-                ins->mask =
-                        compose_writemask(ins->mask, dest);
+                offset_swizzle(ins->swizzle[0], 0, 4, dest.offset, dest.size);
+                mir_set_bytemask(ins, mir_bytemask(ins) << dest.offset);
 
                 /* If there is a register LOD/bias, use it */
-                if (ins->src[1] != ~0) {
+                if (ins->src[2] != ~0) {
+                        assert(!(lod.offset & 3));
                         midgard_tex_register_select sel = {
                                 .select = lod.reg,
                                 .full = 1,
-                                .component = lod.swizzle & 3,
+                                .component = lod.offset / 4
                         };
 
                         uint8_t packed;

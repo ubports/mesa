@@ -190,7 +190,6 @@ virgl_drm_winsys_resource_create(struct virgl_winsys *qws,
    res->res_handle = createcmd.res_handle;
    res->bo_handle = createcmd.bo_handle;
    res->size = size;
-   res->stride = stride;
    pipe_reference_init(&res->reference, 1);
    p_atomic_set(&res->external, false);
    p_atomic_set(&res->num_cs_references, 0);
@@ -302,7 +301,11 @@ alloc:
 
 static struct virgl_hw_res *
 virgl_drm_winsys_resource_create_handle(struct virgl_winsys *qws,
-                                        struct winsys_handle *whandle)
+                                        struct winsys_handle *whandle,
+                                        uint32_t *plane,
+                                        uint32_t *stride,
+                                        uint32_t *plane_offset,
+                                        uint64_t *modifier)
 {
    struct virgl_drm_winsys *qdws = virgl_drm_winsys(qws);
    struct drm_gem_open open_arg = {};
@@ -310,10 +313,15 @@ virgl_drm_winsys_resource_create_handle(struct virgl_winsys *qws,
    struct virgl_hw_res *res = NULL;
    uint32_t handle = whandle->handle;
 
-   if (whandle->offset != 0) {
+   if (whandle->offset != 0 && whandle->type == WINSYS_HANDLE_TYPE_SHARED) {
       _debug_printf("attempt to import unsupported winsys offset %u\n",
                     whandle->offset);
       return NULL;
+   } else if (whandle->type == WINSYS_HANDLE_TYPE_FD) {
+      *plane = whandle->plane;
+      *stride = whandle->stride;
+      *plane_offset = whandle->offset;
+      *modifier = whandle->modifier;
    }
 
    mtx_lock(&qdws->bo_handles_mutex);
@@ -374,7 +382,6 @@ virgl_drm_winsys_resource_create_handle(struct virgl_winsys *qws,
    res->res_handle = info_arg.res_handle;
 
    res->size = info_arg.size;
-   res->stride = info_arg.stride;
    pipe_reference_init(&res->reference, 1);
    p_atomic_set(&res->external, true);
    res->num_cs_references = 0;

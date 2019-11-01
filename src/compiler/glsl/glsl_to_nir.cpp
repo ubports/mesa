@@ -34,6 +34,7 @@
 #include "program.h"
 #include "compiler/nir/nir_control_flow.h"
 #include "compiler/nir/nir_builder.h"
+#include "compiler/nir/nir_builtin_builder.h"
 #include "compiler/nir/nir_deref.h"
 #include "main/errors.h"
 #include "main/imports.h"
@@ -63,6 +64,7 @@ public:
    virtual void visit(ir_loop *);
    virtual void visit(ir_if *);
    virtual void visit(ir_discard *);
+   virtual void visit(ir_demote *);
    virtual void visit(ir_loop_jump *);
    virtual void visit(ir_return *);
    virtual void visit(ir_call *);
@@ -776,6 +778,15 @@ nir_visitor::visit(ir_discard *ir)
 }
 
 void
+nir_visitor::visit(ir_demote *ir)
+{
+   nir_intrinsic_instr *demote =
+      nir_intrinsic_instr_create(this->shader, nir_intrinsic_demote);
+
+   nir_builder_instr_insert(&b, &demote->instr);
+}
+
+void
 nir_visitor::visit(ir_emit_vertex *ir)
 {
    nir_intrinsic_instr *instr =
@@ -1155,6 +1166,9 @@ nir_visitor::visit(ir_call *ir)
          break;
       case ir_intrinsic_read_first_invocation:
          op = nir_intrinsic_read_first_invocation;
+         break;
+      case ir_intrinsic_helper_invocation:
+         op = nir_intrinsic_is_helper_invocation;
          break;
       default:
          unreachable("not reached");
@@ -1628,6 +1642,12 @@ nir_visitor::visit(ir_call *ir)
          ir_rvalue *value = (ir_rvalue *) ir->actual_parameters.get_head();
          instr->src[0] = nir_src_for_ssa(evaluate_rvalue(value));
 
+         nir_builder_instr_insert(&b, &instr->instr);
+         break;
+      }
+      case nir_intrinsic_is_helper_invocation: {
+         nir_ssa_dest_init(&instr->instr, &instr->dest, 1, 1, NULL);
+         instr->num_components = 1;
          nir_builder_instr_insert(&b, &instr->instr);
          break;
       }
@@ -2168,6 +2188,10 @@ nir_visitor::visit(ir_expression *ir)
       return;
    }
 
+   case ir_unop_atan:
+      result = nir_atan(&b, srcs[0]);
+      break;
+
    case ir_binop_add:
       result = type_is_float(out_type) ? nir_fadd(&b, srcs[0], srcs[1])
                                        : nir_iadd(&b, srcs[0], srcs[1]);
@@ -2330,6 +2354,10 @@ nir_visitor::visit(ir_expression *ir)
       }
       break;
    }
+
+   case ir_binop_atan2:
+      result = nir_atan2(&b, srcs[0], srcs[1]);
+      break;
 
    case ir_binop_ldexp: result = nir_ldexp(&b, srcs[0], srcs[1]); break;
    case ir_triop_fma:

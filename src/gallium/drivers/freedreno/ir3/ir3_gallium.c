@@ -51,11 +51,10 @@ dump_shader_info(struct ir3_shader_variant *v, bool binning_pass,
 		return;
 
 	pipe_debug_message(debug, SHADER_INFO,
-			"%s%s shader: %u inst, %u dwords, "
+			"%s shader: %u inst, %u dwords, "
 			"%u half, %u full, %u constlen, "
 			"%u (ss), %u (sy), %d max_sun, %d loops\n",
-			binning_pass ? "B" : "",
-			ir3_shader_stage(v->shader),
+			ir3_shader_stage(v),
 			v->info.instrs_count,
 			v->info.sizedwords,
 			v->info.max_half_reg + 1,
@@ -394,6 +393,54 @@ ir3_emit_immediates(struct fd_screen *screen, const struct ir3_shader_variant *v
 		emit_const(screen, ring, v, base,
 			0, size, const_state->immediates[0].val, NULL);
 	}
+}
+
+static uint32_t
+link_geometry_stages(const struct ir3_shader_variant *producer,
+		const struct ir3_shader_variant *consumer,
+		uint32_t *locs)
+{
+	uint32_t num_loc = 0;
+
+	nir_foreach_variable(in_var, &consumer->shader->nir->inputs) {
+		nir_foreach_variable(out_var, &producer->shader->nir->outputs) {
+			if (in_var->data.location == out_var->data.location) {
+				locs[in_var->data.driver_location] =
+					producer->shader->output_loc[out_var->data.driver_location] * 4;
+
+				debug_assert(num_loc <= in_var->data.driver_location + 1);
+				num_loc = in_var->data.driver_location + 1;
+			}
+		}
+	}
+
+	return num_loc;
+}
+
+void
+ir3_emit_link_map(struct fd_screen *screen,
+		const struct ir3_shader_variant *producer,
+		const struct ir3_shader_variant *v, struct fd_ringbuffer *ring)
+{
+	const struct ir3_const_state *const_state = &v->shader->const_state;
+	uint32_t base = const_state->offsets.primitive_map;
+	uint32_t patch_locs[MAX_VARYING] = { }, num_loc;
+
+	num_loc = link_geometry_stages(producer, v, patch_locs);
+
+	int size = DIV_ROUND_UP(num_loc, 4);
+
+	/* truncate size to avoid writing constants that shader
+	 * does not use:
+	 */
+	size = MIN2(size + base, v->constlen) - base;
+
+	/* convert out of vec4: */
+	base *= 4;
+	size *= 4;
+
+	if (size > 0)
+		emit_const(screen, ring, v, base, 0, size, patch_locs, NULL);
 }
 
 /* emit stream-out buffers: */

@@ -783,6 +783,7 @@ void si_nir_scan_shader(const struct nir_shader *nir,
 	if (nir->num_uniforms > 0)
 		info->const_buffers_declared |= 1;
 	info->images_declared = u_bit_consecutive(0, nir->info.num_images);
+	info->msaa_images_declared = u_bit_consecutive(0, nir->info.last_msaa_image + 1);
 	info->samplers_declared = nir->info.textures_used;
 
 	info->num_written_clipdistance = nir->info.clip_distance_array_size;
@@ -800,7 +801,7 @@ void si_nir_scan_shader(const struct nir_shader *nir,
 	}
 }
 
-void
+static void
 si_nir_opts(struct nir_shader *nir)
 {
 	bool progress;
@@ -912,7 +913,7 @@ si_nir_lower_color(nir_shader *nir)
         }
 }
 
-void si_nir_lower_ps_inputs(struct nir_shader *nir)
+static void si_nir_lower_ps_inputs(struct nir_shader *nir)
 {
 	if (nir->info.stage != MESA_SHADER_FRAGMENT)
 		return;
@@ -937,32 +938,35 @@ void si_nir_lower_ps_inputs(struct nir_shader *nir)
 		   nir_var_shader_in);
 }
 
-/**
- * Perform "lowering" operations on the NIR that are run once when the shader
- * selector is created.
- */
-void si_lower_nir(struct si_shader_selector *sel)
+void si_nir_adjust_driver_locations(struct nir_shader *nir)
 {
 	/* Adjust the driver location of inputs and outputs. The state tracker
 	 * interprets them as slots, while the ac/nir backend interprets them
 	 * as individual components.
 	 */
-	if (sel->nir->info.stage != MESA_SHADER_FRAGMENT) {
-		nir_foreach_variable(variable, &sel->nir->inputs)
+	if (nir->info.stage != MESA_SHADER_FRAGMENT) {
+		nir_foreach_variable(variable, &nir->inputs)
 			variable->data.driver_location *= 4;
 	}
 
-	nir_foreach_variable(variable, &sel->nir->outputs) {
+	nir_foreach_variable(variable, &nir->outputs) {
 		variable->data.driver_location *= 4;
 
-		if (sel->nir->info.stage == MESA_SHADER_FRAGMENT) {
+		if (nir->info.stage == MESA_SHADER_FRAGMENT) {
 			if (variable->data.location == FRAG_RESULT_DEPTH)
 				variable->data.driver_location += 2;
 			else if (variable->data.location == FRAG_RESULT_STENCIL)
 				variable->data.driver_location += 1;
 		}
 	}
+}
 
+/**
+ * Perform "lowering" operations on the NIR that are run once when the shader
+ * selector is created.
+ */
+static void si_lower_nir(struct si_screen *sscreen, struct nir_shader *nir)
+{
 	/* Perform lowerings (and optimizations) of code.
 	 *
 	 * Performance considerations aside, we must:
@@ -974,7 +978,7 @@ void si_lower_nir(struct si_shader_selector *sel)
 	static const struct nir_lower_tex_options lower_tex_options = {
 		.lower_txp = ~0u,
 	};
-	NIR_PASS_V(sel->nir, nir_lower_tex, &lower_tex_options);
+	NIR_PASS_V(nir, nir_lower_tex, &lower_tex_options);
 
 	const nir_lower_subgroups_options subgroups_options = {
 		.subgroup_size = 64,
@@ -984,25 +988,41 @@ void si_lower_nir(struct si_shader_selector *sel)
 		.lower_vote_trivial = false,
 		.lower_vote_eq_to_ballot = true,
 	};
-	NIR_PASS_V(sel->nir, nir_lower_subgroups, &subgroups_options);
+	NIR_PASS_V(nir, nir_lower_subgroups, &subgroups_options);
+
+	/* Lower load constants to scalar and then clean up the mess */
+	NIR_PASS_V(nir, nir_lower_load_const_to_scalar);
+	NIR_PASS_V(nir, nir_lower_var_copies);
+	NIR_PASS_V(nir, nir_lower_pack);
+	NIR_PASS_V(nir, nir_opt_access);
+	si_nir_opts(nir);
 
 	/* Lower large variables that are always constant with load_constant
 	 * intrinsics, which get turned into PC-relative loads from a data
 	 * section next to the shader.
+	 *
+	 * st/mesa calls finalize_nir twice, but we can't call this pass twice.
 	 */
-	NIR_PASS_V(sel->nir, nir_opt_large_constants,
-		   glsl_get_natural_size_align_bytes, 16);
+	if (!nir->constant_data) {
+		NIR_PASS_V(nir, nir_opt_large_constants,
+			   glsl_get_natural_size_align_bytes, 16);
+	}
 
-	ac_lower_indirect_derefs(sel->nir, sel->screen->info.chip_class);
+	ac_lower_indirect_derefs(nir, sscreen->info.chip_class);
 
-	si_nir_opts(sel->nir);
+	si_nir_opts(nir);
 
-	NIR_PASS_V(sel->nir, nir_lower_bool_to_int32);
+	NIR_PASS_V(nir, nir_lower_bool_to_int32);
+}
 
-	/* Strip the resulting shader so that the shader cache is more likely
-	 * to hit from other similar shaders.
-	 */
-	nir_strip(sel->nir);
+void si_finalize_nir(struct pipe_screen *screen, void *nirptr, bool optimize)
+{
+	struct si_screen *sscreen = (struct si_screen *)screen;
+	struct nir_shader *nir = (struct nir_shader *)nirptr;
+
+	nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+	si_nir_lower_ps_inputs(nir);
+	si_lower_nir(sscreen, nir);
 }
 
 static void declare_nir_input_vs(struct si_shader_context *ctx,
@@ -1057,7 +1077,7 @@ si_nir_load_sampler_desc(struct ac_shader_abi *abi,
 	unsigned const_index = base_index + constant_index;
 
 	assert(!descriptor_set);
-	assert(!image || desc_type == AC_DESC_IMAGE || desc_type == AC_DESC_BUFFER);
+	assert(desc_type <= AC_DESC_BUFFER);
 
 	if (bindless) {
 		LLVMValueRef list =
@@ -1065,11 +1085,14 @@ si_nir_load_sampler_desc(struct ac_shader_abi *abi,
 
 		/* dynamic_index is the bindless handle */
 		if (image) {
-			/* For simplicity, bindless image descriptors use fixed
-			 * 16-dword slots for now.
-			 */
+			/* Bindless image descriptors use 16-dword slots. */
 			dynamic_index = LLVMBuildMul(ctx->ac.builder, dynamic_index,
 					     LLVMConstInt(ctx->i64, 2, 0), "");
+			/* FMASK is right after the image. */
+			if (desc_type == AC_DESC_FMASK) {
+				dynamic_index = LLVMBuildAdd(ctx->ac.builder, dynamic_index,
+							     ctx->i32_1, "");
+			}
 
 			return si_load_image_desc(ctx, list, dynamic_index, desc_type,
 						  write, true);
@@ -1108,14 +1131,19 @@ si_nir_load_sampler_desc(struct ac_shader_abi *abi,
 	}
 
 	if (image) {
+		/* FMASKs are separate from images. */
+		if (desc_type == AC_DESC_FMASK) {
+			index = LLVMBuildAdd(ctx->ac.builder, index,
+					     LLVMConstInt(ctx->i32, SI_NUM_IMAGES, 0), "");
+		}
 		index = LLVMBuildSub(ctx->ac.builder,
-				     LLVMConstInt(ctx->i32, SI_NUM_IMAGES - 1, 0),
+				     LLVMConstInt(ctx->i32, SI_NUM_IMAGE_SLOTS - 1, 0),
 				     index, "");
 		return si_load_image_desc(ctx, list, index, desc_type, write, false);
 	}
 
 	index = LLVMBuildAdd(ctx->ac.builder, index,
-			     LLVMConstInt(ctx->i32, SI_NUM_IMAGES / 2, 0), "");
+			     LLVMConstInt(ctx->i32, SI_NUM_IMAGE_SLOTS / 2, 0), "");
 	return si_load_sampler_desc(ctx, list, index, desc_type);
 }
 

@@ -167,6 +167,7 @@ public:
    bool lower_integer_multiplication();
    bool lower_minmax();
    bool lower_simd_width();
+   bool lower_scoreboard();
    bool opt_combine_constants();
 
    void emit_dummy_fs();
@@ -299,7 +300,7 @@ public:
 
    fs_reg interp_reg(int location, int channel);
 
-   int implied_mrf_writes(fs_inst *inst) const;
+   int implied_mrf_writes(const fs_inst *inst) const;
 
    virtual void dump_instructions();
    virtual void dump_instructions(const char *name);

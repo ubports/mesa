@@ -65,6 +65,7 @@
 #include "util/u_atomic.h"
 #include "util/u_vector.h"
 #include "mapi/glapi/glapi.h"
+#include "util/bitscan.h"
 
 /* Additional definitions not yet in the drm_fourcc.h.
  */
@@ -632,10 +633,9 @@ dri2_load_driver_common(_EGLDisplay *disp,
    if (!extensions)
       return EGL_FALSE;
 
-   if (!dri2_bind_extensions(dri2_dpy, driver_extensions, extensions, false)) {
-      dlclose(dri2_dpy->driver);
+   if (!dri2_bind_extensions(dri2_dpy, driver_extensions, extensions, false))
       return EGL_FALSE;
-   }
+
    dri2_dpy->driver_extensions = extensions;
 
    dri2_bind_extensions(dri2_dpy, optional_driver_extensions, extensions, true);
@@ -801,6 +801,7 @@ dri2_setup_screen(_EGLDisplay *disp)
       }
 
       disp->Extensions.KHR_image_base = EGL_TRUE;
+      disp->Extensions.EXT_image_flush_external = EGL_TRUE;
       disp->Extensions.KHR_gl_renderbuffer_image = EGL_TRUE;
       if (dri2_dpy->image->base.version >= 5 &&
           dri2_dpy->image->createImageFromTexture) {
@@ -2297,14 +2298,27 @@ dri2_create_image_mesa_drm_buffer(_EGLDisplay *disp, _EGLContext *ctx,
       return NULL;
    }
 
-   dri_image =
-      dri2_dpy->image->createImageFromName(dri2_dpy->dri_screen,
-                                           attrs.Width,
-                                           attrs.Height,
-                                           format,
-                                           name,
-                                           pitch,
-                                           NULL);
+   if (dri2_dpy->image->base.version >= 18) {
+      unsigned use = 0;
+
+      if (attrs.ImageFlushExternal)
+         use |= __DRI_IMAGE_USE_FLUSH_EXTERNAL;
+
+      dri_image =
+         dri2_dpy->image->createImageFromName2(dri2_dpy->dri_screen,
+                                               attrs.Width, attrs.Height,
+                                               format, name, pitch, use,
+                                               NULL);
+   } else {
+      dri_image =
+         dri2_dpy->image->createImageFromName(dri2_dpy->dri_screen,
+                                              attrs.Width,
+                                              attrs.Height,
+                                              format,
+                                              name,
+                                              pitch,
+                                              NULL);
+   }
 
    return dri2_create_image_from_dri(disp, dri_image);
 }
@@ -2646,7 +2660,26 @@ dri2_create_image_dma_buf(_EGLDisplay *disp, _EGLContext *ctx,
       has_modifier = true;
    }
 
-   if (has_modifier) {
+   if (dri2_dpy->image->base.version >= 18) {
+      unsigned use = 0;
+
+      if (attrs.ImageFlushExternal)
+         use |= __DRI_IMAGE_USE_FLUSH_EXTERNAL;
+
+      if (!has_modifier)
+         modifier = DRM_FORMAT_MOD_INVALID;
+
+      dri_image =
+         dri2_dpy->image->createImageFromDmaBufs3(dri2_dpy->dri_screen,
+            attrs.Width, attrs.Height, attrs.DMABufFourCC.Value,
+            modifier, use, fds, num_fds, pitches, offsets,
+            attrs.DMABufYuvColorSpaceHint.Value,
+            attrs.DMABufSampleRangeHint.Value,
+            attrs.DMABufChromaHorizontalSiting.Value,
+            attrs.DMABufChromaVerticalSiting.Value,
+            &error,
+            NULL);
+   } else if (has_modifier) {
       if (dri2_dpy->image->base.version < 15 ||
           dri2_dpy->image->createImageFromDmaBufs2 == NULL) {
          _eglError(EGL_BAD_MATCH, "unsupported dma_buf format modifier");
@@ -2662,8 +2695,7 @@ dri2_create_image_dma_buf(_EGLDisplay *disp, _EGLContext *ctx,
             attrs.DMABufChromaVerticalSiting.Value,
             &error,
             NULL);
-   }
-   else {
+   } else {
       dri_image =
          dri2_dpy->image->createImageFromDmaBufs(dri2_dpy->dri_screen,
             attrs.Width, attrs.Height, attrs.DMABufFourCC.Value,
@@ -2734,6 +2766,8 @@ dri2_create_drm_image_mesa(_EGLDriver *drv, _EGLDisplay *disp,
       dri_use |= __DRI_IMAGE_USE_SCANOUT;
    if (attrs.DRMBufferUseMESA & EGL_DRM_BUFFER_USE_CURSOR_MESA)
       dri_use |= __DRI_IMAGE_USE_CURSOR;
+   if (attrs.ImageFlushExternal)
+      dri_use |= __DRI_IMAGE_USE_FLUSH_EXTERNAL;
 
    dri2_img = malloc(sizeof *dri2_img);
    if (!dri2_img) {
@@ -3442,6 +3476,37 @@ dri2_interop_export_object(_EGLDisplay *disp, _EGLContext *ctx,
    return dri2_dpy->interop->export_object(dri2_ctx->dri_context, in, out);
 }
 
+static void
+dri2_image_flush_external(_EGLDisplay *disp, _EGLContext *ctx,
+                          _EGLImage *image)
+{
+   struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
+   struct dri2_egl_context *dri2_ctx = dri2_egl_context(ctx);
+   struct dri2_egl_image *dri2_img = dri2_egl_image(image);
+
+   if (dri2_dpy->image->base.version < 18)
+      return;
+
+   dri2_dpy->image->imageFlushExternal(dri2_ctx->dri_context,
+                                       dri2_img->dri_image, 0);
+}
+
+static void
+dri2_image_invalidate_external(_EGLDisplay *disp, _EGLContext *ctx,
+                               _EGLImage *image)
+{
+   struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
+   struct dri2_egl_context *dri2_ctx = dri2_egl_context(ctx);
+   struct dri2_egl_image *dri2_img = dri2_egl_image(image);
+
+   if (dri2_dpy->image->base.version < 18)
+      return;
+
+   dri2_dpy->image->imageInvalidateExternal(dri2_ctx->dri_context,
+                                            dri2_img->dri_image, 0);
+}
+
+
 /**
  * This is the main entrypoint into the driver, called by libEGL.
  * Gets an _EGLDriver object and init its dispatch table.
@@ -3500,4 +3565,6 @@ _eglInitDriver(_EGLDriver *dri2_drv)
    dri2_drv->API.GLInteropExportObject = dri2_interop_export_object;
    dri2_drv->API.DupNativeFenceFDANDROID = dri2_dup_native_fence_fd;
    dri2_drv->API.SetBlobCacheFuncsANDROID = dri2_set_blob_cache_funcs;
+   dri2_drv->API.ImageFlushExternal = dri2_image_flush_external;
+   dri2_drv->API.ImageInvalidateExternal = dri2_image_invalidate_external;
 }

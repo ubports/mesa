@@ -7210,46 +7210,9 @@ int si_compile_tgsi_shader(struct si_screen *sscreen,
 
 	/* Calculate the number of fragment input VGPRs. */
 	if (ctx.type == PIPE_SHADER_FRAGMENT) {
-		shader->info.num_input_vgprs = 0;
-		shader->info.face_vgpr_index = -1;
-		shader->info.ancillary_vgpr_index = -1;
-
-		if (G_0286CC_PERSP_SAMPLE_ENA(shader->config.spi_ps_input_addr))
-			shader->info.num_input_vgprs += 2;
-		if (G_0286CC_PERSP_CENTER_ENA(shader->config.spi_ps_input_addr))
-			shader->info.num_input_vgprs += 2;
-		if (G_0286CC_PERSP_CENTROID_ENA(shader->config.spi_ps_input_addr))
-			shader->info.num_input_vgprs += 2;
-		if (G_0286CC_PERSP_PULL_MODEL_ENA(shader->config.spi_ps_input_addr))
-			shader->info.num_input_vgprs += 3;
-		if (G_0286CC_LINEAR_SAMPLE_ENA(shader->config.spi_ps_input_addr))
-			shader->info.num_input_vgprs += 2;
-		if (G_0286CC_LINEAR_CENTER_ENA(shader->config.spi_ps_input_addr))
-			shader->info.num_input_vgprs += 2;
-		if (G_0286CC_LINEAR_CENTROID_ENA(shader->config.spi_ps_input_addr))
-			shader->info.num_input_vgprs += 2;
-		if (G_0286CC_LINE_STIPPLE_TEX_ENA(shader->config.spi_ps_input_addr))
-			shader->info.num_input_vgprs += 1;
-		if (G_0286CC_POS_X_FLOAT_ENA(shader->config.spi_ps_input_addr))
-			shader->info.num_input_vgprs += 1;
-		if (G_0286CC_POS_Y_FLOAT_ENA(shader->config.spi_ps_input_addr))
-			shader->info.num_input_vgprs += 1;
-		if (G_0286CC_POS_Z_FLOAT_ENA(shader->config.spi_ps_input_addr))
-			shader->info.num_input_vgprs += 1;
-		if (G_0286CC_POS_W_FLOAT_ENA(shader->config.spi_ps_input_addr))
-			shader->info.num_input_vgprs += 1;
-		if (G_0286CC_FRONT_FACE_ENA(shader->config.spi_ps_input_addr)) {
-			shader->info.face_vgpr_index = shader->info.num_input_vgprs;
-			shader->info.num_input_vgprs += 1;
-		}
-		if (G_0286CC_ANCILLARY_ENA(shader->config.spi_ps_input_addr)) {
-			shader->info.ancillary_vgpr_index = shader->info.num_input_vgprs;
-			shader->info.num_input_vgprs += 1;
-		}
-		if (G_0286CC_SAMPLE_COVERAGE_ENA(shader->config.spi_ps_input_addr))
-			shader->info.num_input_vgprs += 1;
-		if (G_0286CC_POS_FIXED_PT_ENA(shader->config.spi_ps_input_addr))
-			shader->info.num_input_vgprs += 1;
+		shader->info.num_input_vgprs = ac_get_fs_input_vgpr_cnt(&shader->config,
+						&shader->info.face_vgpr_index,
+						&shader->info.ancillary_vgpr_index);
 	}
 
 	si_calculate_max_simd_waves(shader);
@@ -7284,12 +7247,12 @@ si_get_shader_part(struct si_screen *sscreen,
 {
 	struct si_shader_part *result;
 
-	mtx_lock(&sscreen->shader_parts_mutex);
+	simple_mtx_lock(&sscreen->shader_parts_mutex);
 
 	/* Find existing. */
 	for (result = *list; result; result = result->next) {
 		if (memcmp(&result->key, key, sizeof(*key)) == 0) {
-			mtx_unlock(&sscreen->shader_parts_mutex);
+			simple_mtx_unlock(&sscreen->shader_parts_mutex);
 			return result;
 		}
 	}
@@ -7350,7 +7313,7 @@ si_get_shader_part(struct si_screen *sscreen,
 
 out:
 	si_llvm_dispose(&ctx);
-	mtx_unlock(&sscreen->shader_parts_mutex);
+	simple_mtx_unlock(&sscreen->shader_parts_mutex);
 	return result;
 }
 

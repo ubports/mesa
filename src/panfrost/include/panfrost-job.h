@@ -31,14 +31,6 @@
 #include <stdint.h>
 #include <panfrost-misc.h>
 
-#define MALI_SHORT_PTR_BITS (sizeof(u64)*8)
-
-#define MALI_FBD_HIERARCHY_WEIGHTS 8
-
-#define MALI_PAYLOAD_SIZE 256
-
-typedef u32 mali_jd_core_req;
-
 enum mali_job_type {
         JOB_NOT_STARTED	= 0,
         JOB_TYPE_NULL = 1,
@@ -70,7 +62,6 @@ enum mali_draw_mode {
 
 /* Applies to tiler_gl_enables */
 
-
 #define MALI_OCCLUSION_QUERY    (1 << 3)
 #define MALI_OCCLUSION_PRECISE  (1 << 4)
 
@@ -78,6 +69,7 @@ enum mali_draw_mode {
  * In OpenGL, this would corresponds to glFrontFace(GL_CW). Mesa and the blob
  * disagree about how to do viewport flipping, so the blob actually sets this
  * for GL_CW but then has a negative viewport stride */
+
 #define MALI_FRONT_CCW_TOP      (1 << 5)
 
 #define MALI_CULL_FACE_FRONT    (1 << 6)
@@ -1092,8 +1084,7 @@ struct mali_vertex_tiler_postfix {
         u64 sampler_descriptor;
 
         u64 uniforms;
-        u8 flags : 4;
-        u64 _shader_upper : MALI_SHORT_PTR_BITS - 4; /* struct shader_meta */
+        u64 shader;
         u64 attributes; /* struct attribute_buffer[] */
         u64 attribute_meta; /* attribute_meta[] */
         u64 varyings; /* struct attr */

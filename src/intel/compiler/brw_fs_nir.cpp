@@ -580,7 +580,24 @@ fs_visitor::optimize_frontfacing_ternary(nir_alu_instr *instr,
 
    fs_reg tmp = vgrf(glsl_type::int_type);
 
-   if (devinfo->gen >= 6) {
+   if (devinfo->gen >= 12) {
+      /* Bit 15 of g1.1 is 0 if the polygon is front facing. */
+      fs_reg g1 = fs_reg(retype(brw_vec1_grf(1, 1), BRW_REGISTER_TYPE_W));
+
+      /* For (gl_FrontFacing ? 1.0 : -1.0), emit:
+       *
+       *    or(8)  tmp.1<2>W  g0.0<0,1,0>W  0x00003f80W
+       *    and(8) dst<1>D    tmp<8,8,1>D   0xbf800000D
+       *
+       * and negate the result for (gl_FrontFacing ? -1.0 : 1.0).
+       */
+      bld.OR(subscript(tmp, BRW_REGISTER_TYPE_W, 1),
+             g1, brw_imm_uw(0x3f80));
+
+      if (value1 == -1.0f)
+         bld.MOV(tmp, negate(tmp));
+
+   } else if (devinfo->gen >= 6) {
       /* Bit 15 of g0.0 is 0 if the polygon is front facing. */
       fs_reg g0 = fs_reg(retype(brw_vec1_grf(0, 0), BRW_REGISTER_TYPE_W));
 
@@ -1258,6 +1275,10 @@ fs_visitor::nir_emit_alu(const fs_builder &bld, nir_alu_instr *instr,
          }
       }
 
+      /* We emit the rounding mode after the previous fsign optimization since
+       * it won't result in a MUL, but will try to negate the value by other
+       * means.
+       */
       if (nir_has_any_rounding_mode_enabled(execution_mode)) {
          brw_rnd_mode rnd =
             brw_rnd_mode_from_execution_mode(execution_mode);
@@ -1813,6 +1834,13 @@ fs_visitor::nir_emit_alu(const fs_builder &bld, nir_alu_instr *instr,
       break;
 
    case nir_op_flrp:
+      if (nir_has_any_rounding_mode_enabled(execution_mode)) {
+         brw_rnd_mode rnd =
+            brw_rnd_mode_from_execution_mode(execution_mode);
+         bld.emit(SHADER_OPCODE_RND_MODE, bld.null_reg_ud(),
+                  brw_imm_d(rnd));
+      }
+
       inst = bld.LRP(result, op[0], op[1], op[2]);
       inst->saturate = instr->dest.saturate;
       break;
@@ -4180,6 +4208,7 @@ fs_visitor::nir_emit_intrinsic(const fs_builder &bld, nir_intrinsic_instr *instr
       break;
    }
 
+   case nir_intrinsic_scoped_memory_barrier:
    case nir_intrinsic_group_memory_barrier:
    case nir_intrinsic_memory_barrier_shared:
    case nir_intrinsic_memory_barrier_atomic_counter:
@@ -4187,15 +4216,25 @@ fs_visitor::nir_emit_intrinsic(const fs_builder &bld, nir_intrinsic_instr *instr
    case nir_intrinsic_memory_barrier_image:
    case nir_intrinsic_memory_barrier: {
       bool l3_fence, slm_fence;
-      if (devinfo->gen >= 11) {
-         l3_fence = instr->intrinsic != nir_intrinsic_memory_barrier_shared;
-         slm_fence = instr->intrinsic == nir_intrinsic_group_memory_barrier ||
-                     instr->intrinsic == nir_intrinsic_memory_barrier ||
-                     instr->intrinsic == nir_intrinsic_memory_barrier_shared;
-      } else {
+      if (instr->intrinsic == nir_intrinsic_scoped_memory_barrier) {
+         nir_variable_mode modes = nir_intrinsic_memory_modes(instr);
+         l3_fence = modes & (nir_var_shader_out |
+                             nir_var_mem_ssbo |
+                             nir_var_mem_global);
          /* Prior to gen11, we only have one kind of fence. */
-         l3_fence = true;
-         slm_fence = false;
+         slm_fence = devinfo->gen >= 11 && (modes & nir_var_mem_shared);
+         l3_fence |= devinfo->gen < 11 && (modes & nir_var_mem_shared);
+      } else {
+         if (devinfo->gen >= 11) {
+            l3_fence = instr->intrinsic != nir_intrinsic_memory_barrier_shared;
+            slm_fence = instr->intrinsic == nir_intrinsic_group_memory_barrier ||
+                        instr->intrinsic == nir_intrinsic_memory_barrier ||
+                        instr->intrinsic == nir_intrinsic_memory_barrier_shared;
+         } else {
+            /* Prior to gen11, we only have one kind of fence. */
+            l3_fence = true;
+            slm_fence = false;
+         }
       }
 
       /* Be conservative in Gen11+ and always stall in a fence.  Since there

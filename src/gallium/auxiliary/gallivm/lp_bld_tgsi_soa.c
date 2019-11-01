@@ -1581,7 +1581,7 @@ emit_fetch_gs_input(
       vertex_index = lp_build_const_int32(gallivm, reg->Dimension.Index);
    }
 
-   res = bld->gs_iface->fetch_input(bld->gs_iface, bld_base,
+   res = bld->gs_iface->fetch_input(bld->gs_iface, &bld_base->base,
                                     reg->Dimension.Indirect,
                                     vertex_index,
                                     reg->Register.Indirect,
@@ -1592,7 +1592,7 @@ emit_fetch_gs_input(
    if (tgsi_type_is_64bit(stype)) {
       LLVMValueRef swizzle_index = lp_build_const_int32(gallivm, swizzle_in >> 16);
       LLVMValueRef res2;
-      res2 = bld->gs_iface->fetch_input(bld->gs_iface, bld_base,
+      res2 = bld->gs_iface->fetch_input(bld->gs_iface, &bld_base->base,
                                         reg->Dimension.Indirect,
                                         vertex_index,
                                         reg->Register.Indirect,
@@ -2237,6 +2237,10 @@ emit_tex( struct lp_build_tgsi_soa_context *bld,
       lod_property = lp_build_lod_property(&bld->bld_base, inst, 0);
    }
 
+   if (sampler_op == LP_SAMPLER_OP_GATHER) {
+      uint32_t comp_val = inst->Src[sampler_reg].Register.SwizzleX;
+      sample_key |= (comp_val << LP_SAMPLER_GATHER_COMP_SHIFT);
+   }
    if (modifier == LP_BLD_TEX_MODIFIER_PROJECTED) {
       oow = lp_build_emit_fetch(&bld->bld_base, inst, 0, 3);
       oow = lp_build_rcp(&bld->bld_base.base, oow);
@@ -3974,15 +3978,18 @@ emit_vertex(
    LLVMBuilderRef builder = bld->bld_base.base.gallivm->builder;
 
    if (bld->gs_iface->emit_vertex) {
+      uint32_t imms_idx = emit_data->inst->Src[0].Register.SwizzleX;
+      LLVMValueRef stream_id = bld->immediates[0][imms_idx];
       LLVMValueRef mask = mask_vec(bld_base);
       LLVMValueRef total_emitted_vertices_vec =
          LLVMBuildLoad(builder, bld->total_emitted_vertices_vec_ptr, "");
       mask = clamp_mask_to_max_output_vertices(bld, mask,
                                                total_emitted_vertices_vec);
       gather_outputs(bld);
-      bld->gs_iface->emit_vertex(bld->gs_iface, &bld->bld_base,
+      bld->gs_iface->emit_vertex(bld->gs_iface, &bld->bld_base.base,
                                  bld->outputs,
-                                 total_emitted_vertices_vec);
+                                 total_emitted_vertices_vec,
+                                 stream_id);
       increment_vec_ptr_by_mask(bld_base, bld->emitted_vertices_vec_ptr,
                                 mask);
       increment_vec_ptr_by_mask(bld_base, bld->total_emitted_vertices_vec_ptr,
@@ -4012,7 +4019,8 @@ end_primitive_masked(struct lp_build_tgsi_context * bld_base,
          LLVMBuildLoad(builder, bld->emitted_vertices_vec_ptr, "");
       LLVMValueRef emitted_prims_vec =
          LLVMBuildLoad(builder, bld->emitted_prims_vec_ptr, "");
-
+      LLVMValueRef total_emitted_vertices_vec =
+         LLVMBuildLoad(builder, bld->total_emitted_vertices_vec_ptr, "");
       LLVMValueRef emitted_mask = lp_build_cmp(uint_bld, PIPE_FUNC_NOTEQUAL,
                                                emitted_vertices_vec,
                                                uint_bld->zero);
@@ -4022,9 +4030,11 @@ end_primitive_masked(struct lp_build_tgsi_context * bld_base,
          executes only on the paths that have unflushed vertices */
       mask = LLVMBuildAnd(builder, mask, emitted_mask, "");
 
-      bld->gs_iface->end_primitive(bld->gs_iface, &bld->bld_base,
+      bld->gs_iface->end_primitive(bld->gs_iface, &bld->bld_base.base,
+                                   total_emitted_vertices_vec,
                                    emitted_vertices_vec,
-                                   emitted_prims_vec);
+                                   emitted_prims_vec,
+                                   mask_vec(bld_base));
 
 #if DUMP_GS_EMITS
       lp_build_print_value(bld->bld_base.base.gallivm,
@@ -4367,7 +4377,6 @@ static void emit_epilogue(struct lp_build_tgsi_context * bld_base)
          LLVMBuildLoad(builder, bld->emitted_prims_vec_ptr, "");
 
       bld->gs_iface->gs_epilogue(bld->gs_iface,
-                                 &bld->bld_base,
                                  total_emitted_vertices_vec,
                                  emitted_prims_vec);
    } else {

@@ -134,6 +134,9 @@ enum {
 #define IRIS_DIRTY_RENDER_RESOLVES_AND_FLUSHES  (1ull << 55)
 #define IRIS_DIRTY_COMPUTE_RESOLVES_AND_FLUSHES (1ull << 56)
 #define IRIS_DIRTY_VF_STATISTICS            (1ull << 57)
+#define IRIS_DIRTY_PMA_FIX                  (1ull << 58)
+#define IRIS_DIRTY_DEPTH_BOUNDS             (1ull << 59)
+#define IRIS_DIRTY_RENDER_BUFFER            (1ull << 60)
 
 #define IRIS_ALL_DIRTY_FOR_COMPUTE (IRIS_DIRTY_CS | \
                                     IRIS_DIRTY_SAMPLER_STATES_CS | \
@@ -149,7 +152,8 @@ enum {
                                  IRIS_DIRTY_BINDINGS_TES | \
                                  IRIS_DIRTY_BINDINGS_GS  | \
                                  IRIS_DIRTY_BINDINGS_FS  | \
-                                 IRIS_DIRTY_BINDINGS_CS)
+                                 IRIS_DIRTY_BINDINGS_CS  | \
+                                 IRIS_DIRTY_RENDER_BUFFER)
 
 /**
  * Non-orthogonal state (NOS) dependency flags.
@@ -220,6 +224,7 @@ enum pipe_control_flags
    PIPE_CONTROL_STATE_CACHE_INVALIDATE          = (1 << 22),
    PIPE_CONTROL_STALL_AT_SCOREBOARD             = (1 << 23),
    PIPE_CONTROL_DEPTH_CACHE_FLUSH               = (1 << 24),
+   PIPE_CONTROL_TILE_CACHE_FLUSH                = (1 << 25),
 };
 
 #define PIPE_CONTROL_CACHE_FLUSH_BITS \
@@ -279,6 +284,8 @@ struct iris_uncompiled_shader {
 
    /** Should we use ALT mode for math?  Useful for ARB programs. */
    bool use_alt_mode;
+
+   bool needs_edge_flag;
 
    /** Constant data scraped from the shader by nir_opt_large_constants */
    struct pipe_resource *const_data;
@@ -414,14 +421,8 @@ struct iris_stream_output_target {
  */
 struct iris_vtable {
    void (*destroy_state)(struct iris_context *ice);
-   void (*init_render_context)(struct iris_screen *screen,
-                               struct iris_batch *batch,
-                               struct iris_vtable *vtbl,
-                               struct pipe_debug_callback *dbg);
-   void (*init_compute_context)(struct iris_screen *screen,
-                                struct iris_batch *batch,
-                                struct iris_vtable *vtbl,
-                                struct pipe_debug_callback *dbg);
+   void (*init_render_context)(struct iris_batch *batch);
+   void (*init_compute_context)(struct iris_batch *batch);
    void (*upload_render_state)(struct iris_context *ice,
                                struct iris_batch *batch,
                                const struct pipe_draw_info *draw);

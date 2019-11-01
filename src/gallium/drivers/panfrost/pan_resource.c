@@ -84,6 +84,7 @@ panfrost_resource_from_handle(struct pipe_screen *pscreen,
 
         rsc->bo = panfrost_bo_import(screen, whandle->handle);
         rsc->slices[0].stride = whandle->stride;
+        rsc->slices[0].offset = whandle->offset;
         rsc->slices[0].initialized = true;
         panfrost_resource_reset_damage(rsc);
 
@@ -117,6 +118,7 @@ panfrost_resource_get_handle(struct pipe_screen *pscreen,
 
                 handle->handle = rsrc->bo->gem_handle;
                 handle->stride = rsrc->slices[0].stride;
+                handle->offset = rsrc->slices[0].offset;
                 return TRUE;
         } else if (handle->type == WINSYS_HANDLE_TYPE_FD) {
                 if (scanout) {
@@ -141,6 +143,7 @@ panfrost_resource_get_handle(struct pipe_screen *pscreen,
 
                         handle->handle = fd;
                         handle->stride = rsrc->slices[0].stride;
+                        handle->offset = rsrc->slices[0].offset;
                         return true;
                 }
         }
@@ -578,27 +581,58 @@ panfrost_transfer_map(struct pipe_context *pctx,
                         is_bound |= fb->cbufs[c]->texture == resource;
         }
 
-        if (is_bound && (usage & PIPE_TRANSFER_READ)) {
-                assert(level == 0);
-                panfrost_flush(pctx, NULL, PIPE_FLUSH_END_OF_FRAME);
-        }
+        if (is_bound && (usage & PIPE_TRANSFER_READ))
+                 assert(level == 0);
 
         /* TODO: Respect usage flags */
 
         if (usage & PIPE_TRANSFER_DISCARD_WHOLE_RESOURCE) {
-                /* TODO: reallocate */
-                //printf("debug: Missed reallocate\n");
+                /* If the BO is used by one of the pending batches or if it's
+                 * not ready yet (still accessed by one of the already flushed
+                 * batches), we try to allocate a new one to avoid waiting.
+                 */
+                if (panfrost_pending_batches_access_bo(ctx, bo) ||
+                    !panfrost_bo_wait(bo, 0, PAN_BO_ACCESS_RW)) {
+                        struct panfrost_screen *screen = pan_screen(pctx->screen);
+                        /* We want the BO to be MMAPed. */
+                        uint32_t flags = bo->flags & ~PAN_BO_DELAY_MMAP;
+                        struct panfrost_bo *newbo = NULL;
+
+                        /* When the BO has been imported/exported, we can't
+                         * replace it by another one, otherwise the
+                         * importer/exporter wouldn't see the change we're
+                         * doing to it.
+                         */
+                        if (!(bo->flags & (PAN_BO_IMPORTED | PAN_BO_EXPORTED)))
+                                newbo = panfrost_bo_create(screen, bo->size,
+                                                           flags);
+
+                        if (newbo) {
+                                panfrost_bo_unreference(bo);
+                                rsrc->bo = newbo;
+                                bo = newbo;
+                        } else {
+                                uint32_t access = PAN_BO_ACCESS_RW;
+
+                                /* Allocation failed or was impossible, let's
+                                 * fall back on a flush+wait.
+                                 */
+                                panfrost_flush_batches_accessing_bo(ctx, bo,
+                                                                    access);
+                                panfrost_bo_wait(bo, INT64_MAX, access);
+                        }
+                }
         } else if ((usage & PIPE_TRANSFER_WRITE)
                    && resource->target == PIPE_BUFFER
                    && !util_ranges_intersect(&rsrc->valid_buffer_range, box->x, box->x + box->width)) {
                 /* No flush for writes to uninitialized */
         } else if (!(usage & PIPE_TRANSFER_UNSYNCHRONIZED)) {
                 if (usage & PIPE_TRANSFER_WRITE) {
-                        /* STUB: flush reading */
-                        //printf("debug: missed reading flush %d\n", resource->target);
+                        panfrost_flush_batches_accessing_bo(ctx, bo, PAN_BO_ACCESS_RW);
+                        panfrost_bo_wait(bo, INT64_MAX, PAN_BO_ACCESS_RW);
                 } else if (usage & PIPE_TRANSFER_READ) {
-                        /* STUB: flush writing */
-                        //printf("debug: missed writing flush %d (%d-%d)\n", resource->target, box->x, box->x + box->width);
+                        panfrost_flush_batches_accessing_bo(ctx, bo, PAN_BO_ACCESS_WRITE);
+                        panfrost_bo_wait(bo, INT64_MAX, PAN_BO_ACCESS_WRITE);
                 } else {
                         /* Why are you even mapping?! */
                 }
@@ -682,7 +716,7 @@ panfrost_transfer_unmap(struct pipe_context *pctx,
         }
 
 
-        util_range_add(&prsrc->valid_buffer_range,
+        util_range_add(&prsrc->base, &prsrc->valid_buffer_range,
                        transfer->box.x,
                        transfer->box.x + transfer->box.width);
 
@@ -701,7 +735,7 @@ panfrost_transfer_flush_region(struct pipe_context *pctx,
         struct panfrost_resource *rsc = pan_resource(transfer->resource);
 
         if (transfer->resource->target == PIPE_BUFFER) {
-                util_range_add(&rsc->valid_buffer_range,
+                util_range_add(&rsc->base, &rsc->valid_buffer_range,
                                transfer->box.x + box->x,
                                transfer->box.x + box->x + box->width);
         } else {
@@ -748,11 +782,8 @@ panfrost_generate_mipmap(
          * reorder-type optimizations in place. But for now prioritize
          * correctness. */
 
-        struct panfrost_batch *batch = panfrost_get_batch_for_fbo(ctx);
-        bool has_draws = batch->last_job.gpu;
-
-        if (has_draws)
-                panfrost_flush(pctx, NULL, PIPE_FLUSH_END_OF_FRAME);
+        panfrost_flush_batches_accessing_bo(ctx, rsrc->bo, PAN_BO_ACCESS_RW);
+        panfrost_bo_wait(rsrc->bo, INT64_MAX, PAN_BO_ACCESS_RW);
 
         /* We've flushed the original buffer if needed, now trigger a blit */
 
@@ -765,8 +796,10 @@ panfrost_generate_mipmap(
         /* If the blit was successful, flush once more. If it wasn't, well, let
          * the state tracker deal with it. */
 
-        if (blit_res)
-                panfrost_flush(pctx, NULL, PIPE_FLUSH_END_OF_FRAME);
+        if (blit_res) {
+                panfrost_flush_batches_accessing_bo(ctx, rsrc->bo, PAN_BO_ACCESS_WRITE);
+                panfrost_bo_wait(rsrc->bo, INT64_MAX, PAN_BO_ACCESS_WRITE);
+        }
 
         return blit_res;
 }

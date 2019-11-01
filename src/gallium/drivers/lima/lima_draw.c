@@ -289,8 +289,8 @@ lima_pack_reload_plbu_cmd(struct lima_context *ctx)
    lima_tex_desc *td = cpu + lima_reload_tex_desc_offset;
    memset(td, 0, lima_min_tex_desc_size);
    lima_texture_desc_set_res(ctx, td, fb->base.cbufs[0]->texture, 0, 0);
-   td->unknown_1_1 = 0x80;
-   td->texture_2d = 1;
+   td->unnorm_coords = 1;
+   td->texture_type = LIMA_TEXTURE_TYPE_2D;
    td->min_img_filter_nearest = 1;
    td->mag_img_filter_nearest = 1;
    td->wrap_s_clamp_to_edge = 1;
@@ -741,13 +741,13 @@ lima_pack_vs_cmd(struct lima_context *ctx, const struct pipe_draw_info *info)
 
    int num_varryings = ctx->vs->num_varying;
    int num_attributes = ctx->vertex_elements->num_elements;
-   VS_CMD_VARYING_ATTRIBUTE_COUNT(num_varryings, num_attributes);
+   VS_CMD_VARYING_ATTRIBUTE_COUNT(num_varryings, MAX2(1, num_attributes));
 
    VS_CMD_UNKNOWN1();
 
    VS_CMD_ATTRIBUTES_ADDRESS(
       lima_ctx_buff_va(ctx, lima_ctx_buff_gp_attribute_info, LIMA_CTX_BUFF_SUBMIT_GP),
-      num_attributes);
+      MAX2(1, num_attributes));
 
    VS_CMD_VARYINGS_ADDRESS(
       lima_ctx_buff_va(ctx, lima_ctx_buff_gp_varying_info, LIMA_CTX_BUFF_SUBMIT_GP),
@@ -1086,7 +1086,14 @@ lima_pack_render_state(struct lima_context *ctx, const struct pipe_draw_info *in
    if (ctx->const_buffer[PIPE_SHADER_FRAGMENT].buffer) {
       render->uniforms_address =
          lima_ctx_buff_va(ctx, lima_ctx_buff_pp_uniform_array, LIMA_CTX_BUFF_SUBMIT_PP);
-      render->uniforms_address |= ((ctx->buffer_state[lima_ctx_buff_pp_uniform].size) / 4 - 1);
+      uint32_t size = ctx->buffer_state[lima_ctx_buff_pp_uniform].size;
+      uint32_t bits = 0;
+      if (size >= 8) {
+         bits = util_last_bit(size >> 3) - 1;
+         bits += size & u_bit_consecutive(0, bits + 3) ? 1 : 0;
+      }
+      render->uniforms_address |= bits > 0xf ? 0xf : bits;
+
       render->aux0 |= 0x80;
       render->aux1 |= 0x10000;
    }
@@ -1133,7 +1140,7 @@ lima_update_gp_attribute_info(struct lima_context *ctx, const struct pipe_draw_i
 
    uint32_t *attribute =
       lima_ctx_buff_alloc(ctx, lima_ctx_buff_gp_attribute_info,
-                          ve->num_elements * 8, true);
+                          MAX2(1, ve->num_elements) * 8, true);
 
    int n = 0;
    for (int i = 0; i < ve->num_elements; i++) {
@@ -1147,7 +1154,7 @@ lima_update_gp_attribute_info(struct lima_context *ctx, const struct pipe_draw_i
 
       lima_submit_add_bo(ctx->gp_submit, res->bo, LIMA_SUBMIT_BO_READ);
 
-      unsigned start = info->index_size ? ctx->min_index : info->start;
+      unsigned start = info->index_size ? (ctx->min_index + info->index_bias) : info->start;
       attribute[n++] = res->bo->va + pvb->buffer_offset + pve->src_offset
          + start * pvb->stride;
       attribute[n++] = (pvb->stride << 11) |
@@ -1386,12 +1393,13 @@ lima_pack_wb_cbuf_reg(struct lima_context *ctx, uint32_t *wb_reg, int wb_idx)
    struct lima_context_framebuffer *fb = &ctx->framebuffer;
    struct lima_resource *res = lima_resource(fb->base.cbufs[0]->texture);
    int level = fb->base.cbufs[0]->u.tex.level;
+   unsigned layer = fb->base.cbufs[0]->u.tex.first_layer;
    uint32_t format = lima_format_get_pixel(fb->base.cbufs[0]->format);
    bool swap_channels = lima_format_get_swap_rb(fb->base.cbufs[0]->format);
 
    struct lima_pp_wb_reg *wb = (void *)wb_reg;
    wb[wb_idx].type = 0x02; /* 2 for color buffer */
-   wb[wb_idx].address = res->bo->va + res->levels[level].offset;
+   wb[wb_idx].address = res->bo->va + res->levels[level].offset + layer * res->levels[level].layer_stride;
    wb[wb_idx].pixel_format = format;
    if (res->tiled) {
       wb[wb_idx].pixel_layout = 0x2;
@@ -1431,8 +1439,7 @@ lima_pack_pp_frame_reg(struct lima_context *ctx, uint32_t *frame_reg,
 
    /* These are "stack size" and "stack offset" shifted,
     * here they are assumed to be always the same. */
-   uint32_t fs_stack_size = ctx->fs ? ctx->fs->stack_size : 0;
-   frame->fragment_stack_size = fs_stack_size << 16 | fs_stack_size;
+   frame->fragment_stack_size = ctx->pp_max_stack_size << 16 | ctx->pp_max_stack_size;
 
    /* related with MSAA and different value when r4p0/r7p0 */
    frame->supersampled_height = fb->base.height * 2 - 1;

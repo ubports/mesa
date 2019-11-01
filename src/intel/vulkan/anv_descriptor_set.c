@@ -733,30 +733,19 @@ VkResult anv_CreateDescriptorPool(
    pool->free_list = EMPTY;
 
    if (descriptor_bo_size > 0) {
-      VkResult result = anv_bo_init_new(&pool->bo, device, descriptor_bo_size);
+      VkResult result = anv_device_alloc_bo(device,
+                                            descriptor_bo_size,
+                                            ANV_BO_ALLOC_MAPPED |
+                                            ANV_BO_ALLOC_SNOOPED,
+                                            &pool->bo);
       if (result != VK_SUCCESS) {
          vk_free2(&device->alloc, pAllocator, pool);
          return result;
       }
 
-      anv_gem_set_caching(device, pool->bo.gem_handle, I915_CACHING_CACHED);
-
-      pool->bo.map = anv_gem_mmap(device, pool->bo.gem_handle, 0,
-                                  descriptor_bo_size, 0);
-      if (pool->bo.map == NULL) {
-         anv_gem_close(device, pool->bo.gem_handle);
-         vk_free2(&device->alloc, pAllocator, pool);
-         return vk_error(VK_ERROR_OUT_OF_HOST_MEMORY);
-      }
-
-      if (device->instance->physicalDevice.use_softpin) {
-         pool->bo.flags |= EXEC_OBJECT_PINNED;
-         anv_vma_alloc(device, &pool->bo);
-      }
-
       util_vma_heap_init(&pool->bo_heap, POOL_HEAP_OFFSET, descriptor_bo_size);
    } else {
-      pool->bo.size = 0;
+      pool->bo = NULL;
    }
 
    anv_state_stream_init(&pool->surface_state_stream,
@@ -786,12 +775,8 @@ void anv_DestroyDescriptorPool(
       anv_descriptor_set_layout_unref(device, set->layout);
    }
 
-   if (pool->bo.size) {
-      anv_gem_munmap(pool->bo.map, pool->bo.size);
-      anv_vma_free(device, &pool->bo);
-      anv_gem_close(device, pool->bo.gem_handle);
-      util_vma_heap_finish(&pool->bo_heap);
-   }
+   if (pool->bo)
+      anv_device_release_bo(device, pool->bo);
    anv_state_stream_finish(&pool->surface_state_stream);
 
    vk_free2(&device->alloc, pAllocator, pool);
@@ -814,9 +799,9 @@ VkResult anv_ResetDescriptorPool(
    pool->next = 0;
    pool->free_list = EMPTY;
 
-   if (pool->bo.size) {
+   if (pool->bo) {
       util_vma_heap_finish(&pool->bo_heap);
-      util_vma_heap_init(&pool->bo_heap, POOL_HEAP_OFFSET, pool->bo.size);
+      util_vma_heap_init(&pool->bo_heap, POOL_HEAP_OFFSET, pool->bo->size);
    }
 
    anv_state_stream_finish(&pool->surface_state_stream);
@@ -947,13 +932,13 @@ anv_descriptor_set_create(struct anv_device *device,
              pool_vma_offset - POOL_HEAP_OFFSET <= INT32_MAX);
       set->desc_mem.offset = pool_vma_offset - POOL_HEAP_OFFSET;
       set->desc_mem.alloc_size = set_buffer_size;
-      set->desc_mem.map = pool->bo.map + set->desc_mem.offset;
+      set->desc_mem.map = pool->bo->map + set->desc_mem.offset;
 
       set->desc_surface_state = anv_descriptor_pool_alloc_state(pool);
       anv_fill_buffer_surface_state(device, set->desc_surface_state,
                                     ISL_FORMAT_R32G32B32A32_FLOAT,
                                     (struct anv_address) {
-                                       .bo = &pool->bo,
+                                       .bo = pool->bo,
                                        .offset = set->desc_mem.offset,
                                     },
                                     layout->descriptor_buffer_size, 1);
@@ -1470,9 +1455,6 @@ void anv_UpdateDescriptorSets(
          &dst->descriptors[dst_layout->descriptor_index];
       dst_desc += copy->dstArrayElement;
 
-      for (uint32_t j = 0; j < copy->descriptorCount; j++)
-         dst_desc[j] = src_desc[j];
-
       if (src_layout->data & ANV_DESCRIPTOR_INLINE_UNIFORM) {
          assert(src_layout->data == ANV_DESCRIPTOR_INLINE_UNIFORM);
          memcpy(dst->desc_mem.map + dst_layout->descriptor_offset +
@@ -1481,6 +1463,9 @@ void anv_UpdateDescriptorSets(
                                     copy->srcArrayElement,
                 copy->descriptorCount);
       } else {
+         for (uint32_t j = 0; j < copy->descriptorCount; j++)
+            dst_desc[j] = src_desc[j];
+
          unsigned desc_size = anv_descriptor_size(src_layout);
          if (desc_size > 0) {
             assert(desc_size == anv_descriptor_size(dst_layout));

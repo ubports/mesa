@@ -330,7 +330,7 @@ static void push_stack(struct regalloc_ctx *ctx, unsigned i)
    }
 }
 
-static void do_regalloc(struct regalloc_ctx *ctx)
+static bool do_regalloc(struct regalloc_ctx *ctx)
 {
    ctx->worklist_start = 0;
    ctx->worklist_end = 0;
@@ -409,8 +409,13 @@ static void do_regalloc(struct regalloc_ctx *ctx)
       }
 
       /* TODO: spilling */
-      assert(found);
+      if (!found) {
+         gpir_error("Failed to allocate registers\n");
+         return false;
+      }
    }
+
+   return true;
 }
 
 static void assign_regs(struct regalloc_ctx *ctx)
@@ -506,11 +511,13 @@ bool gpir_regalloc_prog(gpir_compiler *comp)
 
    calc_liveness(&ctx);
    calc_interference(&ctx);
-   do_regalloc(&ctx);
+   if (!do_regalloc(&ctx)) {
+      ralloc_free(ctx.mem_ctx);
+      return false;
+   }
    assign_regs(&ctx);
 
    regalloc_print_result(comp);
    ralloc_free(ctx.mem_ctx);
    return true;
 }
-
