@@ -69,7 +69,7 @@ else
 	endif
 
 	# Non-Linux ports also lack *_CLOEXEC and epoll, so wayland isn't ready yet:
-	EGL_PLATFORMS += wayland,
+	EGL_PLATFORMS += wayland,mir,
 
   endif
 

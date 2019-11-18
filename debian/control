@@ -45,6 +45,8 @@ Build-Depends:
  libclang-6.0-dev (>= 1:6~) [amd64 arm64 armel armhf i386 kfreebsd-amd64 kfreebsd-i386 mips mips64el mipsel powerpc ppc64 ppc64el s390x sparc64],
  wayland-protocols (>= 1.9),
  zlib1g-dev,
+ libmirclient-dev (>= 0.26.2),
+ mir-client-platform-mesa-dev,
 Vcs-Git: https://salsa.debian.org/xorg-team/lib/mesa.git
 Vcs-Browser: https://salsa.debian.org/xorg-team/lib/mesa
 Homepage: https://mesa3d.org/
