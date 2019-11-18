@@ -116,6 +116,13 @@ typedef intptr_t EGLNativeDisplayType;
 typedef intptr_t EGLNativePixmapType;
 typedef intptr_t EGLNativeWindowType;
 
+#elif defined(MIR_EGL_PLATFORM)
+
+#include <mir_toolkit/mir_client_library.h>
+typedef MirEGLNativeDisplayType EGLNativeDisplayType;
+typedef void                   *EGLNativePixmapType;
+typedef MirEGLNativeWindowType  EGLNativeWindowType;
+
 #elif defined(__unix__) || defined(__APPLE__)
 
 #if defined(MESA_EGL_NO_X11_HEADERS)

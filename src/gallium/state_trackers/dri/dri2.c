@@ -544,14 +544,21 @@ dri2_allocate_textures(struct dri_context *ctx,
          templ.height0 = dri_drawable->h;
          templ.format = format;
          templ.bind = bind;
-         whandle.handle = buf->name;
          whandle.stride = buf->pitch;
          whandle.offset = 0;
          whandle.modifier = DRM_FORMAT_MOD_INVALID;
-         if (screen->can_share_buffer)
-            whandle.type = WINSYS_HANDLE_TYPE_SHARED;
-         else
+         if (screen->can_share_buffer) {
+            if (buf->name != 0) {
+               whandle.type = WINSYS_HANDLE_TYPE_SHARED;
+               whandle.handle = buf->name;
+            } else {
+               whandle.type = WINSYS_HANDLE_TYPE_FD;
+               whandle.handle = buf->fd;
+            }
+         } else {
             whandle.type = WINSYS_HANDLE_TYPE_KMS;
+            whandle.handle = buf->name;
+         }
          drawable->textures[statt] =
             screen->base.screen->resource_from_handle(screen->base.screen,
                   &templ, &whandle,

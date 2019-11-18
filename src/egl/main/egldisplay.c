@@ -59,7 +59,10 @@
 #ifdef HAVE_DRM_PLATFORM
 #include <gbm.h>
 #endif
-
+#ifdef HAVE_MIR_PLATFORM
+#include <dlfcn.h>
+#include <mir_toolkit/mesa/native_display.h>
+#endif
 
 /**
  * Map build-system platform names to platform types.
@@ -75,6 +78,7 @@ static const struct {
    { _EGL_PLATFORM_HAIKU, "haiku" },
    { _EGL_PLATFORM_SURFACELESS, "surfaceless" },
    { _EGL_PLATFORM_DEVICE, "device" },
+   { _EGL_PLATFORM_MIR, "mir" },
 };
 
 
@@ -111,6 +115,47 @@ _eglGetNativePlatformFromEnv(void)
    return plat;
 }
 
+#ifdef HAVE_MIR_PLATFORM
+static EGLBoolean
+_mir_display_is_valid(EGLNativeDisplayType nativeDisplay)
+{
+   typedef int (*MirEGLNativeDisplayIsValidFunc)(MirMesaEGLNativeDisplay*);
+
+   void *lib;
+   MirEGLNativeDisplayIsValidFunc general_check;
+   MirEGLNativeDisplayIsValidFunc client_check;
+   MirEGLNativeDisplayIsValidFunc server_check;
+   EGLBoolean is_valid = EGL_FALSE;
+
+   lib = dlopen(NULL, RTLD_LAZY);
+   if (lib == NULL)
+      return EGL_FALSE;
+
+   general_check = (MirEGLNativeDisplayIsValidFunc) dlsym(lib, "mir_egl_mesa_display_is_valid");
+   client_check = (MirEGLNativeDisplayIsValidFunc) dlsym(lib, "mir_client_mesa_egl_native_display_is_valid");
+   server_check = (MirEGLNativeDisplayIsValidFunc) dlsym(lib, "mir_server_mesa_egl_native_display_is_valid");
+
+   if (general_check != NULL &&
+       general_check((MirMesaEGLNativeDisplay *)nativeDisplay))
+   {
+      is_valid = EGL_TRUE;
+   }
+   else if (client_check != NULL &&
+            client_check((MirMesaEGLNativeDisplay *)nativeDisplay))
+   {
+      is_valid = EGL_TRUE;
+   }
+   else if (server_check != NULL &&
+            server_check((MirMesaEGLNativeDisplay *)nativeDisplay))
+   {
+      is_valid = EGL_TRUE;
+   }
+
+   dlclose(lib);
+
+   return is_valid;
+}
+#endif
 
 /**
  * Try detecting native platform with the help of native display characteristcs.
@@ -121,6 +166,11 @@ _eglNativePlatformDetectNativeDisplay(void *nativeDisplay)
    if (nativeDisplay == EGL_DEFAULT_DISPLAY)
       return _EGL_INVALID_PLATFORM;
 
+#ifdef HAVE_MIR_PLATFORM
+   if (_mir_display_is_valid(nativeDisplay))
+      return _EGL_PLATFORM_MIR;
+#endif
+   
    if (_eglPointerIsDereferencable(nativeDisplay)) {
       void *first_pointer = *(void **) nativeDisplay;
 
@@ -152,14 +202,13 @@ _eglNativePlatformDetectNativeDisplay(void *nativeDisplay)
    return _EGL_INVALID_PLATFORM;
 }
 
-
 /**
  * Return the native platform.  It is the platform of the EGL native types.
  */
 _EGLPlatformType
 _eglGetNativePlatform(void *nativeDisplay)
 {
-   static _EGLPlatformType native_platform = _EGL_INVALID_PLATFORM;
+   _EGLPlatformType native_platform = _EGL_INVALID_PLATFORM;
    _EGLPlatformType detected_platform = native_platform;
 
    if (detected_platform == _EGL_INVALID_PLATFORM) {

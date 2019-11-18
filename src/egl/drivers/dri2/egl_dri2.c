@@ -995,6 +995,11 @@ dri2_initialize(_EGLDriver *drv, _EGLDisplay *disp)
    case _EGL_PLATFORM_WAYLAND:
       ret = dri2_initialize_wayland(drv, disp);
       break;
+#ifdef HAVE_MIR_PLATFORM
+   case _EGL_PLATFORM_MIR:
+      ret = dri2_initialize_mir(drv, disp);
+      break;
+#endif
    case _EGL_PLATFORM_ANDROID:
       ret = dri2_initialize_android(drv, disp);
       break;
@@ -1062,6 +1067,11 @@ dri2_display_destroy(_EGLDisplay *disp)
    case _EGL_PLATFORM_DRM:
       dri2_teardown_drm(dri2_dpy);
       break;
+#ifdef HAVE_MIR_PLATFORM
+   case _EGL_PLATFORM_MIR:
+      dri2_teardown_mir(dri2_dpy);
+      break;
+#endif
    case _EGL_PLATFORM_WAYLAND:
       dri2_teardown_wayland(dri2_dpy);
       break;
@@ -1074,7 +1084,8 @@ dri2_display_destroy(_EGLDisplay *disp)
     * the ones from the gbm device. As such the gbm itself is responsible
     * for the cleanup.
     */
-   if (disp->Platform != _EGL_PLATFORM_DRM && dri2_dpy->driver_configs) {
+   if (disp->Platform != _EGL_PLATFORM_DRM &&
+       disp->Platform != _EGL_PLATFORM_MIR && dri2_dpy->driver_configs) {
       for (unsigned i = 0; dri2_dpy->driver_configs[i]; i++)
          free((__DRIconfig *) dri2_dpy->driver_configs[i]);
       free(dri2_dpy->driver_configs);

@@ -69,6 +69,10 @@ struct zwp_linux_dmabuf_v1;
 #include <hardware/gralloc.h>
 #endif /* HAVE_ANDROID_PLATFORM */
 
+#ifdef HAVE_MIR_PLATFORM
+#include <mir_toolkit/mesa/native_display.h>
+#endif
+
 #include "eglconfig.h"
 #include "eglcontext.h"
 #include "egldevice.h"
@@ -243,6 +247,10 @@ struct dri2_egl_display
 
    bool                      is_render_node;
    bool                      is_different_gpu;
+
+#ifdef HAVE_MIR_PLATFORM
+   MirMesaEGLNativeDisplay *mir_disp;
+#endif
 };
 
 struct dri2_egl_context
@@ -295,7 +303,7 @@ struct dri2_egl_surface
    /* EGL-owned buffers */
    __DRIbuffer           *local_buffers[__DRI_BUFFER_COUNT];
 
-#if defined(HAVE_WAYLAND_PLATFORM) || defined(HAVE_DRM_PLATFORM)
+#if defined(HAVE_WAYLAND_PLATFORM) || defined(HAVE_DRM_PLATFORM) || defined(HAVE_MIR_PLATFORM)
    struct {
 #ifdef HAVE_WAYLAND_PLATFORM
       struct wl_buffer   *wl_buffer;
@@ -307,8 +315,12 @@ struct dri2_egl_surface
       void *data;
       int data_size;
 #endif
-#ifdef HAVE_DRM_PLATFORM
+#if defined(HAVE_DRM_PLATFORM) || defined(HAVE_MIR_PLATFORM)
       struct gbm_bo       *bo;
+#endif
+#ifdef HAVE_MIR_PLATFORM
+      int                 fd;
+      int                 buffer_age;
 #endif
       bool                locked;
       int                 age;
@@ -338,6 +350,10 @@ struct dri2_egl_surface
 
    int out_fence_fd;
    EGLBoolean enable_out_fence;
+
+#ifdef HAVE_MIR_PLATFORM
+   MirMesaEGLNativeSurface *mir_surf;
+#endif
 };
 
 struct dri2_egl_config
@@ -502,6 +518,21 @@ dri2_initialize_surfaceless(_EGLDriver *drv, _EGLDisplay *disp)
 {
    return _eglError(EGL_NOT_INITIALIZED, "Surfaceless platform not built");
 }
+#endif
+
+#ifdef HAVE_DRM_PLATFORM
+EGLBoolean
+dri2_initialize_mir(_EGLDriver *drv, _EGLDisplay *disp);
+void
+dri2_teardown_mir(struct dri2_egl_display *dri2_dpy);
+#else
+static inline EGLBoolean
+dri2_initialize_mir(_EGLDriver *drv, _EGLDisplay *disp)
+{
+   return _eglError(EGL_NOT_INITIALIZED, "Mir platform not built");
+}
+static inline void
+dri2_teardown_mir(struct dri2_egl_display *dri2_dpy) {}
 #endif
 
 EGLBoolean

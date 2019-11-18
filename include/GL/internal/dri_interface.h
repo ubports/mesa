@@ -1090,6 +1090,8 @@ struct __DRIbufferRec {
     unsigned int pitch;
     unsigned int cpp;
     unsigned int flags;
+    unsigned int fd;    /**< Only available with DRI2_LOADER_VERSION >= 4, */
+                        /**< Only valid if name == 0 */
 };
 
 #define __DRI_DRI2_LOADER "DRI_DRI2Loader"

@@ -292,6 +292,7 @@ endif
 with_platform_android = _platforms.contains('android')
 with_platform_x11 = _platforms.contains('x11')
 with_platform_wayland = _platforms.contains('wayland')
+with_platform_mir = _platforms.contains('mir')
 with_platform_drm = _platforms.contains('drm')
 with_platform_haiku = _platforms.contains('haiku')
 with_platform_surfaceless = _platforms.contains('surfaceless')
@@ -1407,6 +1408,12 @@ if with_platform_wayland
     'linux-dmabuf', 'linux-dmabuf-unstable-v1.xml'
   )
   pre_args += ['-DHAVE_WAYLAND_PLATFORM', '-DWL_HIDE_DEPRECATED']
+endif
+
+if with_platform_mir
+  dep_mirclient = dependency('mirclient', version : '>=0.26')
+  dep_mirclient_mesa = dependency('mir-client-platform-mesa', version : '>=0.26')
+  pre_args += ['-DHAVE_MIR_PLATFORM']
 endif
 
 dep_x11 = null_dep
