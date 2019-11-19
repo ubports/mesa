@@ -1413,7 +1413,7 @@ endif
 if with_platform_mir
   dep_mirclient = dependency('mirclient', version : '>=0.26')
   dep_mirclient_mesa = dependency('mir-client-platform-mesa', version : '>=0.26')
-  pre_args += ['-DHAVE_MIR_PLATFORM']
+  pre_args += ['-DHAVE_MIR_PLATFORM', '-DHAVE_RS_PLATFORM']
 endif
 
 dep_x11 = null_dep

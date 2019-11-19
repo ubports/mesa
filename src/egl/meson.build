@@ -128,6 +128,7 @@ if with_dri2
   if with_platform_mir
     deps_for_egl += [dep_mirclient, dep_mirclient_mesa]
     files_egl += files('drivers/dri2/platform_mir.c')
+    files_egl += files('drivers/dri2/platform_rs.c')
   endif
   if with_platform_android
     deps_for_egl += dep_android

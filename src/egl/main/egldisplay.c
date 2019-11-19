@@ -63,6 +63,9 @@
 #include <dlfcn.h>
 #include <mir_toolkit/mesa/native_display.h>
 #endif
+#ifdef HAVE_RS_PLATFORM
+#include <mir_toolkit/mir_connection.h>
+#endif
 
 /**
  * Map build-system platform names to platform types.
@@ -79,6 +82,7 @@ static const struct {
    { _EGL_PLATFORM_SURFACELESS, "surfaceless" },
    { _EGL_PLATFORM_DEVICE, "device" },
    { _EGL_PLATFORM_MIR, "mir" },
+   { _EGL_PLATFORM_RS, "rs" },
 };
 
 
@@ -165,6 +169,11 @@ _eglNativePlatformDetectNativeDisplay(void *nativeDisplay)
 {
    if (nativeDisplay == EGL_DEFAULT_DISPLAY)
       return _EGL_INVALID_PLATFORM;
+
+#ifdef HAVE_RS_PLATFORM
+   if (mir_connection_is_valid(nativeDisplay))
+      return _EGL_PLATFORM_RS;
+#endif
 
 #ifdef HAVE_MIR_PLATFORM
    if (_mir_display_is_valid(nativeDisplay))

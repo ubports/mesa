@@ -73,6 +73,10 @@ struct zwp_linux_dmabuf_v1;
 #include <mir_toolkit/mesa/native_display.h>
 #endif
 
+#ifdef HAVE_RS_PLATFORM
+#include <mir_toolkit/mir_connection.h>
+#endif
+
 #include "eglconfig.h"
 #include "eglcontext.h"
 #include "egldevice.h"
@@ -251,6 +255,11 @@ struct dri2_egl_display
 #ifdef HAVE_MIR_PLATFORM
    MirMesaEGLNativeDisplay *mir_disp;
 #endif
+#ifdef HAVE_RS_PLATFORM
+   MirConnection*  mir_conn;
+   pthread_mutex_t lock;
+   pthread_cond_t  cv;
+#endif
 };
 
 struct dri2_egl_context
@@ -315,10 +324,10 @@ struct dri2_egl_surface
       void *data;
       int data_size;
 #endif
-#if defined(HAVE_DRM_PLATFORM) || defined(HAVE_MIR_PLATFORM)
+#if defined(HAVE_DRM_PLATFORM) || defined(HAVE_MIR_PLATFORM) || defined(HAVE_RS_PLATFORM)
       struct gbm_bo       *bo;
 #endif
-#ifdef HAVE_MIR_PLATFORM
+#if defined(HAVE_MIR_PLATFORM) || defined(HAVE_RS_PLATFORM)
       int                 fd;
       int                 buffer_age;
 #endif
@@ -353,6 +362,10 @@ struct dri2_egl_surface
 
 #ifdef HAVE_MIR_PLATFORM
    MirMesaEGLNativeSurface *mir_surf;
+#endif
+   
+#ifdef HAVE_RS_PLATFORM
+   void* sc;
 #endif
 };
 
@@ -520,7 +533,7 @@ dri2_initialize_surfaceless(_EGLDriver *drv, _EGLDisplay *disp)
 }
 #endif
 
-#ifdef HAVE_DRM_PLATFORM
+#ifdef HAVE_MIR_PLATFORM
 EGLBoolean
 dri2_initialize_mir(_EGLDriver *drv, _EGLDisplay *disp);
 void
@@ -533,6 +546,17 @@ dri2_initialize_mir(_EGLDriver *drv, _EGLDisplay *disp)
 }
 static inline void
 dri2_teardown_mir(struct dri2_egl_display *dri2_dpy) {}
+#endif
+
+#ifdef HAVE_RS_PLATFORM
+EGLBoolean
+dri2_initialize_rs(_EGLDriver *drv, _EGLDisplay *disp);
+#else
+static inline EGLBoolean
+dri2_initialize_rs(_EGLDriver *drv, _EGLDisplay *disp)
+{
+   return _eglError(EGL_NOT_INITIALIZED, "Mir rs platform not built");
+}
 #endif
 
 EGLBoolean
