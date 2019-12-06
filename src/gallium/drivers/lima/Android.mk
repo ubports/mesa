@@ -36,6 +36,7 @@ LOCAL_SRC_FILES := \
 	ir/gp/scheduler.c \
 	ir/lima_ir.h \
 	ir/lima_nir_lower_uniform_to_scalar.c \
+	ir/lima_nir_split_load_input.c \
 	ir/pp/codegen.c \
 	ir/pp/codegen.h \
 	ir/pp/disasm.c \
@@ -55,6 +56,8 @@ LOCAL_SRC_FILES := \
 	lima_draw.c \
 	lima_fence.c \
 	lima_fence.h \
+	lima_parser.c \
+	lima_parser.h \
 	lima_program.c \
 	lima_program.h \
 	lima_query.c \

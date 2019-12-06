@@ -28,8 +28,8 @@
 
 #include "util/u_debug.h"
 #include "util/u_memory.h"
-#include "util/u_format.h"
-#include "util/u_format_s3tc.h"
+#include "util/format/u_format.h"
+#include "util/format/u_format_s3tc.h"
 #include "util/u_video.h"
 #include "util/u_screen.h"
 #include "util/os_time.h"
@@ -52,6 +52,7 @@
 
 #include "pan_context.h"
 #include "midgard/midgard_compile.h"
+#include "panfrost-quirks.h"
 
 static const struct debug_named_value debug_options[] = {
         {"msgs",      PAN_DBG_MSGS,	"Print debug messages"},
@@ -101,6 +102,9 @@ panfrost_get_param(struct pipe_screen *screen, enum pipe_cap param)
         case PIPE_CAP_MAX_RENDER_TARGETS:
                 return is_deqp ? 4 : 1;
 
+        /* Throttling frames breaks pipelining */
+        case PIPE_CAP_THROTTLE:
+                return 0;
 
         case PIPE_CAP_OCCLUSION_QUERY:
                 return 1;
@@ -241,6 +245,9 @@ panfrost_get_param(struct pipe_screen *screen, enum pipe_cap param)
         case PIPE_CAP_MAX_VARYINGS:
                 return 16;
 
+        case PIPE_CAP_ALPHA_TEST:
+                return 0;
+
         default:
                 return u_pipe_screen_get_param_defaults(screen, param);
         }
@@ -260,9 +267,6 @@ panfrost_get_shader_param(struct pipe_screen *screen,
 
         /* this is probably not totally correct.. but it's a start: */
         switch (param) {
-        case PIPE_SHADER_CAP_SCALAR_ISA:
-                return 0;
-
         case PIPE_SHADER_CAP_MAX_INSTRUCTIONS:
         case PIPE_SHADER_CAP_MAX_ALU_INSTRUCTIONS:
         case PIPE_SHADER_CAP_MAX_TEX_INSTRUCTIONS:
@@ -327,7 +331,7 @@ panfrost_get_shader_param(struct pipe_screen *screen,
                 return PIPE_SHADER_IR_NIR;
 
         case PIPE_SHADER_CAP_SUPPORTED_IRS:
-                return (1 << PIPE_SHADER_IR_NIR);
+                return (1 << PIPE_SHADER_IR_NIR) | (1 << PIPE_SHADER_IR_NIR_SERIALIZED);
 
         case PIPE_SHADER_CAP_MAX_UNROLL_ITERATIONS_HINT:
                 return 32;
@@ -487,8 +491,7 @@ panfrost_get_compute_param(struct pipe_screen *pscreen, enum pipe_shader_ir ir_t
 
 	switch (param) {
 	case PIPE_COMPUTE_CAP_ADDRESS_BITS:
-                /* TODO: We'll want 64-bit pointers soon */
-		RET((uint32_t []){ 32 });
+		RET((uint32_t []){ 64 });
 
 	case PIPE_COMPUTE_CAP_IR_TARGET:
 		if (ret)
@@ -544,7 +547,8 @@ panfrost_destroy_screen(struct pipe_screen *pscreen)
 {
         struct panfrost_screen *screen = pan_screen(pscreen);
         panfrost_bo_cache_evict_all(screen);
-        pthread_mutex_destroy(&screen->bo_cache_lock);
+        pthread_mutex_destroy(&screen->bo_cache.lock);
+        pthread_mutex_destroy(&screen->active_bos_lock);
         drmFreeVersion(screen->kernel_version);
         ralloc_free(screen);
 }
@@ -575,7 +579,9 @@ panfrost_fence_reference(struct pipe_screen *pscreen,
         struct panfrost_fence *old = *p;
 
         if (pipe_reference(&(*p)->reference, &f->reference)) {
-                close(old->fd);
+                util_dynarray_foreach(&old->syncfds, int, fd)
+                        close(*fd);
+                util_dynarray_fini(&old->syncfds);
                 free(old);
         }
         *p = f;
@@ -589,50 +595,65 @@ panfrost_fence_finish(struct pipe_screen *pscreen,
 {
         struct panfrost_screen *screen = pan_screen(pscreen);
         struct panfrost_fence *f = (struct panfrost_fence *)fence;
+        struct util_dynarray syncobjs;
         int ret;
 
-        unsigned syncobj;
-        ret = drmSyncobjCreate(screen->fd, 0, &syncobj);
-        if (ret) {
-                fprintf(stderr, "Failed to create syncobj to wait on: %m\n");
-                return false;
-        }
+        /* All fences were already signaled */
+        if (!util_dynarray_num_elements(&f->syncfds, int))
+                return true;
 
-        ret = drmSyncobjImportSyncFile(screen->fd, syncobj, f->fd);
-        if (ret) {
-                fprintf(stderr, "Failed to import fence to syncobj: %m\n");
-                return false;
+        util_dynarray_init(&syncobjs, NULL);
+        util_dynarray_foreach(&f->syncfds, int, fd) {
+                uint32_t syncobj;
+
+                ret = drmSyncobjCreate(screen->fd, 0, &syncobj);
+                assert(!ret);
+
+                ret = drmSyncobjImportSyncFile(screen->fd, syncobj, *fd);
+                assert(!ret);
+                util_dynarray_append(&syncobjs, uint32_t, syncobj);
         }
 
         uint64_t abs_timeout = os_time_get_absolute_timeout(timeout);
         if (abs_timeout == OS_TIMEOUT_INFINITE)
                 abs_timeout = INT64_MAX;
 
-        ret = drmSyncobjWait(screen->fd, &syncobj, 1, abs_timeout, 0, NULL);
+        ret = drmSyncobjWait(screen->fd, util_dynarray_begin(&syncobjs),
+                             util_dynarray_num_elements(&syncobjs, uint32_t),
+                             abs_timeout, DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL,
+                             NULL);
 
-        drmSyncobjDestroy(screen->fd, syncobj);
+        util_dynarray_foreach(&syncobjs, uint32_t, syncobj)
+                drmSyncobjDestroy(screen->fd, *syncobj);
 
         return ret >= 0;
 }
 
 struct panfrost_fence *
-panfrost_fence_create(struct panfrost_context *ctx)
+panfrost_fence_create(struct panfrost_context *ctx,
+                      struct util_dynarray *fences)
 {
         struct panfrost_screen *screen = pan_screen(ctx->base.screen);
         struct panfrost_fence *f = calloc(1, sizeof(*f));
         if (!f)
                 return NULL;
 
-        /* Snapshot the last Panfrost's rendering's out fence.  We'd rather have
-         * another syncobj instead of a sync file, but this is all we get.
-         * (HandleToFD/FDToHandle just gives you another syncobj ID for the
-         * same syncobj).
-         */
-        drmSyncobjExportSyncFile(screen->fd, ctx->out_sync, &f->fd);
-        if (f->fd == -1) {
-                fprintf(stderr, "export failed: %m\n");
-                free(f);
-                return NULL;
+        util_dynarray_init(&f->syncfds, NULL);
+
+        /* Export fences from all pending batches. */
+        util_dynarray_foreach(fences, struct panfrost_batch_fence *, fence) {
+                int fd = -1;
+
+                /* The fence is already signaled, no need to export it. */
+                if ((*fence)->signaled)
+                        continue;
+
+                drmSyncobjExportSyncFile(screen->fd, (*fence)->syncobj, &fd);
+                if (fd == -1)
+                        fprintf(stderr, "export failed: %m\n");
+
+                assert(fd != -1);
+                util_dynarray_append(&f->syncfds, int, fd);
         }
 
         pipe_reference_init(&f->reference, 1);
@@ -659,6 +680,22 @@ panfrost_query_gpu_version(struct panfrost_screen *screen)
         assert(!ret);
 
         return get_param.value;
+}
+
+static uint32_t
+panfrost_active_bos_hash(const void *key)
+{
+        const struct panfrost_bo *bo = key;
+
+        return _mesa_hash_data(&bo->gem_handle, sizeof(bo->gem_handle));
+}
+
+static bool
+panfrost_active_bos_cmp(const void *keya, const void *keyb)
+{
+        const struct panfrost_bo *a = keya, *b = keyb;
+
+        return a->gem_handle == b->gem_handle;
 }
 
 struct pipe_screen *
@@ -696,26 +733,31 @@ panfrost_create_screen(int fd, struct renderonly *ro)
         screen->fd = fd;
 
         screen->gpu_id = panfrost_query_gpu_version(screen);
-        screen->require_sfbd = screen->gpu_id < 0x0750; /* T760 is the first to support MFBD */
+        screen->quirks = panfrost_get_quirks(screen->gpu_id);
         screen->kernel_version = drmGetVersion(fd);
 
         /* Check if we're loading against a supported GPU model. */
 
         switch (screen->gpu_id) {
+        case 0x720: /* T720 */
         case 0x750: /* T760 */
         case 0x820: /* T820 */
         case 0x860: /* T860 */
                 break;
         default:
                 /* Fail to load against untested models */
-                debug_printf("panfrost: Unsupported model %X",
-                             screen->gpu_id);
+                debug_printf("panfrost: Unsupported model %X", screen->gpu_id);
                 return NULL;
         }
 
-        pthread_mutex_init(&screen->bo_cache_lock, NULL);
-        for (unsigned i = 0; i < ARRAY_SIZE(screen->bo_cache); ++i)
-                list_inithead(&screen->bo_cache[i]);
+        pthread_mutex_init(&screen->active_bos_lock, NULL);
+        screen->active_bos = _mesa_set_create(screen, panfrost_active_bos_hash,
+                                              panfrost_active_bos_cmp);
+
+        pthread_mutex_init(&screen->bo_cache.lock, NULL);
+        list_inithead(&screen->bo_cache.lru);
+        for (unsigned i = 0; i < ARRAY_SIZE(screen->bo_cache.buckets); ++i)
+                list_inithead(&screen->bo_cache.buckets[i]);
 
         if (pan_debug & PAN_DBG_TRACE)
                 pandecode_initialize();

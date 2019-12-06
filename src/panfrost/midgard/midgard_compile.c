@@ -48,6 +48,7 @@
 #include "midgard_ops.h"
 #include "helpers.h"
 #include "compiler.h"
+#include "midgard_quirks.h"
 
 #include "disassemble.h"
 
@@ -133,9 +134,9 @@ schedule_barrier(compiler_context *ctx)
                         .mask = 0xF, \
                         .dest = ~0, \
                         .src = { ~0, ~0, ~0 }, \
+                        .swizzle = SWIZZLE_IDENTITY_4, \
 			.load_store = { \
 				.op = midgard_op_##name, \
-				.swizzle = SWIZZLE_XYZW, \
 				.address = address \
 			} \
 		}; \
@@ -158,14 +159,12 @@ static midgard_vector_alu_src
 vector_alu_modifiers(nir_alu_src *src, bool is_int, unsigned broadcast_count,
                      bool half, bool sext)
 {
-        if (!src) return blank_alu_src;
-
-        /* Figure out how many components there are so we can adjust the
-         * swizzle.  Specifically we want to broadcast the last channel so
-         * things like ball2/3 work
+        /* Figure out how many components there are so we can adjust.
+         * Specifically we want to broadcast the last channel so things like
+         * ball2/3 work.
          */
 
-        if (broadcast_count) {
+        if (broadcast_count && src) {
                 uint8_t last_component = src->swizzle[broadcast_count - 1];
 
                 for (unsigned c = broadcast_count; c < NIR_MAX_VEC_COMPONENTS; ++c) {
@@ -176,8 +175,7 @@ vector_alu_modifiers(nir_alu_src *src, bool is_int, unsigned broadcast_count,
         midgard_vector_alu_src alu_src = {
                 .rep_low = 0,
                 .rep_high = 0,
-                .half = half,
-                .swizzle = SWIZZLE_FROM_ARRAY(src->swizzle)
+                .half = half
         };
 
         if (is_int) {
@@ -192,9 +190,11 @@ vector_alu_modifiers(nir_alu_src *src, bool is_int, unsigned broadcast_count,
                 }
 
                 /* These should have been lowered away */
-                assert(!(src->abs || src->negate));
+                if (src)
+                        assert(!(src->abs || src->negate));
         } else {
-                alu_src.mod = (src->abs << 0) | (src->negate << 1);
+                if (src)
+                        alu_src.mod = (src->abs << 0) | (src->negate << 1);
         }
 
         return alu_src;
@@ -346,6 +346,17 @@ midgard_sysval_for_ssbo(nir_intrinsic_instr *instr)
 }
 
 static int
+midgard_sysval_for_sampler(nir_intrinsic_instr *instr)
+{
+        /* TODO: indirect samplers !!! */
+        nir_src index = instr->src[0];
+        assert(nir_src_is_const(index));
+        uint32_t uindex = nir_src_as_uint(index);
+
+        return PAN_SYSVAL(SAMPLER, uindex);
+}
+
+static int
 midgard_nir_sysval_for_intrinsic(nir_intrinsic_instr *instr)
 {
         switch (instr->intrinsic) {
@@ -358,6 +369,8 @@ midgard_nir_sysval_for_intrinsic(nir_intrinsic_instr *instr)
         case nir_intrinsic_load_ssbo: 
         case nir_intrinsic_store_ssbo: 
                 return midgard_sysval_for_ssbo(instr);
+        case nir_intrinsic_load_sampler_lod_parameters_pan:
+                return midgard_sysval_for_sampler(instr);
         default:
                 return ~0;
         }
@@ -472,7 +485,7 @@ midgard_nir_lower_fdot2(nir_shader *shader)
 /* Flushes undefined values to zero */
 
 static void
-optimise_nir(nir_shader *nir)
+optimise_nir(nir_shader *nir, unsigned quirks)
 {
         bool progress;
         unsigned lower_flrp =
@@ -482,14 +495,21 @@ optimise_nir(nir_shader *nir)
 
         NIR_PASS(progress, nir, nir_lower_regs_to_ssa);
         NIR_PASS(progress, nir, midgard_nir_lower_fdot2);
-        NIR_PASS(progress, nir, nir_lower_idiv);
+        NIR_PASS(progress, nir, nir_lower_idiv, nir_lower_idiv_fast);
 
         nir_lower_tex_options lower_tex_options = {
                 .lower_txs_lod = true,
-                .lower_txp = ~0
+                .lower_txp = ~0,
+                .lower_tex_without_implicit_lod =
+                        (quirks & MIDGARD_EXPLICIT_LOD),
         };
 
         NIR_PASS(progress, nir, nir_lower_tex, &lower_tex_options);
+
+        /* T720 is broken. */
+
+        if (quirks & MIDGARD_BROKEN_LOD)
+                NIR_PASS_V(nir, midgard_nir_lod_errata);
 
         do {
                 progress = false;
@@ -598,7 +618,7 @@ emit_explicit_constant(compiler_context *ctx, unsigned node, unsigned to)
         void *constant_value = _mesa_hash_table_u64_search(ctx->ssa_constants, node + 1);
 
         if (constant_value) {
-                midgard_instruction ins = v_mov(SSA_FIXED_REGISTER(REGISTER_CONSTANT), blank_alu_src, to);
+                midgard_instruction ins = v_mov(SSA_FIXED_REGISTER(REGISTER_CONSTANT), to);
                 attach_constants(ctx, &ins, constant_value, node + 1);
                 emit_mir_instruction(ctx, ins);
         }
@@ -615,82 +635,6 @@ nir_is_non_scalar_swizzle(nir_alu_src *src, unsigned nr_components)
         }
 
         return false;
-}
-
-/* Midgard puts scalar conditionals in r31.w; move an arbitrary source (the
- * output of a conditional test) into that register */
-
-static void
-emit_condition(compiler_context *ctx, nir_src *src, bool for_branch, unsigned component)
-{
-        int condition = nir_src_index(ctx, src);
-
-        /* Source to swizzle the desired component into w */
-
-        const midgard_vector_alu_src alu_src = {
-                .swizzle = SWIZZLE(component, component, component, component),
-        };
-
-        /* There is no boolean move instruction. Instead, we simulate a move by
-         * ANDing the condition with itself to get it into r31.w */
-
-        midgard_instruction ins = {
-                .type = TAG_ALU_4,
-
-                /* We need to set the conditional as close as possible */
-                .precede_break = true,
-                .unit = for_branch ? UNIT_SMUL : UNIT_SADD,
-                .mask = 1 << COMPONENT_W,
-                .src = { condition, condition, ~0 },
-                .dest = SSA_FIXED_REGISTER(31),
-
-                .alu = {
-                        .op = midgard_alu_op_iand,
-                        .outmod = midgard_outmod_int_wrap,
-                        .reg_mode = midgard_reg_mode_32,
-                        .dest_override = midgard_dest_override_none,
-                        .src1 = vector_alu_srco_unsigned(alu_src),
-                        .src2 = vector_alu_srco_unsigned(alu_src)
-                },
-        };
-
-        emit_mir_instruction(ctx, ins);
-}
-
-/* Or, for mixed conditions (with csel_v), here's a vector version using all of
- * r31 instead */
-
-static void
-emit_condition_mixed(compiler_context *ctx, nir_alu_src *src, unsigned nr_comp)
-{
-        int condition = nir_src_index(ctx, &src->src);
-
-        /* Source to swizzle the desired component into w */
-
-        const midgard_vector_alu_src alu_src = {
-                .swizzle = SWIZZLE_FROM_ARRAY(src->swizzle),
-        };
-
-        /* There is no boolean move instruction. Instead, we simulate a move by
-         * ANDing the condition with itself to get it into r31.w */
-
-        midgard_instruction ins = {
-                .type = TAG_ALU_4,
-                .precede_break = true,
-                .mask = mask_of(nr_comp),
-                .src = { condition, condition, ~0 },
-                .dest = SSA_FIXED_REGISTER(31),
-                .alu = {
-                        .op = midgard_alu_op_iand,
-                        .outmod = midgard_outmod_int_wrap,
-                        .reg_mode = midgard_reg_mode_32,
-                        .dest_override = midgard_dest_override_none,
-                        .src1 = vector_alu_srco_unsigned(alu_src),
-                        .src2 = vector_alu_srco_unsigned(alu_src)
-                },
-        };
-
-        emit_mir_instruction(ctx, ins);
 }
 
 #define ALU_CASE(nir, _op) \
@@ -903,6 +847,7 @@ emit_alu(compiler_context *ctx, nir_alu_instr *instr)
         case nir_op_i2i8:
         case nir_op_i2i16:
         case nir_op_i2i32:
+        case nir_op_i2i64:
                 /* If we end up upscale, we'll need a sign-extend on the
                  * operand (the second argument) */
 
@@ -910,7 +855,8 @@ emit_alu(compiler_context *ctx, nir_alu_instr *instr)
                 /* fallthrough */
         case nir_op_u2u8:
         case nir_op_u2u16:
-        case nir_op_u2u32: {
+        case nir_op_u2u32:
+        case nir_op_u2u64: {
                 op = midgard_alu_op_imov;
 
                 if (dst_bitsize == (src_bitsize * 2)) {
@@ -980,21 +926,16 @@ emit_alu(compiler_context *ctx, nir_alu_instr *instr)
                 bool mixed = nir_is_non_scalar_swizzle(&instr->src[0], nr_components);
                 op = mixed ? midgard_alu_op_icsel_v : midgard_alu_op_icsel;
 
-                /* csel works as a two-arg in Midgard, since the condition is hardcoded in r31.w */
-                nr_inputs = 2;
-
-                /* Emit the condition into r31 */
-
-                if (mixed)
-                        emit_condition_mixed(ctx, &instr->src[0], nr_components);
-                else
-                        emit_condition(ctx, &instr->src[0].src, false, instr->src[0].swizzle[0]);
-
                 /* The condition is the first argument; move the other
                  * arguments up one to be a binary instruction for
-                 * Midgard */
+                 * Midgard with the condition last */
 
-                memmove(instr->src, instr->src + 1, 2 * sizeof(nir_alu_src));
+                nir_alu_src temp = instr->src[2];
+
+                instr->src[2] = instr->src[0];
+                instr->src[0] = instr->src[1];
+                instr->src[1] = temp;
+
                 break;
         }
 
@@ -1040,6 +981,7 @@ emit_alu(compiler_context *ctx, nir_alu_instr *instr)
         unsigned src0 = nir_alu_src_index(ctx, &instr->src[0]);
         unsigned src1 = nr_inputs >= 2 ? nir_alu_src_index(ctx, &instr->src[1]) : ~0;
         unsigned src2 = nr_inputs == 3 ? nir_alu_src_index(ctx, &instr->src[2]) : ~0;
+        assert(nr_inputs <= 3);
 
         /* Rather than use the instruction generation helpers, we do it
          * ourselves here to avoid the mess */
@@ -1094,16 +1036,28 @@ emit_alu(compiler_context *ctx, nir_alu_instr *instr)
                 .src2 = vector_alu_srco_unsigned(vector_alu_modifiers(nirmods[1], is_int, broadcast_swizzle, half_2, sext_2)),
         };
 
-        if (nr_inputs == 3) {
-                ins.csel_swizzle = SWIZZLE_FROM_ARRAY(nirmods[2]->swizzle);
-                assert(!nirmods[2]->abs);
-                assert(!nirmods[2]->negate);
-        }
-
         /* Apply writemask if non-SSA, keeping in mind that we can't write to components that don't exist */
 
         if (!is_ssa)
                 ins.mask &= instr->dest.write_mask;
+
+        for (unsigned m = 0; m < 3; ++m) {
+                if (!nirmods[m])
+                        continue;
+
+                for (unsigned c = 0; c < NIR_MAX_VEC_COMPONENTS; ++c)
+                        ins.swizzle[m][c] = nirmods[m]->swizzle[c];
+
+                /* Replicate. TODO: remove when vec16 lands */
+                for (unsigned c = NIR_MAX_VEC_COMPONENTS; c < MIR_VEC_COMPONENTS; ++c)
+                        ins.swizzle[m][c] = nirmods[m]->swizzle[NIR_MAX_VEC_COMPONENTS - 1];
+        }
+
+        if (nr_inputs == 3) {
+                /* Conditions can't have mods */
+                assert(!nirmods[2]->abs);
+                assert(!nirmods[2]->negate);
+        }
 
         ins.alu = alu;
 
@@ -1126,14 +1080,18 @@ emit_alu(compiler_context *ctx, nir_alu_instr *instr)
                         ins.constants[0] = 1;
                 }
 
-                ins.alu.src2 = vector_alu_srco_unsigned(blank_alu_src_xxxx);
+
+                for (unsigned c = 0; c < 16; ++c)
+                        ins.swizzle[1][c] = 0;
         } else if (nr_inputs == 1 && !quirk_flipped_r24) {
                 /* Lots of instructions need a 0 plonked in */
                 ins.has_inline_constant = false;
                 ins.src[1] = SSA_FIXED_REGISTER(REGISTER_CONSTANT);
                 ins.has_constants = true;
                 ins.constants[0] = 0;
-                ins.alu.src2 = vector_alu_srco_unsigned(blank_alu_src_xxxx);
+
+                for (unsigned c = 0; c < 16; ++c)
+                        ins.swizzle[1][c] = 0;
         } else if (instr->op == nir_op_inot) {
                 ins.invert = true;
         }
@@ -1143,8 +1101,6 @@ emit_alu(compiler_context *ctx, nir_alu_instr *instr)
                  * instructions can only operate as if they were scalars. Lower
                  * them here by changing the component. */
 
-                uint8_t original_swizzle[4];
-                memcpy(original_swizzle, nirmods[0]->swizzle, sizeof(nirmods[0]->swizzle));
                 unsigned orig_mask = ins.mask;
 
                 for (int i = 0; i < nr_components; ++i) {
@@ -1157,10 +1113,9 @@ emit_alu(compiler_context *ctx, nir_alu_instr *instr)
                         if (!ins.mask)
                                 continue;
 
-                        for (int j = 0; j < 4; ++j)
-                                nirmods[0]->swizzle[j] = original_swizzle[i]; /* Pull from the correct component */
+                        for (unsigned j = 0; j < MIR_VEC_COMPONENTS; ++j)
+                                ins.swizzle[0][j] = nirmods[0]->swizzle[i]; /* Pull from the correct component */
 
-                        ins.alu.src1 = vector_alu_srco_unsigned(vector_alu_modifiers(nirmods[0], is_int, broadcast_swizzle, half_1, false));
                         emit_mir_instruction(ctx, ins);
                 }
         } else {
@@ -1170,15 +1125,27 @@ emit_alu(compiler_context *ctx, nir_alu_instr *instr)
 
 #undef ALU_CASE
 
-static unsigned
-mir_mask_for_intr(nir_instr *instr, bool is_read)
+static void
+mir_set_intr_mask(nir_instr *instr, midgard_instruction *ins, bool is_read)
 {
         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+        unsigned nir_mask = 0;
+        unsigned dsize = 0;
 
-        if (is_read)
-                return mask_of(nir_intrinsic_dest_components(intr));
-        else
-                return nir_intrinsic_write_mask(intr);
+        if (is_read) {
+                nir_mask = mask_of(nir_intrinsic_dest_components(intr));
+                dsize = nir_dest_bit_size(intr->dest);
+        } else {
+                nir_mask = nir_intrinsic_write_mask(intr);
+                dsize = 32;
+        }
+
+        /* Once we have the NIR mask, we need to normalize to work in 32-bit space */
+        unsigned bytemask = mir_to_bytemask(mir_mode_for_destsize(dsize), nir_mask);
+        mir_set_bytemask(ins, bytemask);
+
+        if (dsize == 64)
+                ins->load_64 = true;
 }
 
 /* Uniforms and UBOs use a shared code path, as uniforms are just (slightly
@@ -1195,18 +1162,12 @@ emit_ubo_read(
 {
         /* TODO: half-floats */
 
-        midgard_instruction ins = m_ld_ubo_int4(dest, offset);
-
-        assert((offset & 0xF) == 0);
-        offset /= 16;
-
-        /* TODO: Don't split */
-        ins.load_store.varying_parameters = (offset & 7) << 7;
-        ins.load_store.address = offset >> 3;
-        ins.mask = mir_mask_for_intr(instr, true);
+        midgard_instruction ins = m_ld_ubo_int4(dest, 0);
+        ins.constants[0] = offset;
+        mir_set_intr_mask(instr, &ins, true);
 
         if (indirect_offset) {
-                ins.src[1] = nir_src_index(ctx, indirect_offset);
+                ins.src[2] = nir_src_index(ctx, indirect_offset);
                 ins.load_store.arg_2 = 0x80;
         } else {
                 ins.load_store.arg_2 = 0x1E;
@@ -1244,16 +1205,9 @@ emit_ssbo_access(
         unsigned addr = make_compiler_temp(ctx);
         emit_sysval_read(ctx, instr, addr, 2);
 
-        /* The source array is a bit of a leaky abstraction for SSBOs.
-         * Nevertheless, for loads:
+        /* The source array:
          *
-         *  src[0] = arg_1
-         *  src[1] = arg_2
-         *  src[2] = unused
-         *
-         * Whereas for stores:
-         *
-         *  src[0] = value
+         *  src[0] = store ? value : unused
          *  src[1] = arg_1
          *  src[2] = arg_2
          *
@@ -1261,7 +1215,7 @@ emit_ssbo_access(
          * arg_2 = the offset.
          */
 
-        ins.src[is_read ? 0 : 1] = addr;
+        ins.src[1] = addr;
 
         /* TODO: What is this? It looks superficially like a shift << 5, but
          * arg_1 doesn't take a shift Should it be E0 or A0? We also need the
@@ -1269,7 +1223,7 @@ emit_ssbo_access(
 
         if (indirect_offset) {
                 ins.load_store.arg_1 |= 0xE0;
-                ins.src[is_read ? 1 : 2] = nir_src_index(ctx, indirect_offset);
+                ins.src[2] = nir_src_index(ctx, indirect_offset);
         } else {
                 ins.load_store.arg_2 = 0x7E;
         }
@@ -1280,7 +1234,7 @@ emit_ssbo_access(
 
         ins.load_store.varying_parameters = (offset & 0x1FF) << 1;
         ins.load_store.address = (offset >> 9);
-        ins.mask = mir_mask_for_intr(instr, is_read);
+        mir_set_intr_mask(instr, &ins, is_read);
 
         emit_mir_instruction(ctx, ins);
 }
@@ -1297,7 +1251,9 @@ emit_varying_read(
 
         midgard_instruction ins = m_ld_vary_32(dest, offset);
         ins.mask = mask_of(nr_comp);
-        ins.load_store.swizzle = SWIZZLE_XYZW >> (2 * component);
+
+        for (unsigned i = 0; i < ARRAY_SIZE(ins.swizzle[0]); ++i)
+                ins.swizzle[0][i] = MIN2(i + component, COMPONENT_W);
 
         midgard_varying_parameter p = {
                 .is_varying = 1,
@@ -1310,7 +1266,7 @@ emit_varying_read(
         ins.load_store.varying_parameters = u;
 
         if (indirect_offset)
-                ins.src[1] = nir_src_index(ctx, indirect_offset);
+                ins.src[2] = nir_src_index(ctx, indirect_offset);
         else
                 ins.load_store.arg_2 = 0x1E;
 
@@ -1388,7 +1344,7 @@ emit_fragment_store(compiler_context *ctx, unsigned src, unsigned rt)
 
         if (rt != 0) {
                 /* We'll write to r1.z */
-                rt_move = v_mov(~0, blank_alu_src, SSA_FIXED_REGISTER(1));
+                rt_move = v_mov(~0, SSA_FIXED_REGISTER(1));
                 rt_move.mask = 1 << COMPONENT_Z;
                 rt_move.unit = UNIT_SADD;
 
@@ -1436,10 +1392,6 @@ emit_intrinsic(compiler_context *ctx, nir_intrinsic_instr *instr)
 
         switch (instr->intrinsic) {
         case nir_intrinsic_discard_if:
-                emit_condition(ctx, &instr->src[0], true, COMPONENT_X);
-
-        /* fallthrough */
-
         case nir_intrinsic_discard: {
                 bool conditional = instr->intrinsic == nir_intrinsic_discard_if;
                 struct midgard_instruction discard = v_branch(conditional, false);
@@ -1516,7 +1468,7 @@ emit_intrinsic(compiler_context *ctx, nir_intrinsic_instr *instr)
                         /* For blend shaders, load the input color, which is
                          * preloaded to r0 */
 
-                        midgard_instruction move = v_mov(SSA_FIXED_REGISTER(0), blank_alu_src, reg);
+                        midgard_instruction move = v_mov(SSA_FIXED_REGISTER(0), reg);
                         emit_mir_instruction(ctx, move);
                         schedule_barrier(ctx);
                 }  else if (ctx->stage == MESA_SHADER_VERTEX) {
@@ -1554,10 +1506,30 @@ emit_intrinsic(compiler_context *ctx, nir_intrinsic_instr *instr)
         /* Reads 128-bit value raw off the tilebuffer during blending, tasty */
 
         case nir_intrinsic_load_raw_output_pan:
+        case nir_intrinsic_load_output_u8_as_fp16_pan:
                 reg = nir_dest_index(ctx, &instr->dest);
                 assert(ctx->is_blend);
 
+                /* T720 and below use different blend opcodes with slightly
+                 * different semantics than T760 and up */
+
                 midgard_instruction ld = m_ld_color_buffer_8(reg, 0);
+                bool old_blend = ctx->quirks & MIDGARD_OLD_BLEND;
+
+                if (instr->intrinsic == nir_intrinsic_load_output_u8_as_fp16_pan) {
+                        ld.load_store.op = old_blend ?
+                                midgard_op_ld_color_buffer_u8_as_fp16_old :
+                                midgard_op_ld_color_buffer_u8_as_fp16;
+
+                        if (old_blend) {
+                                ld.load_store.address = 1;
+                                ld.load_store.arg_2 = 0x1E;
+                        }
+
+                        for (unsigned c = 2; c < 16; ++c)
+                                ld.swizzle[0][c] = 0;
+                }
+
                 emit_mir_instruction(ctx, ld);
                 break;
 
@@ -1568,7 +1540,7 @@ emit_intrinsic(compiler_context *ctx, nir_intrinsic_instr *instr)
                 /* Blend constants are embedded directly in the shader and
                  * patched in, so we use some magic routing */
 
-                midgard_instruction ins = v_mov(SSA_FIXED_REGISTER(REGISTER_CONSTANT), blank_alu_src, reg);
+                midgard_instruction ins = v_mov(SSA_FIXED_REGISTER(REGISTER_CONSTANT), reg);
                 ins.has_constants = true;
                 ins.has_blend_constant = true;
                 emit_mir_instruction(ctx, ins);
@@ -1602,7 +1574,10 @@ emit_intrinsic(compiler_context *ctx, nir_intrinsic_instr *instr)
                         midgard_instruction st = m_st_vary_32(reg, offset);
                         st.load_store.arg_1 = 0x9E;
                         st.load_store.arg_2 = 0x1E;
-                        st.load_store.swizzle = swizzle_of(nr_comp) << (2*component);
+
+                        for (unsigned i = 0; i < ARRAY_SIZE(st.swizzle[0]); ++i)
+                                st.swizzle[0][i] = MIN2(i + component, nr_comp);
+
                         emit_mir_instruction(ctx, st);
                 } else {
                         DBG("Unknown store\n");
@@ -1615,7 +1590,26 @@ emit_intrinsic(compiler_context *ctx, nir_intrinsic_instr *instr)
         case nir_intrinsic_store_raw_output_pan:
                 assert (ctx->stage == MESA_SHADER_FRAGMENT);
                 reg = nir_src_index(ctx, &instr->src[0]);
-                emit_fragment_store(ctx, reg, 0);
+
+                if (ctx->quirks & MIDGARD_OLD_BLEND) {
+                        /* Suppose reg = qr0.xyzw. That means 4 8-bit ---> 1 32-bit. So
+                         * reg = r0.x. We want to splatter. So we can do a 32-bit move
+                         * of:
+                         *
+                         * imov r0.xyzw, r0.xxxx
+                         */
+
+                        unsigned expanded = make_compiler_temp(ctx);
+
+                        midgard_instruction splatter = v_mov(reg, expanded);
+
+                        for (unsigned c = 0; c < 16; ++c)
+                                splatter.swizzle[1][c] = 0;
+
+                        emit_mir_instruction(ctx, splatter);
+                        emit_fragment_store(ctx, expanded, 0);
+                } else
+                        emit_fragment_store(ctx, reg, 0);
 
                 break;
 
@@ -1633,20 +1627,10 @@ emit_intrinsic(compiler_context *ctx, nir_intrinsic_instr *instr)
                 emit_ssbo_access(ctx, &instr->instr, false, reg, offset, indirect_offset, uindex);
                 break;
 
-        case nir_intrinsic_load_alpha_ref_float:
-                assert(instr->dest.is_ssa);
-
-                float ref_value = ctx->alpha_ref;
-
-                /* See emit_load_const */
-                float *v = ralloc_array(NULL, float, 4);
-                memcpy(v, &ref_value, sizeof(float));
-                _mesa_hash_table_u64_insert(ctx->ssa_constants, (instr->dest.ssa.index << 1) + 1, v);
-                break;
-
         case nir_intrinsic_load_viewport_scale:
         case nir_intrinsic_load_viewport_offset:
         case nir_intrinsic_load_num_work_groups:
+        case nir_intrinsic_load_sampler_lod_parameters_pan:
                 emit_sysval_read(ctx, &instr->instr, ~0, 3);
                 break;
 
@@ -1753,13 +1737,12 @@ emit_texop_native(compiler_context *ctx, nir_tex_instr *instr,
                 .mask = 0xF,
                 .dest = nir_dest_index(ctx, &instr->dest),
                 .src = { ~0, ~0, ~0 },
+                .swizzle = SWIZZLE_IDENTITY_4,
                 .texture = {
                         .op = midgard_texop,
                         .format = midgard_tex_format(instr->sampler_dim),
                         .texture_handle = texture_index,
                         .sampler_handle = sampler_index,
-                        .swizzle = SWIZZLE_XYZW,
-                        .in_reg_swizzle = SWIZZLE_XYZW,
 
                         /* TODO: half */
                         .in_reg_full = 1,
@@ -1771,7 +1754,6 @@ emit_texop_native(compiler_context *ctx, nir_tex_instr *instr,
 
         for (unsigned i = 0; i < instr->num_srcs; ++i) {
                 int index = nir_src_index(ctx, &instr->src[i].src);
-                midgard_vector_alu_src alu_src = blank_alu_src;
                 unsigned nr_components = nir_src_num_components(instr->src[i].src);
 
                 switch (instr->src[i].src_type) {
@@ -1789,13 +1771,12 @@ emit_texop_native(compiler_context *ctx, nir_tex_instr *instr,
                                 index = make_compiler_temp(ctx);
 
                                 /* mov index, old_index */
-                                midgard_instruction mov = v_mov(old_index, blank_alu_src, index);
+                                midgard_instruction mov = v_mov(old_index, index);
                                 mov.mask = 0x3;
                                 emit_mir_instruction(ctx, mov);
 
                                 /* mov index.zw, #0 */
-                                mov = v_mov(SSA_FIXED_REGISTER(REGISTER_CONSTANT),
-                                                blank_alu_src, index);
+                                mov = v_mov(SSA_FIXED_REGISTER(REGISTER_CONSTANT), index);
                                 mov.has_constants = true;
                                 mov.mask = (1 << COMPONENT_Z) | (1 << COMPONENT_W);
                                 emit_mir_instruction(ctx, mov);
@@ -1811,25 +1792,29 @@ emit_texop_native(compiler_context *ctx, nir_tex_instr *instr,
 
                                 unsigned temp = make_compiler_temp(ctx);
                                 midgard_instruction ld = m_ld_cubemap_coords(temp, 0);
-                                ld.src[0] = index;
+                                ld.src[1] = index;
                                 ld.mask = 0x3; /* xy */
                                 ld.load_store.arg_1 = 0x20;
-                                ld.load_store.swizzle = alu_src.swizzle;
+                                ld.swizzle[1][3] = COMPONENT_X;
                                 emit_mir_instruction(ctx, ld);
 
-                                ins.src[0] = temp;
-                                ins.texture.in_reg_swizzle = SWIZZLE_XYXX;
+                                ins.src[1] = temp;
+                                /* xyzw -> xyxx */
+                                ins.swizzle[1][2] = COMPONENT_X;
+                                ins.swizzle[1][3] = COMPONENT_X;
                         } else {
-                                ins.src[0] = index;
+                                ins.src[1] = index;
                         }
 
                         if (instr->sampler_dim == GLSL_SAMPLER_DIM_2D) {
                                 /* Array component in w but NIR wants it in z */
-                                if (nr_components == 3)
-                                        ins.texture.in_reg_swizzle = SWIZZLE_XYZZ;
-                                else if (nr_components == 2)
-                                        ins.texture.in_reg_swizzle = SWIZZLE_XYXX;
-                                else
+                                if (nr_components == 3) {
+                                        ins.swizzle[1][2] = COMPONENT_Z;
+                                        ins.swizzle[1][3] = COMPONENT_Z;
+                                } else if (nr_components == 2) {
+                                        ins.swizzle[1][2] = COMPONENT_X;
+                                        ins.swizzle[1][3] = COMPONENT_X;
+                                } else
                                         unreachable("Invalid texture 2D components");
                         }
 
@@ -1845,7 +1830,7 @@ emit_texop_native(compiler_context *ctx, nir_tex_instr *instr,
                                 break;
 
                         ins.texture.lod_register = true;
-                        ins.src[1] = index;
+                        ins.src[2] = index;
                         emit_explicit_constant(ctx, index, index);
 
                         break;
@@ -1865,14 +1850,6 @@ emit_texop_native(compiler_context *ctx, nir_tex_instr *instr,
 static void
 emit_tex(compiler_context *ctx, nir_tex_instr *instr)
 {
-        /* Fixup op, since only textureLod is permitted in VS but NIR can give
-         * generic tex in some cases (which confuses the hardware) */
-
-        bool is_vertex = ctx->stage == MESA_SHADER_VERTEX;
-
-        if (is_vertex && instr->op == nir_texop_tex)
-                instr->op = nir_texop_txl;
-
         switch (instr->op) {
         case nir_texop_tex:
         case nir_texop_txb:
@@ -1988,11 +1965,8 @@ inline_alu_constants(compiler_context *ctx, midgard_block *block)
                         unsigned scratch = alu->dest;
 
                         if (entry) {
-                                midgard_instruction ins = v_mov(SSA_FIXED_REGISTER(REGISTER_CONSTANT), blank_alu_src, scratch);
+                                midgard_instruction ins = v_mov(SSA_FIXED_REGISTER(REGISTER_CONSTANT), scratch);
                                 attach_constants(ctx, &ins, entry, alu->src[1] + 1);
-
-                                /* Force a break XXX Defer r31 writes */
-                                ins.unit = UNIT_VLUT;
 
                                 /* Set the source */
                                 alu->src[1] = scratch;
@@ -2088,19 +2062,8 @@ embedded_to_inline_constant(compiler_context *ctx, midgard_block *block)
                                 break;
                         }
 
-                        if (flip) {
-                                /* Flip the SSA numbers */
-                                ins->src[0] = ins->src[1];
-                                ins->src[1] = SSA_FIXED_REGISTER(REGISTER_CONSTANT);
-
-                                /* And flip the modifiers */
-
-                                unsigned src_temp;
-
-                                src_temp = ins->alu.src2;
-                                ins->alu.src2 = ins->alu.src1;
-                                ins->alu.src1 = src_temp;
-                        }
+                        if (flip)
+                                mir_flip(ins);
                 }
 
                 if (ins->src[1] == SSA_FIXED_REGISTER(REGISTER_CONSTANT)) {
@@ -2111,8 +2074,10 @@ embedded_to_inline_constant(compiler_context *ctx, midgard_block *block)
                         midgard_vector_alu_src *m = (midgard_vector_alu_src *) &q;
                         src = m;
 
-                        /* Component is from the swizzle, e.g. r26.w -> w component. TODO: What if x is masked out? */
-                        int component = src->swizzle & 3;
+                        /* Component is from the swizzle. Take a nonzero component */
+                        assert(ins->mask);
+                        unsigned first_comp = ffs(ins->mask) - 1;
+                        unsigned component = ins->swizzle[1][first_comp];
 
                         /* Scale constant appropriately, if we can legally */
                         uint16_t scaled_constant = 0;
@@ -2149,9 +2114,8 @@ embedded_to_inline_constant(compiler_context *ctx, midgard_block *block)
                                 continue;
                         }
 
-                        /* Make sure that the constant is not itself a
-                         * vector by checking if all accessed values
-                         * (by the swizzle) are the same. */
+                        /* Make sure that the constant is not itself a vector
+                         * by checking if all accessed values are the same. */
 
                         uint32_t *cons = ins->constants;
                         uint32_t value = cons[component];
@@ -2159,12 +2123,12 @@ embedded_to_inline_constant(compiler_context *ctx, midgard_block *block)
                         bool is_vector = false;
                         unsigned mask = effective_writemask(&ins->alu, ins->mask);
 
-                        for (int c = 1; c < 4; ++c) {
+                        for (unsigned c = 0; c < MIR_VEC_COMPONENTS; ++c) {
                                 /* We only care if this component is actually used */
                                 if (!(mask & (1 << c)))
                                         continue;
 
-                                uint32_t test = cons[(src->swizzle >> (2 * c)) & 3];
+                                uint32_t test = cons[ins->swizzle[1][c]];
 
                                 if (test != value) {
                                         is_vector = true;
@@ -2234,7 +2198,6 @@ midgard_opt_pos_propagate(compiler_context *ctx, midgard_block *block)
                 /* TODO: Registers? */
                 unsigned src = ins->src[1];
                 if (src & IS_REG) continue;
-                assert(!mir_has_multiple_writes(ctx, src));
 
                 /* There might be a source modifier, too */
                 if (mir_nontrivial_source2_mod(ins)) continue;
@@ -2303,10 +2266,6 @@ static void
 emit_if(struct compiler_context *ctx, nir_if *nif)
 {
         midgard_block *before_block = ctx->current_block;
-
-        /* Conditional branches expect the condition in r31.w; emit a move for
-         * that in the _previous_ block (which is the current block). */
-        emit_condition(ctx, &nif->condition, true, COMPONENT_X);
 
         /* Speculatively emit the branch, but we can't fill it in until later */
         EMIT(branch, true, true);
@@ -2461,10 +2420,10 @@ midgard_get_first_tag_from_block(compiler_context *ctx, unsigned block_idx)
         unsigned first_tag = 0;
 
         mir_foreach_block_from(ctx, initial_block, v) {
-                midgard_bundle *initial_bundle =
-                        util_dynarray_element(&v->bundles, midgard_bundle, 0);
+                if (v->quadword_count) {
+                        midgard_bundle *initial_bundle =
+                                util_dynarray_element(&v->bundles, midgard_bundle, 0);
 
-                if (initial_bundle) {
                         first_tag = initial_bundle->tag;
                         break;
                 }
@@ -2474,7 +2433,7 @@ midgard_get_first_tag_from_block(compiler_context *ctx, unsigned block_idx)
 }
 
 int
-midgard_compile_shader_nir(struct midgard_screen *screen, nir_shader *nir, midgard_program *program, bool is_blend)
+midgard_compile_shader_nir(nir_shader *nir, midgard_program *program, bool is_blend, unsigned gpu_id)
 {
         struct util_dynarray *compiled = &program->compiled;
 
@@ -2484,10 +2443,10 @@ midgard_compile_shader_nir(struct midgard_screen *screen, nir_shader *nir, midga
         compiler_context *ctx = rzalloc(NULL, compiler_context);
 
         ctx->nir = nir;
-        ctx->screen = screen;
         ctx->stage = nir->info.stage;
         ctx->is_blend = is_blend;
         ctx->alpha_ref = program->alpha_ref;
+        ctx->quirks = midgard_get_quirks(gpu_id);
 
         /* Start off with a safe cutoff, allowing usage of all 16 work
          * registers. Later, we'll promote uniform reads to uniform registers
@@ -2539,7 +2498,7 @@ midgard_compile_shader_nir(struct midgard_screen *screen, nir_shader *nir, midga
 
         /* Optimisation passes */
 
-        optimise_nir(nir);
+        optimise_nir(nir, ctx->quirks);
 
         if (midgard_debug & MIDGARD_DBG_SHADERS) {
                 nir_print_shader(nir, stdout);
@@ -2604,6 +2563,7 @@ midgard_compile_shader_nir(struct midgard_screen *screen, nir_shader *nir, midga
                         progress |= midgard_opt_not_propagate(ctx, block);
                         progress |= midgard_opt_fuse_src_invert(ctx, block);
                         progress |= midgard_opt_fuse_dest_invert(ctx, block);
+                        progress |= midgard_opt_csel_invert(ctx, block);
                 }
         } while (progress);
 
@@ -2797,7 +2757,7 @@ midgard_compile_shader_nir(struct midgard_screen *screen, nir_shader *nir, midga
         program->tls_size = ctx->tls_size;
 
         if (midgard_debug & MIDGARD_DBG_SHADERS)
-                disassemble_midgard(program->compiled.data, program->compiled.size);
+                disassemble_midgard(program->compiled.data, program->compiled.size, gpu_id, ctx->stage);
 
         if (midgard_debug & MIDGARD_DBG_SHADERDB) {
                 unsigned nr_bundles = 0, nr_ins = 0;

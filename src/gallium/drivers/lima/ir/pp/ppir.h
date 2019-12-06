@@ -99,6 +99,7 @@ typedef enum {
    ppir_op_load_uniform,
    ppir_op_load_varying,
    ppir_op_load_coords,
+   ppir_op_load_coords_reg,
    ppir_op_load_fragcoord,
    ppir_op_load_pointcoord,
    ppir_op_load_frontface,
@@ -136,8 +137,15 @@ typedef struct {
 
 extern const ppir_op_info ppir_op_infos[];
 
+typedef enum {
+   ppir_dep_src,
+   ppir_dep_write_after_read,
+   ppir_dep_sequence,
+} ppir_dep_type;
+
 typedef struct {
    void *pred, *succ;
+   ppir_dep_type type;
    struct list_head pred_link;
    struct list_head succ_link;
 } ppir_dep;
@@ -265,6 +273,9 @@ typedef struct {
    ppir_src src_coords; /* not to be used after lowering */
    int sampler;
    int sampler_dim;
+   bool lod_bias_en;
+   bool explicit_lod;
+   ppir_src lod_bias;
 } ppir_load_texture_node;
 
 typedef struct {
@@ -377,7 +388,7 @@ typedef struct ppir_compiler {
 } ppir_compiler;
 
 void *ppir_node_create(ppir_block *block, ppir_op op, int index, unsigned mask);
-void ppir_node_add_dep(ppir_node *succ, ppir_node *pred);
+void ppir_node_add_dep(ppir_node *succ, ppir_node *pred, ppir_dep_type type);
 void ppir_node_remove_dep(ppir_dep *dep);
 void ppir_node_delete(ppir_node *node);
 void ppir_node_print_prog(ppir_compiler *comp);
@@ -391,18 +402,20 @@ ppir_node *ppir_node_insert_mov(ppir_node *node);
 
 static inline bool ppir_node_is_root(ppir_node *node)
 {
-   return list_empty(&node->succ_list);
+   return list_is_empty(&node->succ_list);
 }
 
 static inline bool ppir_node_is_leaf(ppir_node *node)
 {
-   return list_empty(&node->pred_list);
+   return list_is_empty(&node->pred_list);
 }
 
 static inline bool ppir_node_has_single_succ(ppir_node *node)
 {
    return list_is_singular(&node->succ_list);
 }
+
+bool ppir_node_has_single_src_succ(ppir_node *node);
 
 static inline ppir_node *ppir_node_first_succ(ppir_node *node)
 {
@@ -643,12 +656,12 @@ void ppir_instr_insert_mul_node(ppir_node *add, ppir_node *mul);
 
 static inline bool ppir_instr_is_root(ppir_instr *instr)
 {
-   return list_empty(&instr->succ_list);
+   return list_is_empty(&instr->succ_list);
 }
 
 static inline bool ppir_instr_is_leaf(ppir_instr *instr)
 {
-   return list_empty(&instr->pred_list);
+   return list_is_empty(&instr->pred_list);
 }
 
 bool ppir_lower_prog(ppir_compiler *comp);

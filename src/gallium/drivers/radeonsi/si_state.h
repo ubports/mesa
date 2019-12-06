@@ -37,6 +37,7 @@
 #define SI_NUM_SAMPLERS			32 /* OpenGL textures units per shader */
 #define SI_NUM_CONST_BUFFERS		16
 #define SI_NUM_IMAGES			16
+#define SI_NUM_IMAGE_SLOTS		(SI_NUM_IMAGES * 2) /* the second half are FMASK slots */
 #define SI_NUM_SHADER_BUFFERS		16
 
 struct si_screen;
@@ -582,10 +583,13 @@ si_compute_fast_udiv_info32(uint32_t D, unsigned num_bits);
 void si_emit_dpbb_state(struct si_context *sctx);
 
 /* si_state_shaders.c */
-void *si_get_ir_binary(struct si_shader_selector *sel, bool ngg, bool es);
-bool si_shader_cache_load_shader(struct si_screen *sscreen, void *ir_binary,
+void si_get_ir_cache_key(struct si_shader_selector *sel, bool ngg, bool es,
+			 unsigned char ir_sha1_cache_key[20]);
+bool si_shader_cache_load_shader(struct si_screen *sscreen,
+				 unsigned char ir_sha1_cache_key[20],
 				 struct si_shader *shader);
-bool si_shader_cache_insert_shader(struct si_screen *sscreen, void *ir_binary,
+void si_shader_cache_insert_shader(struct si_screen *sscreen,
+				   unsigned char ir_sha1_cache_key[20],
 				   struct si_shader *shader,
 				   bool insert_into_disk_cache);
 bool si_update_shaders(struct si_context *sctx);
@@ -647,14 +651,16 @@ static inline unsigned si_get_shaderbuf_slot(unsigned slot)
 
 static inline unsigned si_get_sampler_slot(unsigned slot)
 {
-	/* samplers are in slots [8..39], ascending */
-	return SI_NUM_IMAGES / 2 + slot;
+	/* 32 samplers are in sampler slots [16..47], 16 dw per slot, ascending */
+	/* those are equivalent to image slots [32..95], 8 dw per slot, ascending  */
+	return SI_NUM_IMAGE_SLOTS / 2 + slot;
 }
 
 static inline unsigned si_get_image_slot(unsigned slot)
 {
-	/* images are in slots [15..0] (sampler slots [7..0]), descending */
-	return SI_NUM_IMAGES - 1 - slot;
+	/* image slots are in [31..0] (sampler slots [15..0]), descending */
+	/* images are in slots [31..16], while FMASKs are in slots [15..0] */
+	return SI_NUM_IMAGE_SLOTS - 1 - slot;
 }
 
 #endif

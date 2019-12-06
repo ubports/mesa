@@ -23,8 +23,7 @@
  */
 
 #include <map>
-#include <unordered_set>
-
+#include <unordered_map>
 #include "aco_ir.h"
 
 /*
@@ -98,11 +97,11 @@ struct InstrPred {
          else if (a->operands[i].isUndefined() ^ b->operands[i].isUndefined())
             return false;
          if (a->operands[i].isFixed()) {
-            if (a->operands[i].physReg() == exec)
-               return false;
             if (!b->operands[i].isFixed())
                return false;
-            if (!(a->operands[i].physReg() == b->operands[i].physReg()))
+            if (a->operands[i].physReg() != b->operands[i].physReg())
+               return false;
+            if (a->operands[i].physReg() == exec && a->pass_flags != b->pass_flags)
                return false;
          }
       }
@@ -116,12 +115,20 @@ struct InstrPred {
          if (a->definitions[i].isFixed()) {
             if (!b->definitions[i].isFixed())
                return false;
-            if (!(a->definitions[i].physReg() == b->definitions[i].physReg()))
+            if (a->definitions[i].physReg() != b->definitions[i].physReg())
+               return false;
+            if (a->definitions[i].physReg() == exec)
                return false;
          }
       }
-      if (a->format == Format::PSEUDO_BRANCH)
+
+      if (a->opcode == aco_opcode::v_readfirstlane_b32)
+         return a->pass_flags == b->pass_flags;
+
+      /* The results of VOPC depend on the exec mask if used for subgroup operations. */
+      if ((uint32_t) a->format & (uint32_t) Format::VOPC && a->pass_flags != b->pass_flags)
          return false;
+
       if (a->isVOP3()) {
          VOP3A_instruction* a3 = static_cast<VOP3A_instruction*>(a);
          VOP3A_instruction* b3 = static_cast<VOP3A_instruction*>(b);
@@ -137,7 +144,8 @@ struct InstrPred {
       if (a->isDPP()) {
          DPP_instruction* aDPP = static_cast<DPP_instruction*>(a);
          DPP_instruction* bDPP = static_cast<DPP_instruction*>(b);
-         return aDPP->dpp_ctrl == bDPP->dpp_ctrl &&
+         return aDPP->pass_flags == bDPP->pass_flags &&
+                aDPP->dpp_ctrl == bDPP->dpp_ctrl &&
                 aDPP->bank_mask == bDPP->bank_mask &&
                 aDPP->row_mask == bDPP->row_mask &&
                 aDPP->bound_ctrl == bDPP->bound_ctrl &&
@@ -146,12 +154,8 @@ struct InstrPred {
                 aDPP->neg[0] == bDPP->neg[0] &&
                 aDPP->neg[1] == bDPP->neg[1];
       }
+
       switch (a->format) {
-         case Format::VOPC: {
-            /* Since the results depend on the exec mask, these shouldn't
-             * be value numbered (this is especially useful for subgroupBallot()). */
-            return false;
-         }
          case Format::SOPK: {
             SOPK_instruction* aK = static_cast<SOPK_instruction*>(a);
             SOPK_instruction* bK = static_cast<SOPK_instruction*>(b);
@@ -172,13 +176,20 @@ struct InstrPred {
                return false;
             return true;
          }
-         case Format::PSEUDO_REDUCTION:
-            return false;
+         case Format::PSEUDO_REDUCTION: {
+            Pseudo_reduction_instruction *aR = static_cast<Pseudo_reduction_instruction*>(a);
+            Pseudo_reduction_instruction *bR = static_cast<Pseudo_reduction_instruction*>(b);
+            return aR->pass_flags == bR->pass_flags &&
+                   aR->reduce_op == bR->reduce_op &&
+                   aR->cluster_size == bR->cluster_size;
+         }
          case Format::MTBUF: {
             /* this is fine since they are only used for vertex input fetches */
             MTBUF_instruction* aM = static_cast<MTBUF_instruction *>(a);
             MTBUF_instruction* bM = static_cast<MTBUF_instruction *>(b);
-            return aM->dfmt == bM->dfmt &&
+            return aM->can_reorder && bM->can_reorder &&
+                   aM->barrier == bM->barrier &&
+                   aM->dfmt == bM->dfmt &&
                    aM->nfmt == bM->nfmt &&
                    aM->offset == bM->offset &&
                    aM->offen == bM->offen &&
@@ -193,12 +204,28 @@ struct InstrPred {
          case Format::FLAT:
          case Format::GLOBAL:
          case Format::SCRATCH:
-         case Format::DS:
+         case Format::EXP:
+         case Format::SOPP:
+         case Format::PSEUDO_BRANCH:
+         case Format::PSEUDO_BARRIER:
             return false;
+         case Format::DS: {
+            if (a->opcode != aco_opcode::ds_bpermute_b32 &&
+                a->opcode != aco_opcode::ds_permute_b32 &&
+                a->opcode != aco_opcode::ds_swizzle_b32)
+               return false;
+            DS_instruction* aD = static_cast<DS_instruction *>(a);
+            DS_instruction* bD = static_cast<DS_instruction *>(b);
+            return aD->pass_flags == bD->pass_flags &&
+                   aD->gds == bD->gds &&
+                   aD->offset0 == bD->offset0 &&
+                   aD->offset1 == bD->offset1;
+         }
          case Format::MIMG: {
             MIMG_instruction* aM = static_cast<MIMG_instruction*>(a);
             MIMG_instruction* bM = static_cast<MIMG_instruction*>(b);
             return aM->can_reorder && bM->can_reorder &&
+                   aM->barrier == bM->barrier &&
                    aM->dmask == bM->dmask &&
                    aM->unrm == bM->unrm &&
                    aM->glc == bM->glc &&
@@ -217,46 +244,57 @@ struct InstrPred {
    }
 };
 
+using expr_set = std::unordered_map<Instruction*, uint32_t, InstrHash, InstrPred>;
 
-typedef std::unordered_set<Instruction*, InstrHash, InstrPred> expr_set;
+struct vn_ctx {
+   Program* program;
+   expr_set expr_values;
+   std::map<uint32_t, Temp> renames;
 
-void process_block(Block& block,
-                   expr_set& expr_values,
-                   std::map<uint32_t, Temp>& renames)
+   /* The exec id should be the same on the same level of control flow depth.
+    * Together with the check for dominator relations, it is safe to assume
+    * that the same exec_id also means the same execution mask.
+    * Discards increment the exec_id, so that it won't return to the previous value.
+    */
+   uint32_t exec_id = 1;
+
+   vn_ctx(Program* program) : program(program) {}
+};
+
+
+/* dominates() returns true if the parent block dominates the child block and
+ * if the parent block is part of the same loop or has a smaller loop nest depth.
+ */
+bool dominates(vn_ctx& ctx, uint32_t parent, uint32_t child)
 {
-   bool run = false;
-   std::vector<aco_ptr<Instruction>>::iterator it = block.instructions.begin();
+   unsigned parent_loop_nest_depth = ctx.program->blocks[parent].loop_nest_depth;
+   while (parent < child && parent_loop_nest_depth <= ctx.program->blocks[child].loop_nest_depth)
+      child = ctx.program->blocks[child].logical_idom;
+
+   return parent == child;
+}
+
+void process_block(vn_ctx& ctx, Block& block)
+{
    std::vector<aco_ptr<Instruction>> new_instructions;
    new_instructions.reserve(block.instructions.size());
-   expr_set phi_values;
 
-   while (it != block.instructions.end()) {
-      aco_ptr<Instruction>& instr = *it;
+   for (aco_ptr<Instruction>& instr : block.instructions) {
       /* first, rename operands */
       for (Operand& op : instr->operands) {
          if (!op.isTemp())
             continue;
-         auto it = renames.find(op.tempId());
-         if (it != renames.end())
+         auto it = ctx.renames.find(op.tempId());
+         if (it != ctx.renames.end())
             op.setTemp(it->second);
       }
 
-      if (instr->definitions.empty() || !run) {
-         if (instr->opcode == aco_opcode::p_logical_start)
-            run = true;
-         else if (instr->opcode == aco_opcode::p_logical_end)
-            run = false;
-         else if (instr->opcode == aco_opcode::p_phi || instr->opcode == aco_opcode::p_linear_phi) {
-            std::pair<expr_set::iterator, bool> res = phi_values.emplace(instr.get());
-            if (!res.second) {
-               Instruction* orig_phi = *(res.first);
-               renames.emplace(instr->definitions[0].tempId(), orig_phi->definitions[0].getTemp()).second;
-               ++it;
-               continue;
-            }
-         }
+      if (instr->opcode == aco_opcode::p_discard_if ||
+          instr->opcode == aco_opcode::p_demote_to_helper)
+         ctx.exec_id++;
+
+      if (instr->definitions.empty() || instr->opcode == aco_opcode::p_phi || instr->opcode == aco_opcode::p_linear_phi) {
          new_instructions.emplace_back(std::move(instr));
-         ++it;
          continue;
       }
 
@@ -264,26 +302,35 @@ void process_block(Block& block,
       if ((instr->opcode == aco_opcode::s_mov_b32 || instr->opcode == aco_opcode::s_mov_b64 || instr->opcode == aco_opcode::v_mov_b32) &&
           !instr->definitions[0].isFixed() && instr->operands[0].isTemp() && instr->operands[0].regClass() == instr->definitions[0].regClass() &&
           !instr->isDPP() && !((int)instr->format & (int)Format::SDWA)) {
-         renames[instr->definitions[0].tempId()] = instr->operands[0].getTemp();
+         ctx.renames[instr->definitions[0].tempId()] = instr->operands[0].getTemp();
       }
 
-      std::pair<expr_set::iterator, bool> res = expr_values.emplace(instr.get());
+      instr->pass_flags = ctx.exec_id;
+      std::pair<expr_set::iterator, bool> res = ctx.expr_values.emplace(instr.get(), block.index);
 
       /* if there was already an expression with the same value number */
       if (!res.second) {
-         Instruction* orig_instr = *(res.first);
+         Instruction* orig_instr = res.first->first;
          assert(instr->definitions.size() == orig_instr->definitions.size());
-         for (unsigned i = 0; i < instr->definitions.size(); i++) {
-            assert(instr->definitions[i].regClass() == orig_instr->definitions[i].regClass());
-            renames.emplace(instr->definitions[i].tempId(), orig_instr->definitions[i].getTemp()).second;
+         /* check if the original instruction dominates the current one */
+         if (dominates(ctx, res.first->second, block.index) &&
+             ctx.program->blocks[res.first->second].fp_mode.canReplace(block.fp_mode)) {
+            for (unsigned i = 0; i < instr->definitions.size(); i++) {
+               assert(instr->definitions[i].regClass() == orig_instr->definitions[i].regClass());
+               assert(instr->definitions[i].isTemp());
+               ctx.renames[instr->definitions[i].tempId()] = orig_instr->definitions[i].getTemp();
+            }
+         } else {
+            ctx.expr_values.erase(res.first);
+            ctx.expr_values.emplace(instr.get(), block.index);
+            new_instructions.emplace_back(std::move(instr));
          }
       } else {
          new_instructions.emplace_back(std::move(instr));
       }
-      ++it;
    }
 
-   block.instructions.swap(new_instructions);
+   block.instructions = std::move(new_instructions);
 }
 
 void rename_phi_operands(Block& block, std::map<uint32_t, Temp>& renames)
@@ -306,22 +353,43 @@ void rename_phi_operands(Block& block, std::map<uint32_t, Temp>& renames)
 
 void value_numbering(Program* program)
 {
-   std::vector<expr_set> expr_values(program->blocks.size());
-   std::map<uint32_t, Temp> renames;
+   vn_ctx ctx(program);
+   std::vector<unsigned> loop_headers;
 
    for (Block& block : program->blocks) {
-      if (block.logical_idom != -1) {
-         /* initialize expr_values from idom */
-         expr_values[block.index] = expr_values[block.logical_idom];
-         process_block(block, expr_values[block.index], renames);
-      } else {
-         expr_set empty;
-         process_block(block, empty, renames);
+      assert(ctx.exec_id > 0);
+      /* decrement exec_id when leaving nested control flow */
+      if (block.kind & block_kind_loop_header)
+         loop_headers.push_back(block.index);
+      if (block.kind & block_kind_merge) {
+         ctx.exec_id--;
+      } else if (block.kind & block_kind_loop_exit) {
+         ctx.exec_id -= program->blocks[loop_headers.back()].linear_preds.size();
+         ctx.exec_id -= block.linear_preds.size();
+         loop_headers.pop_back();
       }
+
+      if (block.logical_idom != -1)
+         process_block(ctx, block);
+      else
+         rename_phi_operands(block, ctx.renames);
+
+      /* increment exec_id when entering nested control flow */
+      if (block.kind & block_kind_branch ||
+          block.kind & block_kind_loop_preheader ||
+          block.kind & block_kind_break ||
+          block.kind & block_kind_continue ||
+          block.kind & block_kind_discard)
+         ctx.exec_id++;
+      else if (block.kind & block_kind_continue_or_break)
+         ctx.exec_id += 2;
    }
 
-   for (Block& block : program->blocks)
-      rename_phi_operands(block, renames);
+   /* rename loop header phi operands */
+   for (Block& block : program->blocks) {
+      if (block.kind & block_kind_loop_header)
+         rename_phi_operands(block, ctx.renames);
+   }
 }
 
 }

@@ -30,7 +30,7 @@
 #include "util/u_cpu_detect.h"
 #include "util/u_debug.h"
 #include "util/u_memory.h"
-#include "util/u_format.h"
+#include "util/format/u_format.h"
 #include "util/u_hash_table.h"
 #include "util/u_screen.h"
 #include "util/u_transfer_helper.h"
@@ -299,8 +299,6 @@ vc4_screen_get_shader_param(struct pipe_screen *pscreen,
         case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTERS:
         case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTER_BUFFERS:
                 return 0;
-        case PIPE_SHADER_CAP_SCALAR_ISA:
-                return 1;
         default:
                 fprintf(stderr, "unknown shader param %d\n", param);
                 return 0;

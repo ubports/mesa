@@ -168,6 +168,7 @@ anv_shader_compile_to_nir(struct anv_device *device,
    };
    struct spirv_to_nir_options spirv_options = {
       .frag_coord_is_sysval = true,
+      .use_scoped_memory_barrier = true,
       .caps = {
          .demote_to_helper_invocation = true,
          .derivative_group = true,
@@ -192,6 +193,7 @@ anv_shader_compile_to_nir(struct anv_device *device,
          .post_depth_coverage = pdevice->info.gen >= 9,
          .runtime_descriptor_array = true,
          .float_controls = pdevice->info.gen >= 8,
+         .shader_clock = true,
          .shader_viewport_index_layer = true,
          .stencil_export = pdevice->info.gen >= 9,
          .storage_8bit = pdevice->info.gen >= 8,
@@ -205,6 +207,8 @@ anv_shader_compile_to_nir(struct anv_device *device,
          .tessellation = true,
          .transform_feedback = pdevice->info.gen >= 8,
          .variable_pointers = true,
+         .vk_memory_model = true,
+         .vk_memory_model_device_scope = true,
       },
       .ubo_addr_format = nir_address_format_32bit_index_offset,
       .ssbo_addr_format =
@@ -444,7 +448,7 @@ populate_wm_prog_key(const struct gen_device_info *devinfo,
          key->color_outputs_valid |= (1 << i);
    }
 
-   key->nr_color_regions = util_bitcount(key->color_outputs_valid);
+   key->nr_color_regions = subpass->color_count;
 
    /* To reduce possible shader recompilations we would need to know if
     * there is a SampleMask output variable to compute if we should emit
@@ -668,36 +672,10 @@ anv_pipeline_lower_nir(struct anv_pipeline *pipeline,
 
    NIR_PASS_V(nir, anv_nir_lower_ycbcr_textures, layout);
 
-   NIR_PASS_V(nir, anv_nir_lower_push_constants);
-
    if (nir->info.stage != MESA_SHADER_COMPUTE)
       NIR_PASS_V(nir, anv_nir_lower_multiview, pipeline->subpass->view_mask);
 
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
-
-   if (nir->num_uniforms > 0) {
-      assert(prog_data->nr_params == 0);
-
-      /* If the shader uses any push constants at all, we'll just give
-       * them the maximum possible number
-       */
-      assert(nir->num_uniforms <= MAX_PUSH_CONSTANTS_SIZE);
-      nir->num_uniforms = MAX_PUSH_CONSTANTS_SIZE;
-      prog_data->nr_params += MAX_PUSH_CONSTANTS_SIZE / sizeof(float);
-      prog_data->param = ralloc_array(mem_ctx, uint32_t, prog_data->nr_params);
-
-      /* We now set the param values to be offsets into a
-       * anv_push_constant_data structure.  Since the compiler doesn't
-       * actually dereference any of the gl_constant_value pointers in the
-       * params array, it doesn't really matter what we put here.
-       */
-      struct anv_push_constants *null_data = NULL;
-      /* Fill out the push constants section of the param array */
-      for (unsigned i = 0; i < MAX_PUSH_CONSTANTS_SIZE / sizeof(float); i++) {
-         prog_data->param[i] = ANV_PARAM_PUSH(
-            (uintptr_t)&null_data->client_data[i * sizeof(float)]);
-      }
-   }
 
    if (nir->info.num_ssbos > 0 || nir->info.num_images > 0)
       pipeline->needs_data_cache = true;
@@ -708,32 +686,28 @@ anv_pipeline_lower_nir(struct anv_pipeline *pipeline,
               nir_address_format_64bit_global);
 
    /* Apply the actual pipeline layout to UBOs, SSBOs, and textures */
-   if (layout) {
-      anv_nir_apply_pipeline_layout(pdevice,
-                                    pipeline->device->robust_buffer_access,
-                                    layout, nir, prog_data,
-                                    &stage->bind_map);
+   anv_nir_apply_pipeline_layout(pdevice,
+                                 pipeline->device->robust_buffer_access,
+                                 layout, nir, prog_data,
+                                 &stage->bind_map);
 
-      NIR_PASS_V(nir, nir_lower_explicit_io, nir_var_mem_ubo,
-                 nir_address_format_32bit_index_offset);
-      NIR_PASS_V(nir, nir_lower_explicit_io, nir_var_mem_ssbo,
-                 anv_nir_ssbo_addr_format(pdevice,
-                    pipeline->device->robust_buffer_access));
+   NIR_PASS_V(nir, nir_lower_explicit_io, nir_var_mem_ubo,
+              nir_address_format_32bit_index_offset);
+   NIR_PASS_V(nir, nir_lower_explicit_io, nir_var_mem_ssbo,
+              anv_nir_ssbo_addr_format(pdevice,
+                 pipeline->device->robust_buffer_access));
 
-      NIR_PASS_V(nir, nir_opt_constant_folding);
+   NIR_PASS_V(nir, nir_opt_constant_folding);
 
-      /* We don't support non-uniform UBOs and non-uniform SSBO access is
-       * handled naturally by falling back to A64 messages.
-       */
-      NIR_PASS_V(nir, nir_lower_non_uniform_access,
-                 nir_lower_non_uniform_texture_access |
-                 nir_lower_non_uniform_image_access);
-   }
+   /* We don't support non-uniform UBOs and non-uniform SSBO access is
+    * handled naturally by falling back to A64 messages.
+    */
+   NIR_PASS_V(nir, nir_lower_non_uniform_access,
+              nir_lower_non_uniform_texture_access |
+              nir_lower_non_uniform_image_access);
 
-   if (nir->info.stage != MESA_SHADER_COMPUTE)
-      brw_nir_analyze_ubo_ranges(compiler, nir, NULL, prog_data->ubo_ranges);
-
-   assert(nir->num_uniforms == prog_data->nr_params * 4);
+   anv_nir_compute_push_layout(pdevice, nir, prog_data,
+                               &stage->bind_map, mem_ctx);
 
    stage->nir = nir;
 }
@@ -916,115 +890,86 @@ static void
 anv_pipeline_link_fs(const struct brw_compiler *compiler,
                      struct anv_pipeline_stage *stage)
 {
-   unsigned num_rts = 0;
-   const int max_rt = FRAG_RESULT_DATA7 - FRAG_RESULT_DATA0 + 1;
-   struct anv_pipeline_binding rt_bindings[max_rt];
-   nir_function_impl *impl = nir_shader_get_entrypoint(stage->nir);
-   int rt_to_bindings[max_rt];
-   memset(rt_to_bindings, -1, sizeof(rt_to_bindings));
-   bool rt_used[max_rt];
-   memset(rt_used, 0, sizeof(rt_used));
+   unsigned num_rt_bindings;
+   struct anv_pipeline_binding rt_bindings[MAX_RTS];
+   if (stage->key.wm.nr_color_regions > 0) {
+      assert(stage->key.wm.nr_color_regions <= MAX_RTS);
+      for (unsigned rt = 0; rt < stage->key.wm.nr_color_regions; rt++) {
+         if (stage->key.wm.color_outputs_valid & BITFIELD_BIT(rt)) {
+            rt_bindings[rt] = (struct anv_pipeline_binding) {
+               .set = ANV_DESCRIPTOR_SET_COLOR_ATTACHMENTS,
+               .index = rt,
+            };
+         } else {
+            /* Setup a null render target */
+            rt_bindings[rt] = (struct anv_pipeline_binding) {
+               .set = ANV_DESCRIPTOR_SET_COLOR_ATTACHMENTS,
+               .index = UINT32_MAX,
+            };
+         }
+      }
+      num_rt_bindings = stage->key.wm.nr_color_regions;
+   } else {
+      /* Setup a null render target */
+      rt_bindings[0] = (struct anv_pipeline_binding) {
+         .set = ANV_DESCRIPTOR_SET_COLOR_ATTACHMENTS,
+         .index = UINT32_MAX,
+      };
+      num_rt_bindings = 1;
+   }
 
-   /* Flag used render targets */
+   assert(num_rt_bindings <= MAX_RTS);
+   assert(stage->bind_map.surface_count == 0);
+   typed_memcpy(stage->bind_map.surface_to_descriptor,
+                rt_bindings, num_rt_bindings);
+   stage->bind_map.surface_count += num_rt_bindings;
+
+   /* Now that we've set up the color attachments, we can go through and
+    * eliminate any shader outputs that map to VK_ATTACHMENT_UNUSED in the
+    * hopes that dead code can clean them up in this and any earlier shader
+    * stages.
+    */
+   nir_function_impl *impl = nir_shader_get_entrypoint(stage->nir);
+   bool deleted_output = false;
    nir_foreach_variable_safe(var, &stage->nir->outputs) {
+      /* TODO: We don't delete depth/stencil writes.  We probably could if the
+       * subpass doesn't have a depth/stencil attachment.
+       */
       if (var->data.location < FRAG_RESULT_DATA0)
          continue;
 
       const unsigned rt = var->data.location - FRAG_RESULT_DATA0;
-      /* Out-of-bounds */
-      if (rt >= MAX_RTS)
+
+      /* If this is the RT at location 0 and we have alpha to coverage
+       * enabled we still need that write because it will affect the coverage
+       * mask even if it's never written to a color target.
+       */
+      if (rt == 0 && stage->key.wm.alpha_to_coverage)
          continue;
 
       const unsigned array_len =
          glsl_type_is_array(var->type) ? glsl_get_length(var->type) : 1;
-      assert(rt + array_len <= max_rt);
+      assert(rt + array_len <= MAX_RTS);
 
-      /* Unused */
-      if (!(stage->key.wm.color_outputs_valid & BITFIELD_RANGE(rt, array_len))) {
-         /* If this is the RT at location 0 and we have alpha to coverage
-          * enabled we will have to create a null RT for it, so mark it as
-          * used.
-          */
-         if (rt > 0 || !stage->key.wm.alpha_to_coverage)
-            continue;
-      }
-
-      for (unsigned i = 0; i < array_len; i++)
-         rt_used[rt + i] = true;
-   }
-
-   /* Set new, compacted, location */
-   for (unsigned i = 0; i < max_rt; i++) {
-      if (!rt_used[i])
-         continue;
-
-      rt_to_bindings[i] = num_rts;
-
-      if (stage->key.wm.color_outputs_valid & (1 << i)) {
-         rt_bindings[rt_to_bindings[i]] = (struct anv_pipeline_binding) {
-            .set = ANV_DESCRIPTOR_SET_COLOR_ATTACHMENTS,
-            .binding = 0,
-            .index = i,
-         };
-      } else {
-         /* Setup a null render target */
-         rt_bindings[rt_to_bindings[i]] = (struct anv_pipeline_binding) {
-            .set = ANV_DESCRIPTOR_SET_COLOR_ATTACHMENTS,
-            .binding = 0,
-            .index = UINT32_MAX,
-         };
-      }
-
-      num_rts++;
-   }
-
-   bool deleted_output = false;
-   nir_foreach_variable_safe(var, &stage->nir->outputs) {
-      if (var->data.location < FRAG_RESULT_DATA0)
-         continue;
-
-      const unsigned rt = var->data.location - FRAG_RESULT_DATA0;
-
-      if (rt >= MAX_RTS || !rt_used[rt]) {
-         /* Unused or out-of-bounds, throw it away, unless it is the first
-          * RT and we have alpha to coverage enabled.
-          */
+      if (rt >= MAX_RTS || !(stage->key.wm.color_outputs_valid &
+                             BITFIELD_RANGE(rt, array_len))) {
          deleted_output = true;
          var->data.mode = nir_var_function_temp;
          exec_node_remove(&var->node);
          exec_list_push_tail(&impl->locals, &var->node);
-         continue;
       }
-
-      /* Give it the new location */
-      assert(rt_to_bindings[rt] != -1);
-      var->data.location = rt_to_bindings[rt] + FRAG_RESULT_DATA0;
    }
 
    if (deleted_output)
       nir_fixup_deref_modes(stage->nir);
 
-   if (num_rts == 0) {
-      /* If we have no render targets, we need a null render target */
-      rt_bindings[0] = (struct anv_pipeline_binding) {
-         .set = ANV_DESCRIPTOR_SET_COLOR_ATTACHMENTS,
-         .binding = 0,
-         .index = UINT32_MAX,
-      };
-      num_rts = 1;
-   }
-
-   /* Now that we've determined the actual number of render targets, adjust
-    * the key accordingly.
+   /* We stored the number of subpass color attachments in nr_color_regions
+    * when calculating the key for caching.  Now that we've computed the bind
+    * map, we can reduce this to the actual max before we go into the back-end
+    * compiler.
     */
-   stage->key.wm.nr_color_regions = num_rts;
-   stage->key.wm.color_outputs_valid = (1 << num_rts) - 1;
-
-   assert(num_rts <= max_rt);
-   assert(stage->bind_map.surface_count == 0);
-   typed_memcpy(stage->bind_map.surface_to_descriptor,
-                rt_bindings, num_rts);
-   stage->bind_map.surface_count += num_rts;
+   stage->key.wm.nr_color_regions =
+      util_last_bit(stage->key.wm.color_outputs_valid);
 }
 
 static void
@@ -1052,8 +997,10 @@ anv_pipeline_compile_fs(const struct brw_compiler *compiler,
                          (uint32_t)fs_stage->prog_data.wm.dispatch_16 +
                          (uint32_t)fs_stage->prog_data.wm.dispatch_32;
 
-   if (fs_stage->key.wm.nr_color_regions == 0 &&
+   if (fs_stage->key.wm.color_outputs_valid == 0 &&
        !fs_stage->prog_data.wm.has_side_effects &&
+       !fs_stage->prog_data.wm.uses_omask &&
+       !fs_stage->key.wm.alpha_to_coverage &&
        !fs_stage->prog_data.wm.uses_kill &&
        fs_stage->prog_data.wm.computed_depth_mode == BRW_PSCDEPTH_OFF &&
        !fs_stage->prog_data.wm.computed_stencil) {
@@ -1072,6 +1019,26 @@ anv_pipeline_add_executable(struct anv_pipeline *pipeline,
                             struct brw_compile_stats *stats,
                             uint32_t code_offset)
 {
+   char *nir = NULL;
+   if (stage->nir &&
+       (pipeline->flags &
+        VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR)) {
+      char *stream_data = NULL;
+      size_t stream_size = 0;
+      FILE *stream = open_memstream(&stream_data, &stream_size);
+
+      nir_print_shader(stage->nir, stream);
+
+      fclose(stream);
+
+      /* Copy it to a ralloc'd thing */
+      nir = ralloc_size(pipeline->mem_ctx, stream_size + 1);
+      memcpy(nir, stream_data, stream_size);
+      nir[stream_size] = 0;
+
+      free(stream_data);
+   }
+
    char *disasm = NULL;
    if (stage->code &&
        (pipeline->flags &
@@ -1101,6 +1068,7 @@ anv_pipeline_add_executable(struct anv_pipeline *pipeline,
       (struct anv_pipeline_executable) {
          .stage = stage->stage,
          .stats = *stats,
+         .nir = nir,
          .disasm = disasm,
       };
 }
@@ -1398,6 +1366,9 @@ anv_pipeline_compile_graphics(struct anv_pipeline *pipeline,
          goto fail;
       }
 
+      anv_nir_validate_push_layout(&stages[s].prog_data.base,
+                                   &stages[s].bind_map);
+
       struct anv_shader_bin *bin =
          anv_device_upload_kernel(pipeline->device, cache,
                                   &stages[s].cache_key,
@@ -1559,10 +1530,9 @@ anv_pipeline_compile_cs(struct anv_pipeline *pipeline,
          return vk_error(VK_ERROR_OUT_OF_HOST_MEMORY);
       }
 
-      anv_pipeline_lower_nir(pipeline, mem_ctx, &stage, layout);
+      NIR_PASS_V(stage.nir, anv_nir_add_base_work_group_id);
 
-      NIR_PASS_V(stage.nir, anv_nir_add_base_work_group_id,
-                 &stage.prog_data.cs);
+      anv_pipeline_lower_nir(pipeline, mem_ctx, &stage, layout);
 
       NIR_PASS_V(stage.nir, nir_lower_vars_to_explicit_types,
                  nir_var_mem_shared, shared_type_info);
@@ -1576,6 +1546,14 @@ anv_pipeline_compile_cs(struct anv_pipeline *pipeline,
       if (stage.code == NULL) {
          ralloc_free(mem_ctx);
          return vk_error(VK_ERROR_OUT_OF_HOST_MEMORY);
+      }
+
+      anv_nir_validate_push_layout(&stage.prog_data.base, &stage.bind_map);
+
+      if (!stage.prog_data.cs.uses_num_work_groups) {
+         assert(stage.bind_map.surface_to_descriptor[0].set ==
+                ANV_DESCRIPTOR_SET_NUM_WORK_GROUPS);
+         stage.bind_map.surface_to_descriptor[0].set = ANV_DESCRIPTOR_SET_NULL;
       }
 
       const unsigned code_size = stage.prog_data.base.program_size;
@@ -2164,6 +2142,17 @@ VkResult anv_GetPipelineExecutableInternalRepresentationsKHR(
    assert(pExecutableInfo->executableIndex < pipeline->num_executables);
    const struct anv_pipeline_executable *exe =
       &pipeline->executables[pExecutableInfo->executableIndex];
+
+   if (exe->nir) {
+      vk_outarray_append(&out, ir) {
+         WRITE_STR(ir->name, "Final NIR");
+         WRITE_STR(ir->description,
+                   "Final NIR before going into the back-end compiler");
+
+         if (!write_ir_text(ir, exe->nir))
+            incomplete_text = true;
+      }
+   }
 
    if (exe->disasm) {
       vk_outarray_append(&out, ir) {

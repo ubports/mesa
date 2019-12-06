@@ -77,6 +77,7 @@ struct prog_instruction;
 struct gl_program_parameter_list;
 struct gl_shader_spirv_data;
 struct set;
+struct shader_includes;
 struct vbo_context;
 /*@}*/
 
@@ -3193,6 +3194,9 @@ struct gl_shader_compiler_options
    /** Clamp UBO and SSBO block indices so they don't go out-of-bounds. */
    GLboolean ClampBlockIndicesToArrayBounds;
 
+   /** (driconf) Force gl_Position to be considered invariant */
+   GLboolean PositionAlwaysInvariant;
+
    const struct nir_shader_compiler_options *NirOptions;
 };
 
@@ -3321,6 +3325,13 @@ struct gl_shared_state
    struct hash_table_u64 *TextureHandles;
    struct hash_table_u64 *ImageHandles;
    mtx_t HandlesMutex; /**< For texture/image handles safety */
+
+   /* GL_ARB_shading_language_include */
+   struct shader_includes *ShaderIncludes;
+   /* glCompileShaderInclude expects ShaderIncludes not to change while it is
+    * in progress.
+    */
+   mtx_t ShaderIncludeMutex;
 
    /**
     * Some context in this share group was affected by a GPU reset
@@ -4130,6 +4141,9 @@ struct gl_constants
    /** Is the drivers uniform storage packed or padded to 16 bytes. */
    bool PackedDriverUniformStorage;
 
+   /** Wether or not glBitmap uses red textures rather than alpha */
+   bool BitmapUsesRed;
+
    /** GL_ARB_gl_spirv */
    struct spirv_supported_capabilities SpirVCapabilities;
 
@@ -4271,6 +4285,7 @@ struct gl_extensions
    GLboolean EXT_blend_equation_separate;
    GLboolean EXT_blend_func_separate;
    GLboolean EXT_blend_minmax;
+   GLboolean EXT_demote_to_helper_invocation;
    GLboolean EXT_depth_bounds_test;
    GLboolean EXT_disjoint_timer_query;
    GLboolean EXT_draw_buffers2;

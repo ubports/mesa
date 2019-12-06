@@ -23,6 +23,7 @@
  * Authors (Collabora):
  *   Alyssa Rosenzweig <alyssa.rosenzweig@collabora.com>
  */
+#include <errno.h>
 #include <stdio.h>
 #include <fcntl.h>
 #include <xf86drm.h>
@@ -101,6 +102,63 @@ panfrost_bo_free(struct panfrost_bo *bo)
         ralloc_free(bo);
 }
 
+/* Returns true if the BO is ready, false otherwise.
+ * access_type is encoding the type of access one wants to ensure is done.
+ * Say you want to make sure all writers are done writing, you should pass
+ * PAN_BO_ACCESS_WRITE.
+ * If you want to wait for all users, you should pass PAN_BO_ACCESS_RW.
+ * PAN_BO_ACCESS_READ would work too as waiting for readers implies
+ * waiting for writers as well, but we want to make things explicit and waiting
+ * only for readers is impossible.
+ */
+bool
+panfrost_bo_wait(struct panfrost_bo *bo, int64_t timeout_ns,
+                 uint32_t access_type)
+{
+        struct drm_panfrost_wait_bo req = {
+                .handle = bo->gem_handle,
+		.timeout_ns = timeout_ns,
+        };
+        int ret;
+
+        assert(access_type == PAN_BO_ACCESS_WRITE ||
+               access_type == PAN_BO_ACCESS_RW);
+
+        /* If the BO has been exported or imported we can't rely on the cached
+         * state, we need to call the WAIT_BO ioctl.
+         */
+        if (!(bo->flags & (PAN_BO_IMPORTED | PAN_BO_EXPORTED))) {
+                /* If ->gpu_access is 0, the BO is idle, no need to wait. */
+                if (!bo->gpu_access)
+                        return true;
+
+                /* If the caller only wants to wait for writers and no
+                 * writes are pending, we don't have to wait.
+                 */
+                if (access_type == PAN_BO_ACCESS_WRITE &&
+                    !(bo->gpu_access & PAN_BO_ACCESS_WRITE))
+                        return true;
+        }
+
+        /* The ioctl returns >= 0 value when the BO we are waiting for is ready
+         * -1 otherwise.
+         */
+        ret = drmIoctl(bo->screen->fd, DRM_IOCTL_PANFROST_WAIT_BO, &req);
+        if (ret != -1) {
+                /* Set gpu_access to 0 so that the next call to bo_wait()
+                 * doesn't have to call the WAIT_BO ioctl.
+                 */
+                bo->gpu_access = 0;
+                return true;
+        }
+
+        /* If errno is not ETIMEDOUT or EBUSY that means the handle we passed
+         * is invalid, which shouldn't happen here.
+         */
+        assert(errno == ETIMEDOUT || errno == EBUSY);
+        return false;
+}
+
 /* Helper to calculate the bucket index of a BO */
 
 static unsigned
@@ -128,7 +186,7 @@ pan_bucket_index(unsigned size)
 static struct list_head *
 pan_bucket(struct panfrost_screen *screen, unsigned size)
 {
-        return &screen->bo_cache[pan_bucket_index(size)];
+        return &screen->bo_cache.buckets[pan_bucket_index(size)];
 }
 
 /* Tries to fetch a BO of sufficient size with the appropriate flags from the
@@ -137,41 +195,70 @@ pan_bucket(struct panfrost_screen *screen, unsigned size)
  * BO. */
 
 static struct panfrost_bo *
-panfrost_bo_cache_fetch(
-                struct panfrost_screen *screen,
-                size_t size, uint32_t flags)
+panfrost_bo_cache_fetch(struct panfrost_screen *screen,
+                        size_t size, uint32_t flags, bool dontwait)
 {
-        pthread_mutex_lock(&screen->bo_cache_lock);
+        pthread_mutex_lock(&screen->bo_cache.lock);
         struct list_head *bucket = pan_bucket(screen, size);
         struct panfrost_bo *bo = NULL;
 
         /* Iterate the bucket looking for something suitable */
-        list_for_each_entry_safe(struct panfrost_bo, entry, bucket, link) {
-                if (entry->size >= size &&
-                    entry->flags == flags) {
-                        int ret;
-                        struct drm_panfrost_madvise madv;
+        list_for_each_entry_safe(struct panfrost_bo, entry, bucket,
+                                 bucket_link) {
+                if (entry->size < size || entry->flags != flags)
+                        continue;
 
-                        /* This one works, splice it out of the cache */
-                        list_del(&entry->link);
+                if (!panfrost_bo_wait(entry, dontwait ? 0 : INT64_MAX,
+                                      PAN_BO_ACCESS_RW))
+                        continue;
 
-                        madv.handle = entry->gem_handle;
-                        madv.madv = PANFROST_MADV_WILLNEED;
-                        madv.retained = 0;
+                struct drm_panfrost_madvise madv = {
+                        .handle = entry->gem_handle,
+                        .madv = PANFROST_MADV_WILLNEED,
+                };
+                int ret;
 
-                        ret = drmIoctl(screen->fd, DRM_IOCTL_PANFROST_MADVISE, &madv);
-                        if (!ret && !madv.retained) {
-                                panfrost_bo_free(entry);
-                                continue;
-                        }
-                        /* Let's go! */
-                        bo = entry;
-                        break;
+                /* This one works, splice it out of the cache */
+                list_del(&entry->bucket_link);
+                list_del(&entry->lru_link);
+
+                ret = drmIoctl(screen->fd, DRM_IOCTL_PANFROST_MADVISE, &madv);
+                if (!ret && !madv.retained) {
+                        panfrost_bo_free(entry);
+                        continue;
                 }
+                /* Let's go! */
+                bo = entry;
+                break;
         }
-        pthread_mutex_unlock(&screen->bo_cache_lock);
+        pthread_mutex_unlock(&screen->bo_cache.lock);
 
         return bo;
+}
+
+static void
+panfrost_bo_cache_evict_stale_bos(struct panfrost_screen *screen)
+{
+        struct timespec time;
+
+        clock_gettime(CLOCK_MONOTONIC, &time);
+        list_for_each_entry_safe(struct panfrost_bo, entry,
+                                 &screen->bo_cache.lru, lru_link) {
+                /* We want all entries that have been used more than 1 sec
+                 * ago to be dropped, others can be kept.
+                 * Note the <= 2 check and not <= 1. It's here to account for
+                 * the fact that we're only testing ->tv_sec, not ->tv_nsec.
+                 * That means we might keep entries that are between 1 and 2
+                 * seconds old, but we don't really care, as long as unused BOs
+                 * are dropped at some point.
+                 */
+                if (time.tv_sec - entry->last_used <= 2)
+                        break;
+
+                list_del(&entry->bucket_link);
+                list_del(&entry->lru_link);
+                panfrost_bo_free(entry);
+        }
 }
 
 /* Tries to add a BO to the cache. Returns if it was
@@ -185,9 +272,10 @@ panfrost_bo_cache_put(struct panfrost_bo *bo)
         if (bo->flags & PAN_BO_DONT_REUSE)
                 return false;
 
-        pthread_mutex_lock(&screen->bo_cache_lock);
+        pthread_mutex_lock(&screen->bo_cache.lock);
         struct list_head *bucket = pan_bucket(screen, bo->size);
         struct drm_panfrost_madvise madv;
+        struct timespec time;
 
         madv.handle = bo->gem_handle;
         madv.madv = PANFROST_MADV_DONTNEED;
@@ -196,8 +284,18 @@ panfrost_bo_cache_put(struct panfrost_bo *bo)
         drmIoctl(screen->fd, DRM_IOCTL_PANFROST_MADVISE, &madv);
 
         /* Add us to the bucket */
-        list_addtail(&bo->link, bucket);
-        pthread_mutex_unlock(&screen->bo_cache_lock);
+        list_addtail(&bo->bucket_link, bucket);
+
+        /* Add us to the LRU list and update the last_used field. */
+        list_addtail(&bo->lru_link, &screen->bo_cache.lru);
+        clock_gettime(CLOCK_MONOTONIC, &time);
+        bo->last_used = time.tv_sec;
+
+        /* Let's do some cleanup in the BO cache while we hold the
+         * lock.
+         */
+        panfrost_bo_cache_evict_stale_bos(screen);
+        pthread_mutex_unlock(&screen->bo_cache.lock);
 
         return true;
 }
@@ -212,16 +310,18 @@ void
 panfrost_bo_cache_evict_all(
                 struct panfrost_screen *screen)
 {
-        pthread_mutex_lock(&screen->bo_cache_lock);
-        for (unsigned i = 0; i < ARRAY_SIZE(screen->bo_cache); ++i) {
-                struct list_head *bucket = &screen->bo_cache[i];
+        pthread_mutex_lock(&screen->bo_cache.lock);
+        for (unsigned i = 0; i < ARRAY_SIZE(screen->bo_cache.buckets); ++i) {
+                struct list_head *bucket = &screen->bo_cache.buckets[i];
 
-                list_for_each_entry_safe(struct panfrost_bo, entry, bucket, link) {
-                        list_del(&entry->link);
+                list_for_each_entry_safe(struct panfrost_bo, entry, bucket,
+                                         bucket_link) {
+                        list_del(&entry->bucket_link);
+                        list_del(&entry->lru_link);
                         panfrost_bo_free(entry);
                 }
         }
-        pthread_mutex_unlock(&screen->bo_cache_lock);
+        pthread_mutex_unlock(&screen->bo_cache.lock);
 }
 
 void
@@ -281,12 +381,18 @@ panfrost_bo_create(struct panfrost_screen *screen, size_t size,
         if (flags & PAN_BO_GROWABLE)
                 assert(flags & PAN_BO_INVISIBLE);
 
-        /* Before creating a BO, we first want to check the cache, otherwise,
-         * the cache misses and we need to allocate a BO fresh from the kernel
+        /* Before creating a BO, we first want to check the cache but without
+         * waiting for BO readiness (BOs in the cache can still be referenced
+         * by jobs that are not finished yet).
+         * If the cached allocation fails we fall back on fresh BO allocation,
+         * and if that fails too, we try one more time to allocate from the
+         * cache, but this time we accept to wait.
          */
-        bo = panfrost_bo_cache_fetch(screen, size, flags);
+        bo = panfrost_bo_cache_fetch(screen, size, flags, true);
         if (!bo)
                 bo = panfrost_bo_alloc(screen, size, flags);
+        if (!bo)
+                bo = panfrost_bo_cache_fetch(screen, size, flags, false);
 
         if (!bo)
                 fprintf(stderr, "BO creation failed\n");
@@ -305,6 +411,11 @@ panfrost_bo_create(struct panfrost_screen *screen, size_t size,
         }
 
         pipe_reference_init(&bo->reference, 1);
+
+        pthread_mutex_lock(&screen->active_bos_lock);
+        _mesa_set_add(bo->screen->active_bos, bo);
+        pthread_mutex_unlock(&screen->active_bos_lock);
+
         return bo;
 }
 
@@ -324,43 +435,79 @@ panfrost_bo_unreference(struct panfrost_bo *bo)
         if (!pipe_reference(&bo->reference, NULL))
                 return;
 
-        /* When the reference count goes to zero, we need to cleanup */
-        panfrost_bo_munmap(bo);
+        struct panfrost_screen *screen = bo->screen;
 
-        /* Rather than freeing the BO now, we'll cache the BO for later
-         * allocations if we're allowed to.
+        pthread_mutex_lock(&screen->active_bos_lock);
+        /* Someone might have imported this BO while we were waiting for the
+         * lock, let's make sure it's still not referenced before freeing it.
          */
-        if (panfrost_bo_cache_put(bo))
-                return;
+        if (!pipe_is_referenced(&bo->reference)) {
+                _mesa_set_remove_key(bo->screen->active_bos, bo);
 
-        panfrost_bo_free(bo);
+                /* When the reference count goes to zero, we need to cleanup */
+                panfrost_bo_munmap(bo);
+
+                /* Rather than freeing the BO now, we'll cache the BO for later
+                 * allocations if we're allowed to.
+                 */
+                if (!panfrost_bo_cache_put(bo))
+                        panfrost_bo_free(bo);
+        }
+        pthread_mutex_unlock(&screen->active_bos_lock);
 }
 
 struct panfrost_bo *
 panfrost_bo_import(struct panfrost_screen *screen, int fd)
 {
-        struct panfrost_bo *bo = rzalloc(screen, struct panfrost_bo);
+        struct panfrost_bo *bo, *newbo = rzalloc(screen, struct panfrost_bo);
         struct drm_panfrost_get_bo_offset get_bo_offset = {0,};
+        struct set_entry *entry;
         ASSERTED int ret;
         unsigned gem_handle;
+
+        newbo->screen = screen;
 
         ret = drmPrimeFDToHandle(screen->fd, fd, &gem_handle);
         assert(!ret);
 
-        get_bo_offset.handle = gem_handle;
-        ret = drmIoctl(screen->fd, DRM_IOCTL_PANFROST_GET_BO_OFFSET, &get_bo_offset);
-        assert(!ret);
+        newbo->gem_handle = gem_handle;
 
-        bo->screen = screen;
-        bo->gem_handle = gem_handle;
-        bo->gpu = (mali_ptr) get_bo_offset.offset;
-        bo->size = lseek(fd, 0, SEEK_END);
-        bo->flags |= PAN_BO_DONT_REUSE;
-        assert(bo->size > 0);
-        pipe_reference_init(&bo->reference, 1);
+        pthread_mutex_lock(&screen->active_bos_lock);
+        entry = _mesa_set_search_or_add(screen->active_bos, newbo);
+        assert(entry);
+        bo = (struct panfrost_bo *)entry->key;
+        if (newbo == bo) {
+                get_bo_offset.handle = gem_handle;
+                ret = drmIoctl(screen->fd, DRM_IOCTL_PANFROST_GET_BO_OFFSET, &get_bo_offset);
+                assert(!ret);
 
-        // TODO map and unmap on demand?
-        panfrost_bo_mmap(bo);
+                newbo->gpu = (mali_ptr) get_bo_offset.offset;
+                newbo->size = lseek(fd, 0, SEEK_END);
+                newbo->flags |= PAN_BO_DONT_REUSE | PAN_BO_IMPORTED;
+                assert(newbo->size > 0);
+                pipe_reference_init(&newbo->reference, 1);
+                // TODO map and unmap on demand?
+                panfrost_bo_mmap(newbo);
+        } else {
+                ralloc_free(newbo);
+                /* !pipe_is_referenced(&bo->reference) can happen if the BO
+                 * was being released but panfrost_bo_import() acquired the
+                 * lock before panfrost_bo_unreference(). In that case, refcnt
+                 * is 0 and we can't use panfrost_bo_reference() directly, we
+                 * have to re-initialize it with pipe_reference_init().
+                 * Note that panfrost_bo_unreference() checks
+                 * pipe_is_referenced() value just after acquiring the lock to
+                 * make sure the object is not freed if panfrost_bo_import()
+                 * acquired it in the meantime.
+                 */
+                if (!pipe_is_referenced(&bo->reference))
+                        pipe_reference_init(&newbo->reference, 1);
+                else
+                        panfrost_bo_reference(bo);
+                assert(bo->cpu);
+        }
+        pthread_mutex_unlock(&screen->active_bos_lock);
+
         return bo;
 }
 
@@ -376,7 +523,7 @@ panfrost_bo_export(struct panfrost_bo *bo)
         if (ret == -1)
                 return -1;
 
-        bo->flags |= PAN_BO_DONT_REUSE;
+        bo->flags |= PAN_BO_DONT_REUSE | PAN_BO_EXPORTED;
         return args.fd;
 }
 

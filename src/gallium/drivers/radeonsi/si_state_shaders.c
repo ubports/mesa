@@ -42,24 +42,27 @@
 /* SHADER_CACHE */
 
 /**
- * Return the IR binary in a buffer. For TGSI the first 4 bytes contain its
- * size as integer.
+ * Return the IR key for the shader cache.
  */
-void *si_get_ir_binary(struct si_shader_selector *sel, bool ngg, bool es)
+void si_get_ir_cache_key(struct si_shader_selector *sel, bool ngg, bool es,
+			 unsigned char ir_sha1_cache_key[20])
 {
-	struct blob blob;
+	struct blob blob = {};
 	unsigned ir_size;
 	void *ir_binary;
 
 	if (sel->tokens) {
 		ir_binary = sel->tokens;
 		ir_size = tgsi_num_tokens(sel->tokens) *
-					  sizeof(struct tgsi_token);
+			  sizeof(struct tgsi_token);
+	} else if (sel->nir_binary) {
+		ir_binary = sel->nir_binary;
+		ir_size = sel->nir_size;
 	} else {
 		assert(sel->nir);
 
 		blob_init(&blob);
-		nir_serialize(&blob, sel->nir);
+		nir_serialize(&blob, sel->nir, true);
 		ir_binary = blob.data;
 		ir_size = blob.size;
 	}
@@ -78,20 +81,18 @@ void *si_get_ir_binary(struct si_shader_selector *sel, bool ngg, bool es)
 	if (sel->force_correct_derivs_after_kill)
 		shader_variant_flags |= 1 << 3;
 
-	unsigned size = 4 + 4 + ir_size + sizeof(sel->so);
-	char *result = (char*)MALLOC(size);
-	if (!result)
-		return NULL;
+	struct mesa_sha1 ctx;
+	_mesa_sha1_init(&ctx);
+	_mesa_sha1_update(&ctx, &shader_variant_flags, 4);
+	_mesa_sha1_update(&ctx, ir_binary, ir_size);
+	if (sel->type == PIPE_SHADER_VERTEX ||
+	    sel->type == PIPE_SHADER_TESS_EVAL ||
+	    sel->type == PIPE_SHADER_GEOMETRY)
+		_mesa_sha1_update(&ctx, &sel->so, sizeof(sel->so));
+	_mesa_sha1_final(&ctx, ir_sha1_cache_key);
 
-	((uint32_t*)result)[0] = size;
-	((uint32_t*)result)[1] = shader_variant_flags;
-	memcpy(result + 8, ir_binary, ir_size);
-	memcpy(result + 8 + ir_size, &sel->so, sizeof(sel->so));
-
-	if (sel->nir)
+	if (ir_binary == blob.data)
 		blob_finish(&blob);
-
-	return result;
 }
 
 /** Copy "data" to "ptr" and return the next dword following copied data. */
@@ -208,10 +209,9 @@ static bool si_load_shader_binary(struct si_shader *shader, void *binary)
 /**
  * Insert a shader into the cache. It's assumed the shader is not in the cache.
  * Use si_shader_cache_load_shader before calling this.
- *
- * Returns false on failure, in which case the ir_binary should be freed.
  */
-bool si_shader_cache_insert_shader(struct si_screen *sscreen, void *ir_binary,
+void si_shader_cache_insert_shader(struct si_screen *sscreen,
+				   unsigned char ir_sha1_cache_key[20],
 				   struct si_shader *shader,
 				   bool insert_into_disk_cache)
 {
@@ -219,42 +219,41 @@ bool si_shader_cache_insert_shader(struct si_screen *sscreen, void *ir_binary,
 	struct hash_entry *entry;
 	uint8_t key[CACHE_KEY_SIZE];
 
-	entry = _mesa_hash_table_search(sscreen->shader_cache, ir_binary);
+	entry = _mesa_hash_table_search(sscreen->shader_cache, ir_sha1_cache_key);
 	if (entry)
-		return false; /* already added */
+		return; /* already added */
 
 	hw_binary = si_get_shader_binary(shader);
 	if (!hw_binary)
-		return false;
+		return;
 
-	if (_mesa_hash_table_insert(sscreen->shader_cache, ir_binary,
+	if (_mesa_hash_table_insert(sscreen->shader_cache,
+				    mem_dup(ir_sha1_cache_key, 20),
 				    hw_binary) == NULL) {
 		FREE(hw_binary);
-		return false;
+		return;
 	}
 
 	if (sscreen->disk_shader_cache && insert_into_disk_cache) {
-		disk_cache_compute_key(sscreen->disk_shader_cache, ir_binary,
-				       *((uint32_t *)ir_binary), key);
+		disk_cache_compute_key(sscreen->disk_shader_cache,
+				       ir_sha1_cache_key, 20, key);
 		disk_cache_put(sscreen->disk_shader_cache, key, hw_binary,
 			       *((uint32_t *) hw_binary), NULL);
 	}
-
-	return true;
 }
 
-bool si_shader_cache_load_shader(struct si_screen *sscreen, void *ir_binary,
+bool si_shader_cache_load_shader(struct si_screen *sscreen,
+				 unsigned char ir_sha1_cache_key[20],
 				 struct si_shader *shader)
 {
 	struct hash_entry *entry =
-		_mesa_hash_table_search(sscreen->shader_cache, ir_binary);
+		_mesa_hash_table_search(sscreen->shader_cache, ir_sha1_cache_key);
 	if (!entry) {
 		if (sscreen->disk_shader_cache) {
 			unsigned char sha1[CACHE_KEY_SIZE];
-			size_t tg_size = *((uint32_t *) ir_binary);
 
 			disk_cache_compute_key(sscreen->disk_shader_cache,
-					       ir_binary, tg_size, sha1);
+					       ir_sha1_cache_key, 20, sha1);
 
 			size_t binary_size;
 			uint8_t *buffer =
@@ -285,16 +284,13 @@ bool si_shader_cache_load_shader(struct si_screen *sscreen, void *ir_binary,
 			}
 			free(buffer);
 
-			if (!si_shader_cache_insert_shader(sscreen, ir_binary,
-							   shader, false))
-				FREE(ir_binary);
+			si_shader_cache_insert_shader(sscreen, ir_sha1_cache_key,
+						      shader, false);
 		} else {
 			return false;
 		}
 	} else {
-		if (si_load_shader_binary(shader, entry->data))
-			FREE(ir_binary);
-		else
+		if (!si_load_shader_binary(shader, entry->data))
 			return false;
 	}
 	p_atomic_inc(&sscreen->num_shader_cache_hits);
@@ -303,20 +299,14 @@ bool si_shader_cache_load_shader(struct si_screen *sscreen, void *ir_binary,
 
 static uint32_t si_shader_cache_key_hash(const void *key)
 {
-	/* The first dword is the key size. */
-	return util_hash_crc32(key, *(uint32_t*)key);
+	/* Take the first dword of SHA1. */
+	return *(uint32_t*)key;
 }
 
 static bool si_shader_cache_key_equals(const void *a, const void *b)
 {
-	uint32_t *keya = (uint32_t*)a;
-	uint32_t *keyb = (uint32_t*)b;
-
-	/* The first dword is the key size. */
-	if (*keya != *keyb)
-		return false;
-
-	return memcmp(keya, keyb, *keya) == 0;
+	/* Compare SHA1s. */
+	return memcmp(a, b, 20) == 0;
 }
 
 static void si_destroy_shader_cache_entry(struct hash_entry *entry)
@@ -327,7 +317,7 @@ static void si_destroy_shader_cache_entry(struct hash_entry *entry)
 
 bool si_init_shader_cache(struct si_screen *sscreen)
 {
-	(void) mtx_init(&sscreen->shader_cache_mutex, mtx_plain);
+	(void) simple_mtx_init(&sscreen->shader_cache_mutex, mtx_plain);
 	sscreen->shader_cache =
 		_mesa_hash_table_create(NULL,
 					si_shader_cache_key_hash,
@@ -341,7 +331,7 @@ void si_destroy_shader_cache(struct si_screen *sscreen)
 	if (sscreen->shader_cache)
 		_mesa_hash_table_destroy(sscreen->shader_cache,
 					 si_destroy_shader_cache_entry);
-	mtx_destroy(&sscreen->shader_cache_mutex);
+	simple_mtx_destroy(&sscreen->shader_cache_mutex);
 }
 
 /* SHADER STATES */
@@ -2105,6 +2095,9 @@ static void si_build_shader_variant(struct si_shader *shader,
 		compiler = shader->compiler_ctx_state.compiler;
 	}
 
+	if (!compiler->passes)
+		si_init_compiler(sscreen, compiler);
+
 	if (unlikely(!si_shader_create(sscreen, compiler, shader, debug))) {
 		PRINT_ERR("Failed to build shader variant (type=%u)\n",
 			  sel->type);
@@ -2221,14 +2214,14 @@ current_not_ready:
 	if (thread_index < 0)
 		util_queue_fence_wait(&sel->ready);
 
-	mtx_lock(&sel->mutex);
+	simple_mtx_lock(&sel->mutex);
 
 	/* Find the shader variant. */
 	for (iter = sel->first_variant; iter; iter = iter->next_variant) {
 		/* Don't check the "current" shader. We checked it above. */
 		if (current != iter &&
 		    memcmp(&iter->key, key, sizeof(*key)) == 0) {
-			mtx_unlock(&sel->mutex);
+			simple_mtx_unlock(&sel->mutex);
 
 			if (unlikely(!util_queue_fence_is_signalled(&iter->ready))) {
 				/* If it's an optimized shader and its compilation has
@@ -2257,7 +2250,7 @@ current_not_ready:
 	/* Build a new shader. */
 	shader = CALLOC_STRUCT(si_shader);
 	if (!shader) {
-		mtx_unlock(&sel->mutex);
+		simple_mtx_unlock(&sel->mutex);
 		return -ENOMEM;
 	}
 
@@ -2314,11 +2307,11 @@ current_not_ready:
 				assert(0);
 			}
 
-			mtx_lock(&previous_stage_sel->mutex);
+			simple_mtx_lock(&previous_stage_sel->mutex);
 			ok = si_check_missing_main_part(sscreen,
 							previous_stage_sel,
 							compiler_state, &shader1_key);
-			mtx_unlock(&previous_stage_sel->mutex);
+			simple_mtx_unlock(&previous_stage_sel->mutex);
 		}
 
 		if (ok) {
@@ -2328,7 +2321,7 @@ current_not_ready:
 
 		if (!ok) {
 			FREE(shader);
-			mtx_unlock(&sel->mutex);
+			simple_mtx_unlock(&sel->mutex);
 			return -ENOMEM; /* skip the draw call */
 		}
 	}
@@ -2373,7 +2366,7 @@ current_not_ready:
 
 		/* Use the default (unoptimized) shader for now. */
 		memset(&key->opt, 0, sizeof(key->opt));
-		mtx_unlock(&sel->mutex);
+		simple_mtx_unlock(&sel->mutex);
 
 		if (sscreen->options.sync_compile)
 			util_queue_fence_wait(&shader->ready);
@@ -2394,7 +2387,7 @@ current_not_ready:
 		sel->last_variant = shader;
 	}
 
-	mtx_unlock(&sel->mutex);
+	simple_mtx_unlock(&sel->mutex);
 
 	assert(!shader->is_optimized);
 	si_build_shader_variant(shader, thread_index, false);
@@ -2472,8 +2465,25 @@ static void si_init_shader_selector_async(void *job, int thread_index)
 	assert(thread_index < ARRAY_SIZE(sscreen->compiler));
 	compiler = &sscreen->compiler[thread_index];
 
-	if (sel->nir)
-		si_lower_nir(sel);
+	if (!compiler->passes)
+		si_init_compiler(sscreen, compiler);
+
+	/* Serialize NIR to save memory. Monolithic shader variants
+	 * have to deserialize NIR before compilation.
+	 */
+	if (sel->nir) {
+		struct blob blob;
+                size_t size;
+
+		blob_init(&blob);
+		/* true = remove optional debugging data to increase
+		 * the likehood of getting more shader cache hits.
+		 * It also drops variable names, so we'll save more memory.
+		 */
+		nir_serialize(&blob, sel->nir, true);
+		blob_finish_get_buffer(&blob, &sel->nir_binary, &size);
+		sel->nir_size = size;
+	}
 
 	/* Compile the main shader part for use with a prolog and/or epilog.
 	 * If this fails, the driver will try to compile a monolithic shader
@@ -2481,7 +2491,7 @@ static void si_init_shader_selector_async(void *job, int thread_index)
 	 */
 	if (!sscreen->use_monolithic_shaders) {
 		struct si_shader *shader = CALLOC_STRUCT(si_shader);
-		void *ir_binary = NULL;
+		unsigned char ir_sha1_cache_key[20];
 
 		if (!shader) {
 			fprintf(stderr, "radeonsi: can't allocate a main shader part\n");
@@ -2506,35 +2516,31 @@ static void si_init_shader_selector_async(void *job, int thread_index)
 			shader->key.as_ngg = 1;
 
 		if (sel->tokens || sel->nir) {
-			ir_binary = si_get_ir_binary(sel, shader->key.as_ngg,
-						     shader->key.as_es);
+			si_get_ir_cache_key(sel, shader->key.as_ngg,
+					    shader->key.as_es, ir_sha1_cache_key);
 		}
 
 		/* Try to load the shader from the shader cache. */
-		mtx_lock(&sscreen->shader_cache_mutex);
+		simple_mtx_lock(&sscreen->shader_cache_mutex);
 
-		if (ir_binary &&
-		    si_shader_cache_load_shader(sscreen, ir_binary, shader)) {
-			mtx_unlock(&sscreen->shader_cache_mutex);
+		if (si_shader_cache_load_shader(sscreen, ir_sha1_cache_key, shader)) {
+			simple_mtx_unlock(&sscreen->shader_cache_mutex);
 			si_shader_dump_stats_for_shader_db(sscreen, shader, debug);
 		} else {
-			mtx_unlock(&sscreen->shader_cache_mutex);
+			simple_mtx_unlock(&sscreen->shader_cache_mutex);
 
 			/* Compile the shader if it hasn't been loaded from the cache. */
 			if (si_compile_tgsi_shader(sscreen, compiler, shader,
 						   debug) != 0) {
 				FREE(shader);
-				FREE(ir_binary);
 				fprintf(stderr, "radeonsi: can't compile a main shader part\n");
 				return;
 			}
 
-			if (ir_binary) {
-				mtx_lock(&sscreen->shader_cache_mutex);
-				if (!si_shader_cache_insert_shader(sscreen, ir_binary, shader, true))
-					FREE(ir_binary);
-				mtx_unlock(&sscreen->shader_cache_mutex);
-			}
+			simple_mtx_lock(&sscreen->shader_cache_mutex);
+			si_shader_cache_insert_shader(sscreen, ir_sha1_cache_key,
+						      shader, true);
+			simple_mtx_unlock(&sscreen->shader_cache_mutex);
 		}
 
 		*si_get_main_shader_part(sel, &shader->key) = shader;
@@ -2595,6 +2601,12 @@ static void si_init_shader_selector_async(void *job, int thread_index)
 
 		si_shader_vs(sscreen, sel->gs_copy_shader, sel);
 	}
+
+	/* Free NIR. We only keep serialized NIR after this point. */
+	if (sel->nir) {
+		ralloc_free(sel->nir);
+		sel->nir = NULL;
+	}
 }
 
 void si_schedule_initial_compile(struct si_context *sctx, unsigned processor,
@@ -2633,12 +2645,13 @@ void si_get_active_slot_masks(const struct tgsi_shader_info *info,
 			      uint32_t *const_and_shader_buffers,
 			      uint64_t *samplers_and_images)
 {
-	unsigned start, num_shaderbufs, num_constbufs, num_images, num_samplers;
+	unsigned start, num_shaderbufs, num_constbufs, num_images, num_msaa_images, num_samplers;
 
 	num_shaderbufs = util_last_bit(info->shader_buffers_declared);
 	num_constbufs = util_last_bit(info->const_buffers_declared);
 	/* two 8-byte images share one 16-byte slot */
 	num_images = align(util_last_bit(info->images_declared), 2);
+	num_msaa_images = align(util_last_bit(info->msaa_images_declared), 2);
 	num_samplers = util_last_bit(info->samplers_declared);
 
 	/* The layout is: sb[last] ... sb[0], cb[0] ... cb[last] */
@@ -2646,7 +2659,18 @@ void si_get_active_slot_masks(const struct tgsi_shader_info *info,
 	*const_and_shader_buffers =
 		u_bit_consecutive(start, num_shaderbufs + num_constbufs);
 
-	/* The layout is: image[last] ... image[0], sampler[0] ... sampler[last] */
+	/* The layout is:
+	 *   - fmask[last] ... fmask[0]     go to [15-last .. 15]
+	 *   - image[last] ... image[0]     go to [31-last .. 31]
+	 *   - sampler[0] ... sampler[last] go to [32 .. 32+last*2]
+	 *
+	 * FMASKs for images are placed separately, because MSAA images are rare,
+	 * and so we can benefit from a better cache hit rate if we keep image
+	 * descriptors together.
+	 */
+	if (num_msaa_images)
+		num_images = SI_NUM_IMAGES + num_msaa_images; /* add FMASK descriptors */
+
 	start = si_get_image_slot(num_images - 1) / 2;
 	*samplers_and_images =
 		u_bit_consecutive64(start, num_images / 2 + num_samplers);
@@ -2703,10 +2727,9 @@ static void *si_create_shader_selector(struct pipe_context *ctx,
 			sel->nir = state->ir.nir;
 		}
 
-		si_nir_lower_ps_inputs(sel->nir);
-		si_nir_opts(sel->nir);
 		si_nir_scan_shader(sel->nir, &sel->info);
 		si_nir_scan_tess_ctrl(sel->nir, &sel->tcs_info);
+		si_nir_adjust_driver_locations(sel->nir);
 	}
 
 	sel->type = sel->info.processor;
@@ -2933,7 +2956,7 @@ static void *si_create_shader_selector(struct pipe_context *ctx,
 	if (sel->info.properties[TGSI_PROPERTY_FS_POST_DEPTH_COVERAGE])
 		sel->db_shader_control |= S_02880C_PRE_SHADER_DEPTH_COVERAGE_ENABLE(1);
 
-	(void) mtx_init(&sel->mutex, mtx_plain);
+	(void) simple_mtx_init(&sel->mutex, mtx_plain);
 
 	si_schedule_initial_compile(sctx, sel->info.processor, &sel->ready,
 				    &sel->compiler_ctx_state, sel,
@@ -3281,9 +3304,10 @@ void si_destroy_shader_selector(struct si_context *sctx,
 		si_delete_shader(sctx, sel->gs_copy_shader);
 
 	util_queue_fence_destroy(&sel->ready);
-	mtx_destroy(&sel->mutex);
+	simple_mtx_destroy(&sel->mutex);
 	free(sel->tokens);
 	ralloc_free(sel->nir);
+	free(sel->nir_binary);
 	free(sel);
 }
 
@@ -3564,18 +3588,18 @@ static bool si_update_gs_ring_buffers(struct si_context *sctx)
 
 static void si_shader_lock(struct si_shader *shader)
 {
-	mtx_lock(&shader->selector->mutex);
+	simple_mtx_lock(&shader->selector->mutex);
 	if (shader->previous_stage_sel) {
 		assert(shader->previous_stage_sel != shader->selector);
-		mtx_lock(&shader->previous_stage_sel->mutex);
+		simple_mtx_lock(&shader->previous_stage_sel->mutex);
 	}
 }
 
 static void si_shader_unlock(struct si_shader *shader)
 {
 	if (shader->previous_stage_sel)
-		mtx_unlock(&shader->previous_stage_sel->mutex);
-	mtx_unlock(&shader->selector->mutex);
+		simple_mtx_unlock(&shader->previous_stage_sel->mutex);
+	simple_mtx_unlock(&shader->selector->mutex);
 }
 
 /**
@@ -3891,6 +3915,9 @@ bool si_update_shaders(struct si_context *sctx)
 	unsigned old_spi_shader_col_format =
 		old_ps ? old_ps->key.part.ps.epilog.spi_shader_col_format : 0;
 	int r;
+
+	if (!sctx->compiler.passes)
+		si_init_compiler(sctx->screen, &sctx->compiler);
 
 	compiler_state.compiler = &sctx->compiler;
 	compiler_state.debug = sctx->debug;

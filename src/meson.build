@@ -26,6 +26,7 @@ inc_src = include_directories('.')
 inc_gallium = include_directories('gallium/include')
 inc_gallium_aux = include_directories('gallium/auxiliary')
 inc_amd_common = include_directories('amd/common')
+inc_amd_common_llvm = include_directories('amd/llvm')
 
 libglsl_util = static_library(
   'glsl_util',
@@ -59,7 +60,9 @@ subdir('compiler')
 if with_tools.contains('drm-shim')
   subdir('drm-shim')
 endif
-subdir('imgui')
+if with_imgui
+  subdir('imgui')
+endif
 if with_platform_wayland
   subdir('egl/wayland/wayland-drm')
 endif

@@ -164,7 +164,7 @@ const char *
 brw_instruction_name(const struct gen_device_info *devinfo, enum opcode op)
 {
    switch (op) {
-   case BRW_OPCODE_ILLEGAL ... BRW_OPCODE_NOP:
+   case 0 ... NUM_BRW_OPCODES - 1:
       /* The DO instruction doesn't exist on Gen6+, but we use it to mark the
        * start of a loop in the IR.
        */
@@ -331,6 +331,10 @@ brw_instruction_name(const struct gen_device_info *devinfo, enum opcode op)
       return "byte_scattered_read_logical";
    case SHADER_OPCODE_BYTE_SCATTERED_WRITE_LOGICAL:
       return "byte_scattered_write_logical";
+   case SHADER_OPCODE_DWORD_SCATTERED_READ_LOGICAL:
+      return "dword_scattered_read_logical";
+   case SHADER_OPCODE_DWORD_SCATTERED_WRITE_LOGICAL:
+      return "dword_scattered_write_logical";
 
    case SHADER_OPCODE_LOAD_PAYLOAD:
       return "load_payload";
@@ -1042,6 +1046,7 @@ backend_instruction::has_side_effects() const
    case SHADER_OPCODE_SEND:
       return send_has_side_effects;
 
+   case BRW_OPCODE_SYNC:
    case VEC4_OPCODE_UNTYPED_ATOMIC:
    case SHADER_OPCODE_UNTYPED_ATOMIC_LOGICAL:
    case SHADER_OPCODE_UNTYPED_ATOMIC_FLOAT_LOGICAL:
@@ -1054,6 +1059,7 @@ backend_instruction::has_side_effects() const
    case SHADER_OPCODE_A64_UNTYPED_ATOMIC_INT64_LOGICAL:
    case SHADER_OPCODE_A64_UNTYPED_ATOMIC_FLOAT_LOGICAL:
    case SHADER_OPCODE_BYTE_SCATTERED_WRITE_LOGICAL:
+   case SHADER_OPCODE_DWORD_SCATTERED_WRITE_LOGICAL:
    case SHADER_OPCODE_TYPED_ATOMIC_LOGICAL:
    case SHADER_OPCODE_TYPED_SURFACE_WRITE_LOGICAL:
    case SHADER_OPCODE_MEMORY_FENCE:
@@ -1087,6 +1093,7 @@ backend_instruction::is_volatile() const
    case SHADER_OPCODE_UNTYPED_SURFACE_READ_LOGICAL:
    case SHADER_OPCODE_TYPED_SURFACE_READ_LOGICAL:
    case SHADER_OPCODE_BYTE_SCATTERED_READ_LOGICAL:
+   case SHADER_OPCODE_DWORD_SCATTERED_READ_LOGICAL:
    case SHADER_OPCODE_A64_UNTYPED_READ_LOGICAL:
    case SHADER_OPCODE_A64_BYTE_SCATTERED_READ_LOGICAL:
    case SHADER_OPCODE_URB_READ_SIMD8:

@@ -864,6 +864,12 @@
         <param name="id" type="GLuint"/>
         <param name="target" type="GLenum"/>
     </function>
+
+    <function name="GetInteger64vEXT" alias="GetInteger64v" es2="2.0">
+        <param name="pname" type="GLenum"/>
+        <param name="params" type="GLint64 *" output="true" variable_param="pname"/>
+    </function>
+
 </category>
 
 <!-- 151. GL_EXT_draw_buffers -->
@@ -1496,6 +1502,21 @@
         <param name="numlevels" type="GLuint"/>
         <param name="minlayer" type="GLuint"/>
         <param name="numlayers" type="GLuint"/>
+   </function>
+</category>
+
+<!-- 302. GL_MESA_framebuffer_flip_y -->
+<category name="GL_MESA_framebuffer_flip_y" number="302">
+   <enum name="GL_FRAMEBUFFER_FLIP_Y_MESA" value="0x8BBB"/>
+   <function name="FramebufferParameteriMESA" es2="3.0">
+       <param name="target" type="GLenum"/>
+       <param name="pname"  type="GLenum"/>
+       <param name="param"  type="GLint" />
+   </function>
+   <function name="GetFramebufferParameterivMESA" es2="3.0">
+       <param name="target" type="GLenum" />
+       <param name="pname"  type="GLenum" />
+       <param name="params" type="GLint *" output="true" />
    </function>
 </category>
 

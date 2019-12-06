@@ -38,7 +38,7 @@
 #include "util/u_inlines.h"
 #include "util/u_helpers.h"
 #include "util/u_prim.h"
-#include "util/u_format.h"
+#include "util/format/u_format.h"
 #include "draw_context.h"
 #include "draw_pipe.h"
 #include "draw_prim_assembler.h"
@@ -1153,6 +1153,15 @@ draw_collect_pipeline_statistics(struct draw_context *draw,
                                  boolean enable)
 {
    draw->collect_statistics = enable;
+}
+
+/**
+ * Enable/disable primitives generated gathering.
+ */
+void draw_collect_primitives_generated(struct draw_context *draw,
+                                       bool enable)
+{
+   draw->collect_primgen = enable;
 }
 
 /**

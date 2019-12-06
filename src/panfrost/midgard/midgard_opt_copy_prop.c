@@ -25,6 +25,50 @@
 #include "compiler.h"
 #include "midgard_ops.h"
 
+/* Special case for copypropagating the results of vectors */
+
+static bool
+midgard_opt_copy_prop_reg(compiler_context *ctx, midgard_block *block)
+{
+        bool progress = false;
+
+        mir_foreach_instr_in_block_safe(block, ins) {
+                if (ins->type != TAG_ALU_4) continue;
+                if (!OP_IS_MOVE(ins->alu.op)) continue;
+
+                unsigned from = ins->src[1];
+                unsigned to = ins->dest;
+
+                if (!(to & IS_REG))  continue;
+                if (from & IS_REG) continue;
+
+                if (ins->has_inline_constant) continue;
+                if (ins->has_constants) continue;
+                if (mir_nontrivial_source2_mod(ins)) continue;
+                if (mir_nontrivial_outmod(ins)) continue;
+                if (!mir_single_use(ctx, ins->src[1])) continue;
+
+                bool bad = false;
+
+                mir_foreach_instr_global(ctx, c) {
+                        if (mir_has_arg(c, ins->src[1])) {
+                                if (ins->mask != c->mask)
+                                        bad = true;
+                        }
+                }
+
+                if (bad)
+                        continue;
+
+
+                mir_rewrite_index_dst(ctx, ins->src[1], ins->dest);
+                mir_remove_instruction(ins);
+                progress |= true;
+        }
+
+        return progress;
+}
+
 bool
 midgard_opt_copy_prop(compiler_context *ctx, midgard_block *block)
 {
@@ -62,15 +106,16 @@ midgard_opt_copy_prop(compiler_context *ctx, midgard_block *block)
                 mir_foreach_instr_global(ctx, q) {
                         bool is_tex = q->type == TAG_TEXTURE_4;
                         bool is_ldst = q->type == TAG_LOAD_STORE_4;
-                        bool is_writeout = q->compact_branch && q->writeout;
+                        bool is_branch = q->compact_branch;
 
-                        if (!(is_tex || is_ldst || is_writeout)) continue;
+                        if (!(is_tex || is_ldst || is_branch)) continue;
 
-                        /* For textures, we get one real swizzle. For stores,
-                         * we also get one. For loads, we get none. */
+                        /* For textures, we get a real swizzle for the
+                         * coordinate and the content. For stores, we get one.
+                         * For loads, we get none. */
 
                         unsigned start =
-                                is_tex ? 1 :
+                                is_tex ? 2 :
                                 OP_IS_STORE(q->load_store.op) ? 1 : 0;
 
                         mir_foreach_src(q, s) {
@@ -85,13 +130,10 @@ midgard_opt_copy_prop(compiler_context *ctx, midgard_block *block)
                         continue;
 
                 /* We're clear -- rewrite, composing the swizzle */
-                midgard_vector_alu_src src2 =
-                        vector_alu_from_unsigned(ins->alu.src2);
-
-                mir_rewrite_index_src_swizzle(ctx, to, from, src2.swizzle);
+                mir_rewrite_index_src_swizzle(ctx, to, from, ins->swizzle[1]);
                 mir_remove_instruction(ins);
                 progress |= true;
         }
 
-        return progress;
+        return progress | midgard_opt_copy_prop_reg(ctx, block);
 }

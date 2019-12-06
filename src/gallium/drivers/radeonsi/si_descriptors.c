@@ -58,7 +58,7 @@
 
 #include "util/hash_table.h"
 #include "util/u_idalloc.h"
-#include "util/u_format.h"
+#include "util/format/u_format.h"
 #include "util/u_memory.h"
 #include "util/u_upload_mgr.h"
 
@@ -692,7 +692,7 @@ si_mark_image_range_valid(const struct pipe_image_view *view)
 	if (res->b.b.target != PIPE_BUFFER)
 		return;
 
-	util_range_add(&res->valid_buffer_range,
+	util_range_add(&res->b.b, &res->valid_buffer_range,
 		       view->u.buf.offset,
 		       view->u.buf.offset + view->u.buf.size);
 }
@@ -725,21 +725,11 @@ static void si_set_shader_image_desc(struct si_context *ctx,
 		bool uses_dcc = vi_dcc_enabled(tex, level);
 		unsigned access = view->access;
 
-		/* Clear the write flag when writes can't occur.
-		 * Note that DCC_DECOMPRESS for MSAA doesn't work in some cases,
-		 * so we don't wanna trigger it.
-		 */
-		if (tex->is_depth ||
-		    (!fmask_desc && tex->surface.fmask_size != 0)) {
-			assert(!"Z/S and MSAA image stores are not supported");
-			access &= ~PIPE_IMAGE_ACCESS_WRITE;
-		}
-
 		assert(!tex->is_depth);
-		assert(fmask_desc || tex->surface.fmask_size == 0);
+		assert(fmask_desc || tex->surface.fmask_offset == 0);
 
 		if (uses_dcc && !skip_decompress &&
-		    (view->access & PIPE_IMAGE_ACCESS_WRITE ||
+		    (access & PIPE_IMAGE_ACCESS_WRITE ||
 		     !vi_dcc_formats_compatible(screen, res->b.b.format, view->format))) {
 			/* If DCC can't be disabled, at least decompress it.
 			 * The decompression is relatively cheap if the surface
@@ -794,8 +784,6 @@ static void si_set_shader_image(struct si_context *ctx,
 	struct si_images *images = &ctx->images[shader];
 	struct si_descriptors *descs = si_sampler_and_image_descriptors(ctx, shader);
 	struct si_resource *res;
-	unsigned desc_slot = si_get_image_slot(slot);
-	uint32_t *desc = descs->list + desc_slot * 8;
 
 	if (!view || !view->resource) {
 		si_disable_shader_image(ctx, shader, slot);
@@ -807,7 +795,9 @@ static void si_set_shader_image(struct si_context *ctx,
 	if (&images->views[slot] != view)
 		util_copy_image_view(&images->views[slot], view);
 
-	si_set_shader_image_desc(ctx, view, skip_decompress, desc, NULL);
+	si_set_shader_image_desc(ctx, view, skip_decompress,
+				 descs->list + si_get_image_slot(slot) * 8,
+				 descs->list + si_get_image_slot(slot + SI_NUM_IMAGES) * 8);
 
 	if (res->b.b.target == PIPE_BUFFER ||
 	    view->shader_access & SI_IMAGE_ACCESS_AS_BUFFER) {
@@ -1395,7 +1385,7 @@ static void si_set_shader_buffer(struct si_context *sctx,
 	buffers->enabled_mask |= 1u << slot;
 	sctx->descriptors_dirty |= 1u << descriptors_idx;
 
-	util_range_add(&buf->valid_buffer_range, sbuffer->buffer_offset,
+	util_range_add(&buf->b.b, &buf->valid_buffer_range, sbuffer->buffer_offset,
 		       sbuffer->buffer_offset + sbuffer->buffer_size);
 }
 
@@ -1981,18 +1971,19 @@ static void si_update_bindless_image_descriptor(struct si_context *sctx,
 	struct si_descriptors *desc = &sctx->bindless_descriptors;
 	unsigned desc_slot_offset = img_handle->desc_slot * 16;
 	struct pipe_image_view *view = &img_handle->view;
-	uint32_t desc_list[8];
+	struct pipe_resource *res = view->resource;
+	uint32_t image_desc[16];
+	unsigned desc_size = (res->nr_samples >= 2 ? 16 : 8) * 4;
 
-	if (view->resource->target == PIPE_BUFFER)
+	if (res->target == PIPE_BUFFER)
 		return;
 
-	memcpy(desc_list, desc->list + desc_slot_offset,
-	       sizeof(desc_list));
+	memcpy(image_desc, desc->list + desc_slot_offset, desc_size);
 	si_set_shader_image_desc(sctx, view, true,
-				 desc->list + desc_slot_offset, NULL);
+				 desc->list + desc_slot_offset,
+				 desc->list + desc_slot_offset + 8);
 
-	if (memcmp(desc_list, desc->list + desc_slot_offset,
-		   sizeof(desc_list))) {
+	if (memcmp(image_desc, desc->list + desc_slot_offset, desc_size)) {
 		img_handle->desc_dirty = true;
 		sctx->bindless_descriptors_dirty = true;
 	}
@@ -2584,7 +2575,7 @@ static uint64_t si_create_image_handle(struct pipe_context *ctx,
 {
 	struct si_context *sctx = (struct si_context *)ctx;
 	struct si_image_handle *img_handle;
-	uint32_t desc_list[8];
+	uint32_t desc_list[16];
 	uint64_t handle;
 
 	if (!view || !view->resource)
@@ -2595,9 +2586,9 @@ static uint64_t si_create_image_handle(struct pipe_context *ctx,
 		return 0;
 
 	memset(desc_list, 0, sizeof(desc_list));
-	si_init_descriptor_list(&desc_list[0], 8, 1, null_image_descriptor);
+	si_init_descriptor_list(&desc_list[0], 8, 2, null_image_descriptor);
 
-	si_set_shader_image_desc(sctx, view, false, &desc_list[0], NULL);
+	si_set_shader_image_desc(sctx, view, false, &desc_list[0], &desc_list[8]);
 
 	img_handle->desc_slot = si_create_bindless_descriptor(sctx, desc_list,
 							      sizeof(desc_list));
@@ -2764,7 +2755,7 @@ void si_init_all_descriptors(struct si_context *sctx)
 		bool is_2nd = sctx->chip_class >= GFX9 &&
 				     (i == PIPE_SHADER_TESS_CTRL ||
 				      i == PIPE_SHADER_GEOMETRY);
-		unsigned num_sampler_slots = SI_NUM_IMAGES / 2 + SI_NUM_SAMPLERS;
+		unsigned num_sampler_slots = SI_NUM_IMAGE_SLOTS / 2 + SI_NUM_SAMPLERS;
 		unsigned num_buffer_slots = SI_NUM_SHADER_BUFFERS + SI_NUM_CONST_BUFFERS;
 		int rel_dw_offset;
 		struct si_descriptors *desc;
@@ -2809,9 +2800,9 @@ void si_init_all_descriptors(struct si_context *sctx)
 		si_init_descriptors(desc, rel_dw_offset, 16, num_sampler_slots);
 
 		int j;
-		for (j = 0; j < SI_NUM_IMAGES; j++)
+		for (j = 0; j < SI_NUM_IMAGE_SLOTS; j++)
 			memcpy(desc->list + j * 8, null_image_descriptor, 8 * 4);
-		for (; j < SI_NUM_IMAGES + SI_NUM_SAMPLERS * 2; j++)
+		for (; j < SI_NUM_IMAGE_SLOTS + SI_NUM_SAMPLERS * 2; j++)
 			memcpy(desc->list + j * 8, null_texture_descriptor, 8 * 4);
 	}
 

@@ -29,7 +29,7 @@
 #include "pipe/p_state.h"
 #include "pipe/p_defines.h"
 #include "os/os_thread.h"
-#include "util/u_format.h"
+#include "util/format/u_format.h"
 #include "util/u_inlines.h"
 #include "util/u_math.h"
 #include "util/u_memory.h"
@@ -758,7 +758,7 @@ svga_texture_transfer_unmap_dma(struct svga_context *svga,
 {
    struct svga_winsys_screen *sws = svga_screen(svga->pipe.screen)->sws;
 
-   if (st->hwbuf)
+   if (!st->swbuf)
       sws->buffer_unmap(sws, st->hwbuf);
 
    if (st->base.usage & PIPE_TRANSFER_WRITE) {

@@ -99,7 +99,7 @@ iris_upload_ubo_ssbo_surf_state(struct iris_context *ice,
                                         : ISL_FORMAT_R32G32B32A32_FLOAT,
                          .swizzle = ISL_SWIZZLE_IDENTITY,
                          .stride_B = 1,
-                         .mocs = ice->vtbl.mocs(res->bo));
+                         .mocs = ice->vtbl.mocs(res->bo, &screen->isl_dev));
 }
 
 static nir_ssa_def *
@@ -186,6 +186,45 @@ iris_lower_storage_image_derefs(nir_shader *nir)
 // XXX: need unify_interfaces() at link time...
 
 /**
+ * Undo nir_lower_passthrough_edgeflags but keep the inputs_read flag.
+ */
+static bool
+iris_fix_edge_flags(nir_shader *nir)
+{
+   if (nir->info.stage != MESA_SHADER_VERTEX)
+      return false;
+
+   nir_variable *var = NULL;
+   nir_foreach_variable(v, &nir->outputs) {
+      if (v->data.location == VARYING_SLOT_EDGE) {
+         var = v;
+         break;
+      }
+   }
+
+   if (!var)
+      return false;
+
+   exec_node_remove(&var->node);
+   var->data.mode = nir_var_shader_temp;
+   exec_list_push_tail(&nir->globals, &var->node);
+   nir->info.outputs_written &= ~VARYING_BIT_EDGE;
+   nir->info.inputs_read &= ~VERT_BIT_EDGEFLAG;
+   nir_fixup_deref_modes(nir);
+
+   nir_foreach_function(f, nir) {
+      if (f->impl) {
+         nir_metadata_preserve(f->impl, nir_metadata_block_index |
+                                        nir_metadata_dominance |
+                                        nir_metadata_live_ssa_defs |
+                                        nir_metadata_loop_analysis);
+      }
+   }
+
+   return true;
+}
+
+/**
  * Fix an uncompiled shader's stream output info.
  *
  * Core Gallium stores output->register_index as a "slot" number, where
@@ -268,13 +307,6 @@ iris_setup_uniforms(const struct brw_compiler *compiler,
                     unsigned *out_num_cbufs)
 {
    UNUSED const struct gen_device_info *devinfo = compiler->devinfo;
-
-   /* The intel compiler assumes that num_uniforms is in bytes. For
-    * scalar that means 4 bytes per uniform slot.
-    *
-    * Ref: brw_nir_lower_uniforms, type_size_scalar_bytes.
-    */
-   nir->num_uniforms *= 4;
 
    const unsigned IRIS_MAX_SYSTEM_VALUES =
       PIPE_MAX_SHADER_IMAGES * BRW_IMAGE_PARAM_SIZE;
@@ -474,12 +506,12 @@ iris_setup_uniforms(const struct brw_compiler *compiler,
    assert(num_cbufs < PIPE_MAX_CONSTANT_BUFFERS);
    nir_validate_shader(nir, "after remap");
 
-   /* We don't use params[], but fs_visitor::nir_setup_uniforms() asserts
-    * about it for compute shaders, so go ahead and make some fake ones
-    * which the backend will dead code eliminate.
+   /* We don't use params[] but gallium leaves num_uniforms set.  We use this
+    * to detect when cbuf0 exists but we don't need it anymore when we get
+    * here.  Instead, zero it out so that the back-end doesn't get confused
+    * when nr_params * 4 != num_uniforms != nr_params * 4.
     */
-   prog_data->nr_params = nir->num_uniforms / 4;
-   prog_data->param = rzalloc_array(mem_ctx, uint32_t, prog_data->nr_params);
+   nir->num_uniforms = 0;
 
    /* Constant loads (if any) need to go at the end of the constant buffers so
     * we need to know num_cbufs before we can lower to them.
@@ -938,7 +970,8 @@ iris_compile_vs(struct iris_context *ice,
 
    if (key->nr_userclip_plane_consts) {
       nir_function_impl *impl = nir_shader_get_entrypoint(nir);
-      nir_lower_clip_vs(nir, (1 << key->nr_userclip_plane_consts) - 1, true);
+      nir_lower_clip_vs(nir, (1 << key->nr_userclip_plane_consts) - 1, true,
+                        false, NULL);
       nir_lower_io_to_temporaries(nir, impl, true, false);
       nir_lower_global_vars_to_local(nir);
       nir_lower_vars_to_ssa(nir);
@@ -1041,22 +1074,17 @@ iris_update_compiled_vs(struct iris_context *ice)
       const bool needs_sgvs_element = uses_draw_params ||
                                       vs_prog_data->uses_instanceid ||
                                       vs_prog_data->uses_vertexid;
-      bool needs_edge_flag = false;
-      nir_foreach_variable(var, &ish->nir->inputs) {
-         if (var->data.location == VERT_ATTRIB_EDGEFLAG)
-            needs_edge_flag = true;
-      }
 
       if (ice->state.vs_uses_draw_params != uses_draw_params ||
           ice->state.vs_uses_derived_draw_params != uses_derived_draw_params ||
-          ice->state.vs_needs_edge_flag != needs_edge_flag) {
+          ice->state.vs_needs_edge_flag != ish->needs_edge_flag) {
          ice->state.dirty |= IRIS_DIRTY_VERTEX_BUFFERS |
                              IRIS_DIRTY_VERTEX_ELEMENTS;
       }
       ice->state.vs_uses_draw_params = uses_draw_params;
       ice->state.vs_uses_derived_draw_params = uses_derived_draw_params;
       ice->state.vs_needs_sgvs_element = needs_sgvs_element;
-      ice->state.vs_needs_edge_flag = needs_edge_flag;
+      ice->state.vs_needs_edge_flag = ish->needs_edge_flag;
    }
 }
 
@@ -1230,6 +1258,9 @@ iris_update_compiled_tcs(struct iris_context *ice)
       .tes_primitive_mode = tes_info->tess.primitive_mode,
       .input_vertices =
          !tcs || compiler->use_tcs_8_patch ? ice->state.vertices_per_patch : 0,
+      .quads_workaround = devinfo->gen < 9 &&
+                          tes_info->tess.primitive_mode == GL_QUADS &&
+                          tes_info->tess.spacing == TESS_SPACING_EQUAL,
    };
    get_unified_tess_slots(ice, &key.outputs_written,
                           &key.patch_outputs_written);
@@ -1278,7 +1309,8 @@ iris_compile_tes(struct iris_context *ice,
 
    if (key->nr_userclip_plane_consts) {
       nir_function_impl *impl = nir_shader_get_entrypoint(nir);
-      nir_lower_clip_vs(nir, (1 << key->nr_userclip_plane_consts) - 1, true);
+      nir_lower_clip_vs(nir, (1 << key->nr_userclip_plane_consts) - 1, true,
+                        false, NULL);
       nir_lower_io_to_temporaries(nir, impl, true, false);
       nir_lower_global_vars_to_local(nir);
       nir_lower_vars_to_ssa(nir);
@@ -1398,7 +1430,8 @@ iris_compile_gs(struct iris_context *ice,
 
    if (key->nr_userclip_plane_consts) {
       nir_function_impl *impl = nir_shader_get_entrypoint(nir);
-      nir_lower_clip_gs(nir, (1 << key->nr_userclip_plane_consts) - 1);
+      nir_lower_clip_gs(nir, (1 << key->nr_userclip_plane_consts) - 1, false,
+                        NULL);
       nir_lower_io_to_temporaries(nir, impl, true, false);
       nir_lower_global_vars_to_local(nir);
       nir_lower_vars_to_ssa(nir);
@@ -1986,6 +2019,8 @@ iris_create_uncompiled_shader(struct pipe_context *ctx,
    if (!ish)
       return NULL;
 
+   NIR_PASS(ish->needs_edge_flag, nir, iris_fix_edge_flags);
+
    brw_preprocess_nir(screen->compiler, nir, NULL);
 
    NIR_PASS_V(nir, brw_nir_lower_image_load_store, devinfo);
@@ -2019,22 +2054,15 @@ iris_create_uncompiled_shader(struct pipe_context *ctx,
 
    if (screen->disk_cache) {
       /* Serialize the NIR to a binary blob that we can hash for the disk
-       * cache.  First, drop unnecessary information (like variable names)
+       * cache.  Drop unnecessary information (like variable names)
        * so the serialized NIR is smaller, and also to let us detect more
-       * isomorphic shaders when hashing, increasing cache hits.  We clone
-       * the NIR before stripping away this info because it can be useful
-       * when inspecting and debugging shaders.
+       * isomorphic shaders when hashing, increasing cache hits.
        */
-      nir_shader *clone = nir_shader_clone(NULL, nir);
-      nir_strip(clone);
-
       struct blob blob;
       blob_init(&blob);
-      nir_serialize(&blob, clone);
+      nir_serialize(&blob, nir, true);
       _mesa_sha1_compute(blob.data, blob.size, ish->nir_sha1);
       blob_finish(&blob);
-
-      ralloc_free(clone);
    }
 
    return ish;
@@ -2387,6 +2415,8 @@ static void
 iris_bind_fs_state(struct pipe_context *ctx, void *state)
 {
    struct iris_context *ice = (struct iris_context *) ctx;
+   struct iris_screen *screen = (struct iris_screen *) ctx->screen;
+   const struct gen_device_info *devinfo = &screen->devinfo;
    struct iris_uncompiled_shader *old_ish =
       ice->shaders.uncompiled[MESA_SHADER_FRAGMENT];
    struct iris_uncompiled_shader *new_ish = state;
@@ -2400,6 +2430,9 @@ iris_bind_fs_state(struct pipe_context *ctx, void *state)
        (old_ish->nir->info.outputs_written & color_bits) !=
        (new_ish->nir->info.outputs_written & color_bits))
       ice->state.dirty |= IRIS_DIRTY_PS_BLEND;
+
+   if (devinfo->gen == 8)
+      ice->state.dirty |= IRIS_DIRTY_PMA_FIX;
 
    bind_shader_state((void *) ctx, state, MESA_SHADER_FRAGMENT);
 }

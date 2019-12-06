@@ -42,6 +42,7 @@ fs_visitor::emit_nir_code()
    nir_setup_outputs();
    nir_setup_uniforms();
    nir_emit_system_values();
+   last_scratch = ALIGN(nir->scratch_size, 4) * dispatch_width;
 
    nir_emit_impl(nir_shader_get_entrypoint((nir_shader *)nir));
 }
@@ -580,7 +581,24 @@ fs_visitor::optimize_frontfacing_ternary(nir_alu_instr *instr,
 
    fs_reg tmp = vgrf(glsl_type::int_type);
 
-   if (devinfo->gen >= 6) {
+   if (devinfo->gen >= 12) {
+      /* Bit 15 of g1.1 is 0 if the polygon is front facing. */
+      fs_reg g1 = fs_reg(retype(brw_vec1_grf(1, 1), BRW_REGISTER_TYPE_W));
+
+      /* For (gl_FrontFacing ? 1.0 : -1.0), emit:
+       *
+       *    or(8)  tmp.1<2>W  g0.0<0,1,0>W  0x00003f80W
+       *    and(8) dst<1>D    tmp<8,8,1>D   0xbf800000D
+       *
+       * and negate the result for (gl_FrontFacing ? -1.0 : 1.0).
+       */
+      bld.OR(subscript(tmp, BRW_REGISTER_TYPE_W, 1),
+             g1, brw_imm_uw(0x3f80));
+
+      if (value1 == -1.0f)
+         bld.MOV(tmp, negate(tmp));
+
+   } else if (devinfo->gen >= 6) {
       /* Bit 15 of g0.0 is 0 if the polygon is front facing. */
       fs_reg g0 = fs_reg(retype(brw_vec1_grf(0, 0), BRW_REGISTER_TYPE_W));
 
@@ -1258,6 +1276,10 @@ fs_visitor::nir_emit_alu(const fs_builder &bld, nir_alu_instr *instr,
          }
       }
 
+      /* We emit the rounding mode after the previous fsign optimization since
+       * it won't result in a MUL, but will try to negate the value by other
+       * means.
+       */
       if (nir_has_any_rounding_mode_enabled(execution_mode)) {
          brw_rnd_mode rnd =
             brw_rnd_mode_from_execution_mode(execution_mode);
@@ -1379,7 +1401,7 @@ fs_visitor::nir_emit_alu(const fs_builder &bld, nir_alu_instr *instr,
       temp_op[0] = bld.fix_byte_src(op[0]);
       temp_op[1] = bld.fix_byte_src(op[1]);
 
-      const uint32_t bit_size = nir_src_bit_size(instr->src[0].src);
+      const uint32_t bit_size = type_sz(temp_op[0].type) * 8;
       if (bit_size != 32)
          dest = bld.vgrf(temp_op[0].type, 1);
 
@@ -1813,6 +1835,13 @@ fs_visitor::nir_emit_alu(const fs_builder &bld, nir_alu_instr *instr,
       break;
 
    case nir_op_flrp:
+      if (nir_has_any_rounding_mode_enabled(execution_mode)) {
+         brw_rnd_mode rnd =
+            brw_rnd_mode_from_execution_mode(execution_mode);
+         bld.emit(SHADER_OPCODE_RND_MODE, bld.null_reg_ud(),
+                  brw_imm_d(rnd));
+      }
+
       inst = bld.LRP(result, op[0], op[1], op[2]);
       inst->saturate = instr->dest.saturate;
       break;
@@ -3432,7 +3461,14 @@ fs_visitor::nir_emit_fs_intrinsic(const fs_builder &bld,
 
          if (alu != NULL &&
              alu->op != nir_op_bcsel &&
-             alu->op != nir_op_inot) {
+             alu->op != nir_op_inot &&
+             (devinfo->gen > 5 ||
+              (alu->instr.pass_flags & BRW_NIR_BOOLEAN_MASK) != BRW_NIR_BOOLEAN_NEEDS_RESOLVE ||
+              alu->op == nir_op_fne32 || alu->op == nir_op_feq32 ||
+              alu->op == nir_op_flt32 || alu->op == nir_op_fge32 ||
+              alu->op == nir_op_ine32 || alu->op == nir_op_ieq32 ||
+              alu->op == nir_op_ilt32 || alu->op == nir_op_ige32 ||
+              alu->op == nir_op_ult32 || alu->op == nir_op_uge32)) {
             /* Re-emit the instruction that generated the Boolean value, but
              * do not store it.  Since this instruction will be conditional,
              * other instructions that want to use the real Boolean value may
@@ -3485,7 +3521,7 @@ fs_visitor::nir_emit_fs_intrinsic(const fs_builder &bld,
          emit_discard_jump();
       }
 
-      limit_dispatch_width(16, "Fragment discard/demote not implemented in SIMD32 mode.");
+      limit_dispatch_width(16, "Fragment discard/demote not implemented in SIMD32 mode.\n");
       break;
    }
 
@@ -3995,6 +4031,61 @@ image_intrinsic_coord_components(nir_intrinsic_instr *instr)
    }
 }
 
+/**
+ * The offsets we get from NIR act as if each SIMD channel has it's own blob
+ * of contiguous space.  However, if we actually place each SIMD channel in
+ * it's own space, we end up with terrible cache performance because each SIMD
+ * channel accesses a different cache line even when they're all accessing the
+ * same byte offset.  To deal with this problem, we swizzle the address using
+ * a simple algorithm which ensures that any time a SIMD message reads or
+ * writes the same address, it's all in the same cache line.  We have to keep
+ * the bottom two bits fixed so that we can read/write up to a dword at a time
+ * and the individual element is contiguous.  We do this by splitting the
+ * address as follows:
+ *
+ *    31                             4-6           2          0
+ *    +-------------------------------+------------+----------+
+ *    |        Hi address bits        | chan index | addr low |
+ *    +-------------------------------+------------+----------+
+ *
+ * In other words, the bottom two address bits stay, and the top 30 get
+ * shifted up so that we can stick the SIMD channel index in the middle.  This
+ * way, we can access 8, 16, or 32-bit elements and, when accessing a 32-bit
+ * at the same logical offset, the scratch read/write instruction acts on
+ * continuous elements and we get good cache locality.
+ */
+fs_reg
+fs_visitor::swizzle_nir_scratch_addr(const brw::fs_builder &bld,
+                                     const fs_reg &nir_addr,
+                                     bool in_dwords)
+{
+   const fs_reg &chan_index =
+      nir_system_values[SYSTEM_VALUE_SUBGROUP_INVOCATION];
+   const unsigned chan_index_bits = ffs(dispatch_width) - 1;
+
+   fs_reg addr = bld.vgrf(BRW_REGISTER_TYPE_UD);
+   if (in_dwords) {
+      /* In this case, we know the address is aligned to a DWORD and we want
+       * the final address in DWORDs.
+       */
+      bld.SHL(addr, nir_addr, brw_imm_ud(chan_index_bits - 2));
+      bld.OR(addr, addr, chan_index);
+   } else {
+      /* This case substantially more annoying because we have to pay
+       * attention to those pesky two bottom bits.
+       */
+      fs_reg addr_hi = bld.vgrf(BRW_REGISTER_TYPE_UD);
+      bld.AND(addr_hi, nir_addr, brw_imm_ud(~0x3u));
+      bld.SHL(addr_hi, addr_hi, brw_imm_ud(chan_index_bits));
+      fs_reg chan_addr = bld.vgrf(BRW_REGISTER_TYPE_UD);
+      bld.SHL(chan_addr, chan_index, brw_imm_ud(2));
+      bld.AND(addr, nir_addr, brw_imm_ud(0x3u));
+      bld.OR(addr, addr, addr_hi);
+      bld.OR(addr, addr, chan_addr);
+   }
+   return addr;
+}
+
 void
 fs_visitor::nir_emit_intrinsic(const fs_builder &bld, nir_intrinsic_instr *instr)
 {
@@ -4180,6 +4271,7 @@ fs_visitor::nir_emit_intrinsic(const fs_builder &bld, nir_intrinsic_instr *instr
       break;
    }
 
+   case nir_intrinsic_scoped_memory_barrier:
    case nir_intrinsic_group_memory_barrier:
    case nir_intrinsic_memory_barrier_shared:
    case nir_intrinsic_memory_barrier_atomic_counter:
@@ -4187,15 +4279,25 @@ fs_visitor::nir_emit_intrinsic(const fs_builder &bld, nir_intrinsic_instr *instr
    case nir_intrinsic_memory_barrier_image:
    case nir_intrinsic_memory_barrier: {
       bool l3_fence, slm_fence;
-      if (devinfo->gen >= 11) {
-         l3_fence = instr->intrinsic != nir_intrinsic_memory_barrier_shared;
-         slm_fence = instr->intrinsic == nir_intrinsic_group_memory_barrier ||
-                     instr->intrinsic == nir_intrinsic_memory_barrier ||
-                     instr->intrinsic == nir_intrinsic_memory_barrier_shared;
-      } else {
+      if (instr->intrinsic == nir_intrinsic_scoped_memory_barrier) {
+         nir_variable_mode modes = nir_intrinsic_memory_modes(instr);
+         l3_fence = modes & (nir_var_shader_out |
+                             nir_var_mem_ssbo |
+                             nir_var_mem_global);
          /* Prior to gen11, we only have one kind of fence. */
-         l3_fence = true;
-         slm_fence = false;
+         slm_fence = devinfo->gen >= 11 && (modes & nir_var_mem_shared);
+         l3_fence |= devinfo->gen < 11 && (modes & nir_var_mem_shared);
+      } else {
+         if (devinfo->gen >= 11) {
+            l3_fence = instr->intrinsic != nir_intrinsic_memory_barrier_shared;
+            slm_fence = instr->intrinsic == nir_intrinsic_group_memory_barrier ||
+                        instr->intrinsic == nir_intrinsic_memory_barrier ||
+                        instr->intrinsic == nir_intrinsic_memory_barrier_shared;
+         } else {
+            /* Prior to gen11, we only have one kind of fence. */
+            l3_fence = true;
+            slm_fence = false;
+         }
       }
 
       /* Be conservative in Gen11+ and always stall in a fence.  Since there
@@ -4640,6 +4742,99 @@ fs_visitor::nir_emit_intrinsic(const fs_builder &bld, nir_intrinsic_instr *instr
       ubld.ADD(buffer_size, size_aligned4, negate(size_padding));
 
       bld.MOV(retype(dest, ret_payload.type), component(buffer_size, 0));
+      break;
+   }
+
+   case nir_intrinsic_load_scratch: {
+      assert(devinfo->gen >= 7);
+
+      assert(nir_dest_num_components(instr->dest) == 1);
+      const unsigned bit_size = nir_dest_bit_size(instr->dest);
+      fs_reg srcs[SURFACE_LOGICAL_NUM_SRCS];
+
+      if (devinfo->gen >= 8) {
+         srcs[SURFACE_LOGICAL_SRC_SURFACE] =
+            brw_imm_ud(GEN8_BTI_STATELESS_NON_COHERENT);
+      } else {
+         srcs[SURFACE_LOGICAL_SRC_SURFACE] = brw_imm_ud(BRW_BTI_STATELESS);
+      }
+
+      srcs[SURFACE_LOGICAL_SRC_IMM_DIMS] = brw_imm_ud(1);
+      srcs[SURFACE_LOGICAL_SRC_IMM_ARG] = brw_imm_ud(bit_size);
+      const fs_reg nir_addr = get_nir_src(instr->src[0]);
+
+      /* Make dest unsigned because that's what the temporary will be */
+      dest.type = brw_reg_type_from_bit_size(bit_size, BRW_REGISTER_TYPE_UD);
+
+      /* Read the vector */
+      if (nir_intrinsic_align(instr) >= 4) {
+         assert(nir_dest_bit_size(instr->dest) == 32);
+
+         /* The offset for a DWORD scattered message is in dwords. */
+         srcs[SURFACE_LOGICAL_SRC_ADDRESS] =
+            swizzle_nir_scratch_addr(bld, nir_addr, true);
+
+         bld.emit(SHADER_OPCODE_DWORD_SCATTERED_READ_LOGICAL,
+                  dest, srcs, SURFACE_LOGICAL_NUM_SRCS);
+      } else {
+         assert(nir_dest_bit_size(instr->dest) <= 32);
+
+         srcs[SURFACE_LOGICAL_SRC_ADDRESS] =
+            swizzle_nir_scratch_addr(bld, nir_addr, false);
+
+         fs_reg read_result = bld.vgrf(BRW_REGISTER_TYPE_UD);
+         bld.emit(SHADER_OPCODE_BYTE_SCATTERED_READ_LOGICAL,
+                  read_result, srcs, SURFACE_LOGICAL_NUM_SRCS);
+         bld.MOV(dest, read_result);
+      }
+      break;
+   }
+
+   case nir_intrinsic_store_scratch: {
+      assert(devinfo->gen >= 7);
+
+      assert(nir_src_num_components(instr->src[0]) == 1);
+      const unsigned bit_size = nir_src_bit_size(instr->src[0]);
+      fs_reg srcs[SURFACE_LOGICAL_NUM_SRCS];
+
+      if (devinfo->gen >= 8) {
+         srcs[SURFACE_LOGICAL_SRC_SURFACE] =
+            brw_imm_ud(GEN8_BTI_STATELESS_NON_COHERENT);
+      } else {
+         srcs[SURFACE_LOGICAL_SRC_SURFACE] = brw_imm_ud(BRW_BTI_STATELESS);
+      }
+
+      srcs[SURFACE_LOGICAL_SRC_IMM_DIMS] = brw_imm_ud(1);
+      srcs[SURFACE_LOGICAL_SRC_IMM_ARG] = brw_imm_ud(bit_size);
+      const fs_reg nir_addr = get_nir_src(instr->src[1]);
+
+      fs_reg data = get_nir_src(instr->src[0]);
+      data.type = brw_reg_type_from_bit_size(bit_size, BRW_REGISTER_TYPE_UD);
+
+      assert(nir_intrinsic_write_mask(instr) ==
+             (1u << instr->num_components) - 1);
+      if (nir_intrinsic_align(instr) >= 4) {
+         assert(nir_src_bit_size(instr->src[0]) == 32);
+         srcs[SURFACE_LOGICAL_SRC_DATA] = data;
+
+         /* The offset for a DWORD scattered message is in dwords. */
+         srcs[SURFACE_LOGICAL_SRC_ADDRESS] =
+            swizzle_nir_scratch_addr(bld, nir_addr, true);
+
+         bld.emit(SHADER_OPCODE_DWORD_SCATTERED_WRITE_LOGICAL,
+                  fs_reg(), srcs, SURFACE_LOGICAL_NUM_SRCS);
+      } else {
+         assert(nir_src_bit_size(instr->src[0]) <= 32);
+
+         srcs[SURFACE_LOGICAL_SRC_DATA] = bld.vgrf(BRW_REGISTER_TYPE_UD);
+         bld.MOV(srcs[SURFACE_LOGICAL_SRC_DATA], data);
+
+         srcs[SURFACE_LOGICAL_SRC_ADDRESS] =
+            swizzle_nir_scratch_addr(bld, nir_addr, false);
+
+         bld.emit(SHADER_OPCODE_BYTE_SCATTERED_WRITE_LOGICAL,
+                  fs_reg(), srcs, SURFACE_LOGICAL_NUM_SRCS);
+      }
       break;
    }
 

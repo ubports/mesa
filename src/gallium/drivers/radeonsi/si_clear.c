@@ -25,7 +25,7 @@
 #include "si_pipe.h"
 #include "sid.h"
 
-#include "util/u_format.h"
+#include "util/format/u_format.h"
 #include "util/u_pack_color.h"
 #include "util/u_surface.h"
 
@@ -400,7 +400,7 @@ static void si_do_fast_color_clear(struct si_context *sctx,
 	int i;
 
 	/* This function is broken in BE, so just disable this path for now */
-#ifdef PIPE_ARCH_BIG_ENDIAN
+#if UTIL_ARCH_BIG_ENDIAN
 	return;
 #endif
 

@@ -332,7 +332,7 @@ etna_emit_state(struct etna_context *ctx)
                /*14680*/ EMIT_STATE(NFE_VERTEX_STREAMS_VERTEX_DIVISOR(x), ctx->vertex_buffer.cvb[x].FE_VERTEX_STREAM_UNK14680);
             }
          }
-      } else if(ctx->specs.stream_count >= 1) { /* hw w/ multiple vertex streams */
+      } else if(ctx->specs.stream_count > 1) { /* hw w/ multiple vertex streams */
          for (int x = 0; x < ctx->vertex_buffer.count; ++x) {
             /*00680*/ EMIT_STATE_RELOC(FE_VERTEX_STREAMS_BASE_ADDR(x), &ctx->vertex_buffer.cvb[x].FE_VERTEX_STREAM_BASE_ADDR);
          }
@@ -451,9 +451,10 @@ etna_emit_state(struct etna_context *ctx)
                               : ctx->shader_state.PS_TEMP_REGISTER_CONTROL);
       /*01010*/ EMIT_STATE(PS_CONTROL, ctx->shader_state.PS_CONTROL);
    }
-   if (unlikely(dirty & (ETNA_DIRTY_ZSA | ETNA_DIRTY_FRAMEBUFFER))) {
-      uint32_t val = etna_zsa_state(ctx->zsa)->PE_DEPTH_CONFIG;
-      /*01400*/ EMIT_STATE(PE_DEPTH_CONFIG, val | ctx->framebuffer.PE_DEPTH_CONFIG);
+   if (unlikely(dirty & (ETNA_DIRTY_ZSA | ETNA_DIRTY_FRAMEBUFFER | ETNA_DIRTY_SHADER))) {
+      /*01400*/ EMIT_STATE(PE_DEPTH_CONFIG, (etna_zsa_state(ctx->zsa)->PE_DEPTH_CONFIG |
+                                             ctx->framebuffer.PE_DEPTH_CONFIG) &
+                                            ctx->shader_state.PE_DEPTH_CONFIG);
    }
    if (unlikely(dirty & (ETNA_DIRTY_VIEWPORT))) {
       /*01404*/ EMIT_STATE(PE_DEPTH_NEAR, ctx->viewport.PE_DEPTH_NEAR);
@@ -544,6 +545,7 @@ etna_emit_state(struct etna_context *ctx)
       /*01664*/ EMIT_STATE_RELOC(TS_DEPTH_STATUS_BASE, &ctx->framebuffer.TS_DEPTH_STATUS_BASE);
       /*01668*/ EMIT_STATE_RELOC(TS_DEPTH_SURFACE_BASE, &ctx->framebuffer.TS_DEPTH_SURFACE_BASE);
       /*0166C*/ EMIT_STATE(TS_DEPTH_CLEAR_VALUE, ctx->framebuffer.TS_DEPTH_CLEAR_VALUE);
+      /*016BC*/ EMIT_STATE(TS_COLOR_CLEAR_VALUE_EXT, ctx->framebuffer.TS_COLOR_CLEAR_VALUE_EXT);
    }
    if (unlikely(dirty & (ETNA_DIRTY_SHADER))) {
       /*0381C*/ EMIT_STATE(GL_VARYING_TOTAL_COMPONENTS, ctx->shader_state.GL_VARYING_TOTAL_COMPONENTS);

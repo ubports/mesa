@@ -96,9 +96,12 @@ static bool ppir_lower_load(ppir_block *block, ppir_node *node)
       return true;
    }
 
-   assert(ppir_node_has_single_succ(node) || ppir_node_is_root(node));
-   ppir_node *succ = ppir_node_first_succ(node);
-   if (dest->type != ppir_target_register) {
+   /* load can have multiple successors in case if we duplicated load node
+    * that has load node in source
+    */
+   if ((ppir_node_has_single_src_succ(node) || ppir_node_is_root(node)) &&
+      dest->type != ppir_target_register) {
+      ppir_node *succ = ppir_node_first_succ(node);
       switch (succ->type) {
       case ppir_node_type_alu:
       case ppir_node_type_branch: {
@@ -155,18 +158,22 @@ static bool ppir_lower_texture(ppir_block *block, ppir_node *node)
 
    ppir_node *src_coords = ppir_node_get_src(node, 0)->node;
    ppir_load_node *load = NULL;
-   if (src_coords && ppir_node_has_single_succ(src_coords) &&
+   if (src_coords && ppir_node_has_single_src_succ(src_coords) &&
        (src_coords->op == ppir_op_load_coords))
       load = ppir_node_to_load(src_coords);
    else {
       /* Create load_coords node */
-      load = ppir_node_create(block, ppir_op_load_coords, -1, 0);
+      load = ppir_node_create(block, ppir_op_load_coords_reg, -1, 0);
       if (!load)
          return false;
       list_addtail(&load->node.list, &node->list);
 
       load->src = load_tex->src_coords;
       load->num_src = 1;
+      if (load_tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE)
+         load->num_components = 3;
+      else
+         load->num_components = 2;
 
       ppir_debug("%s create load_coords node %d for %d\n",
                  __FUNCTION__, load->node.index, node->index);
@@ -174,16 +181,16 @@ static bool ppir_lower_texture(ppir_block *block, ppir_node *node)
       ppir_node_foreach_pred_safe(node, dep) {
          ppir_node *pred = dep->pred;
          ppir_node_remove_dep(dep);
-         ppir_node_add_dep(&load->node, pred);
+         ppir_node_add_dep(&load->node, pred, ppir_dep_src);
       }
-      ppir_node_add_dep(node, &load->node);
+      ppir_node_add_dep(node, &load->node, ppir_dep_src);
    }
 
    assert(load);
    load_tex->src_coords.type = load->dest.type = ppir_target_pipeline;
    load_tex->src_coords.pipeline = load->dest.pipeline = ppir_pipeline_reg_discard;
 
-   if (ppir_node_has_single_succ(node)) {
+   if (ppir_node_has_single_src_succ(node)) {
       ppir_node *succ = ppir_node_first_succ(node);
       switch (succ->type) {
       case ppir_node_type_alu:
@@ -248,11 +255,11 @@ static bool ppir_lower_select(ppir_block *block, ppir_node *node)
    if (dep)
       ppir_node_replace_pred(dep, move);
    else
-      ppir_node_add_dep(node, move);
+      ppir_node_add_dep(node, move, ppir_dep_src);
 
    /* pred can be a register */
    if (pred)
-      ppir_node_add_dep(move, pred);
+      ppir_node_add_dep(move, pred, ppir_dep_src);
 
    src->swizzle[0] = 0;
    ppir_node_target_assign(alu->src, move);
@@ -350,7 +357,7 @@ static bool ppir_lower_branch(ppir_block *block, ppir_node *node)
 
    branch->num_src = 2;
 
-   ppir_node_add_dep(&branch->node, &zero->node);
+   ppir_node_add_dep(&branch->node, &zero->node, ppir_dep_src);
    list_addtail(&zero->node.list, &node->list);
 
    return true;

@@ -105,7 +105,7 @@ gfx10_format_table_h = custom_target(
   'gfx10_format_table.h',
   input : files(
     'gfx10_format_table.py',
-    '../../auxiliary/util/u_format.csv', '../../../amd/registers/gfx10-rsrc.json'
+    '../../../util/format/u_format.csv', '../../../amd/registers/gfx10-rsrc.json'
   ),
   output : 'gfx10_format_table.h',
   command : [prog_python, '@INPUT@'],
@@ -117,7 +117,7 @@ libradeonsi = static_library(
   'radeonsi',
   [files_libradeonsi, si_driinfo_h, sid_tables_h, gfx10_format_table_h],
   include_directories : [
-    inc_src, inc_include, inc_gallium, inc_gallium_aux, inc_amd_common,
+    inc_src, inc_include, inc_gallium, inc_gallium_aux, inc_amd_common, inc_amd_common_llvm,
     inc_gallium_drivers,
   ],
   c_args : ['-Wstrict-overflow=0', c_vis_args],
@@ -129,7 +129,7 @@ driver_radeonsi = declare_dependency(
   compile_args : '-DGALLIUM_RADEONSI',
   sources : si_driinfo_h,
   link_with : [
-    libradeonsi, libradeonwinsys, libamdgpuwinsys, libamd_common,
+    libradeonsi, libradeonwinsys, libamdgpuwinsys, libamd_common, libamd_common_llvm, libgalliumvl
   ],
   dependencies : idep_nir,
 )

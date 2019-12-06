@@ -37,7 +37,7 @@
 #include "util/set.h"
 #include "broadcom/clif/clif_dump.h"
 
-static void
+void
 v3d_job_free(struct v3d_context *v3d, struct v3d_job *job)
 {
         set_foreach(job->bos, entry) {
@@ -85,7 +85,7 @@ v3d_job_free(struct v3d_context *v3d, struct v3d_job *job)
         ralloc_free(job);
 }
 
-static struct v3d_job *
+struct v3d_job *
 v3d_job_create(struct v3d_context *v3d)
 {
         struct v3d_job *job = rzalloc(v3d, struct v3d_job);
@@ -457,7 +457,7 @@ v3d_read_and_accumulate_primitive_counters(struct v3d_context *v3d)
         perf_debug("stalling on TF counts readback\n");
         struct v3d_resource *rsc = v3d_resource(v3d->prim_counts);
         if (v3d_bo_wait(rsc->bo, PIPE_TIMEOUT_INFINITE, "prim-counts")) {
-                uint32_t *map = v3d_bo_map(rsc->bo);
+                uint32_t *map = v3d_bo_map(rsc->bo) + v3d->prim_counts_offset;
                 v3d->tf_prims_generated += map[V3D_PRIM_COUNTS_TF_WRITTEN];
         }
 }
@@ -496,6 +496,10 @@ v3d_job_submit(struct v3d_context *v3d, struct v3d_job *job)
 
         job->submit.bcl_end = job->bcl.bo->offset + cl_offset(&job->bcl);
         job->submit.rcl_end = job->rcl.bo->offset + cl_offset(&job->rcl);
+
+        job->submit.flags = 0;
+        if (job->tmu_dirty_rcl && screen->has_cache_flush)
+                job->submit.flags |= DRM_V3D_SUBMIT_CL_FLUSH_CACHE;
 
         /* On V3D 4.1, the tile alloc/state setup moved to register writes
          * instead of binner packets.

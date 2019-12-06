@@ -40,7 +40,7 @@
 #include "util/u_dump.h"
 #include "util/u_memory.h"
 #include "util/u_math.h"
-#include "util/u_format.h"
+#include "util/format/u_format.h"
 #include "util/u_cpu_detect.h"
 #include "util/format_rgb9e5.h"
 #include "lp_bld_debug.h"
@@ -1032,6 +1032,17 @@ lp_build_sample_image_linear(struct lp_build_sample_context *bld,
    int chan, texel_index;
    boolean seamless_cube_filter, accurate_cube_corners;
    unsigned chan_swiz = bld->static_texture_state->swizzle_r;
+
+   if (is_gather) {
+      switch (bld->gather_comp) {
+      case 0: chan_swiz = bld->static_texture_state->swizzle_r; break;
+      case 1: chan_swiz = bld->static_texture_state->swizzle_g; break;
+      case 2: chan_swiz = bld->static_texture_state->swizzle_b; break;
+      case 3: chan_swiz = bld->static_texture_state->swizzle_a; break;
+      default:
+	 break;
+      }
+   }
 
    seamless_cube_filter = (bld->static_texture_state->target == PIPE_TEXTURE_CUBE ||
                            bld->static_texture_state->target == PIPE_TEXTURE_CUBE_ARRAY) &&
@@ -2978,7 +2989,8 @@ lp_build_sample_soa_code(struct gallivm_state *gallivm,
       bld.num_lods = num_quads;
    }
 
-
+   if (op_is_gather)
+      bld.gather_comp = (sample_key & LP_SAMPLER_GATHER_COMP_MASK) >> LP_SAMPLER_GATHER_COMP_SHIFT;
    bld.lodf_type = type;
    /* we want native vector size to be able to use our intrinsics */
    if (bld.num_lods != type.length) {
@@ -3970,8 +3982,10 @@ lp_build_do_atomic_soa(struct gallivm_state *gallivm,
 {
    enum pipe_format format = format_desc->format;
 
-   if (format != PIPE_FORMAT_R32_UINT && format != PIPE_FORMAT_R32_SINT && format != PIPE_FORMAT_R32_FLOAT)
+   if (format != PIPE_FORMAT_R32_UINT && format != PIPE_FORMAT_R32_SINT && format != PIPE_FORMAT_R32_FLOAT) {
+      atomic_result[0] = lp_build_zero(gallivm, type);
       return;
+   }
 
    LLVMValueRef atom_res = lp_build_alloca(gallivm,
                                            LLVMVectorType(LLVMInt32TypeInContext(gallivm->context), type.length), "");
@@ -4129,8 +4143,14 @@ lp_build_img_op_soa(const struct lp_static_texture_state *static_texture_state,
       lp_build_store_rgba_soa(gallivm, format_desc, params->type, params->exec_mask, base_ptr, offset, out_of_bounds,
                               params->indata);
    } else {
-      if (static_texture_state->format == PIPE_FORMAT_NONE)
+      if (static_texture_state->format == PIPE_FORMAT_NONE) {
+         /*
+	  * For atomic operation just return 0 in the unbound case to avoid a crash.
+          */
+         LLVMValueRef zero = lp_build_zero(gallivm, params->type);
+         params->outdata[0] = zero;
          return;
+      }
       lp_build_do_atomic_soa(gallivm, format_desc, params->type, params->exec_mask, base_ptr, offset, out_of_bounds,
                              params->img_op, params->op, params->indata, params->indata2, params->outdata);
    }

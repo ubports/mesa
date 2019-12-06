@@ -21,8 +21,8 @@
  * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
  * USE OR OTHER DEALINGS IN THE SOFTWARE. */
 
-#include "util/u_format.h"
-#include "util/u_format_s3tc.h"
+#include "util/format/u_format.h"
+#include "util/format/u_format_s3tc.h"
 #include "util/u_screen.h"
 #include "util/u_memory.h"
 #include "util/os_time.h"
@@ -434,8 +434,6 @@ static int r300_get_shader_param(struct pipe_screen *pscreen,
             return PIPE_SHADER_IR_TGSI;
         case PIPE_SHADER_CAP_SUPPORTED_IRS:
             return 0;
-        case PIPE_SHADER_CAP_SCALAR_ISA:
-            return 0;
         }
         break;
     case PIPE_SHADER_VERTEX:
@@ -501,8 +499,6 @@ static int r300_get_shader_param(struct pipe_screen *pscreen,
         case PIPE_SHADER_CAP_PREFERRED_IR:
             return PIPE_SHADER_IR_TGSI;
         case PIPE_SHADER_CAP_SUPPORTED_IRS:
-            return 0;
-        case PIPE_SHADER_CAP_SCALAR_ISA:
             return 0;
         }
         break;

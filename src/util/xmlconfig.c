@@ -43,6 +43,7 @@
 #include <dirent.h>
 #include <fnmatch.h>
 #include <regex.h>
+#include "strndup.h"
 #include "xmlconfig.h"
 #include "u_process.h"
 
@@ -50,6 +51,16 @@
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
+
+static bool
+be_verbose(void)
+{
+   const char *s = getenv("MESA_DEBUG");
+   if (!s)
+      return true;
+
+   return strstr(s, "silent") == NULL;
+}
 
 /** \brief Find an option in an option cache with the name as key */
 static uint32_t
@@ -547,9 +558,11 @@ parseOptInfoAttr(struct OptInfoData *data, const XML_Char **attr)
     defaultVal = getenv (cache->info[opt].name);
     if (defaultVal != NULL) {
       /* don't use XML_WARNING, we want the user to see this! */
-        fprintf (stderr,
-                 "ATTENTION: default value of option %s overridden by environment.\n",
-                 cache->info[opt].name);
+        if (be_verbose()) {
+            fprintf(stderr,
+                    "ATTENTION: default value of option %s overridden by environment.\n",
+                    cache->info[opt].name);
+        }
     } else
         defaultVal = attrVal[OA_DEFAULT];
     if (!parseValue (&cache->values[opt], cache->info[opt].type, defaultVal))
@@ -830,11 +843,14 @@ parseOptConfAttr(struct OptConfData *data, const XML_Char **attr)
             /* don't use XML_WARNING, drirc defines options for all drivers,
              * but not all drivers support them */
             return;
-        else if (getenv (cache->info[opt].name))
+        else if (getenv (cache->info[opt].name)) {
           /* don't use XML_WARNING, we want the user to see this! */
-            fprintf (stderr, "ATTENTION: option value of option %s ignored.\n",
-                     cache->info[opt].name);
-        else if (!parseValue (&cache->values[opt], cache->info[opt].type, value))
+            if (be_verbose()) {
+                fprintf(stderr,
+                        "ATTENTION: option value of option %s ignored.\n",
+                        cache->info[opt].name);
+            }
+        } else if (!parseValue (&cache->values[opt], cache->info[opt].type, value))
             XML_WARNING ("illegal option value: %s.", value);
     }
 }

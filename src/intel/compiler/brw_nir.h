@@ -102,6 +102,7 @@ brw_nir_link_shaders(const struct brw_compiler *compiler,
 
 bool brw_nir_lower_cs_intrinsics(nir_shader *nir,
                                  unsigned dispatch_width);
+void brw_nir_lower_alpha_to_coverage(nir_shader *shader);
 void brw_nir_lower_legacy_clipping(nir_shader *nir,
                                    int nr_userclip_plane_consts,
                                    struct brw_stage_prog_data *prog_data);
@@ -127,7 +128,8 @@ void brw_nir_rewrite_image_intrinsic(nir_intrinsic_instr *intrin,
 void brw_nir_rewrite_bindless_image_intrinsic(nir_intrinsic_instr *intrin,
                                               nir_ssa_def *handle);
 
-bool brw_nir_lower_mem_access_bit_sizes(nir_shader *shader);
+bool brw_nir_lower_mem_access_bit_sizes(nir_shader *shader,
+                                        const struct gen_device_info *devinfo);
 
 void brw_postprocess_nir(nir_shader *nir,
                          const struct brw_compiler *compiler,

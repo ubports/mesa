@@ -131,6 +131,7 @@ panfrost_compile_blend_shader(
         struct pipe_blend_state *cso,
         enum pipe_format format)
 {
+        struct panfrost_screen *screen = pan_screen(ctx->base.screen);
         struct panfrost_blend_shader res;
 
         res.ctx = ctx;
@@ -167,15 +168,12 @@ panfrost_compile_blend_shader(
                 nir_make_options(cso, 1);
         NIR_PASS_V(shader, nir_lower_blend, options);
 
-        NIR_PASS_V(shader, nir_lower_framebuffer, format);
+        NIR_PASS_V(shader, nir_lower_framebuffer, format, screen->gpu_id);
 
         /* Compile the built shader */
 
         midgard_program program;
-        midgard_compile_shader_nir(&ctx->compiler, shader, &program, true);
-
-        /* At least two work registers are needed due to an encoding quirk */
-        res.work_count = MAX2(program.work_register_count, 2);
+        midgard_compile_shader_nir(shader, &program, true, screen->gpu_id);
 
         /* Allow us to patch later */
         res.patch_index = program.blend_patch_offset;

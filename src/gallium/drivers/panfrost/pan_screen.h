@@ -35,6 +35,7 @@
 #include "renderonly/renderonly.h"
 #include "util/u_dynarray.h"
 #include "util/bitset.h"
+#include "util/set.h"
 
 #include <panfrost-misc.h>
 #include "pan_allocate.h"
@@ -79,19 +80,31 @@ struct panfrost_screen {
 
         /* Properties of the GPU in use */
         unsigned gpu_id;
-        bool require_sfbd;
+        unsigned quirks;
 
         drmVersionPtr kernel_version;
 
         struct renderonly *ro;
 
-        pthread_mutex_t bo_cache_lock;
+        pthread_mutex_t active_bos_lock;
+        struct set *active_bos;
 
-        /* The BO cache is a set of buckets with power-of-two sizes ranging
-         * from 2^12 (4096, the page size) to 2^(12 + MAX_BO_CACHE_BUCKETS).
-         * Each bucket is a linked list of free panfrost_bo objects. */
+        struct {
+                pthread_mutex_t lock;
 
-        struct list_head bo_cache[NR_BO_CACHE_BUCKETS];
+                /* List containing all cached BOs sorted in LRU (Least
+                 * Recently Used) order. This allows us to quickly evict BOs
+                 * that are more than 1 second old.
+                 */
+                struct list_head lru;
+
+                /* The BO cache is a set of buckets with power-of-two sizes
+                 * ranging from 2^12 (4096, the page size) to
+                 * 2^(12 + MAX_BO_CACHE_BUCKETS).
+                 * Each bucket is a linked list of free panfrost_bo objects. */
+
+                struct list_head buckets[NR_BO_CACHE_BUCKETS];
+        } bo_cache;
 };
 
 static inline struct panfrost_screen *
@@ -101,6 +114,7 @@ pan_screen(struct pipe_screen *p)
 }
 
 struct panfrost_fence *
-panfrost_fence_create(struct panfrost_context *ctx);
+panfrost_fence_create(struct panfrost_context *ctx,
+                      struct util_dynarray *fences);
 
 #endif /* PAN_SCREEN_H */

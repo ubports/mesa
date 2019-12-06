@@ -34,6 +34,7 @@
 #include "program.h"
 #include "compiler/nir/nir_control_flow.h"
 #include "compiler/nir/nir_builder.h"
+#include "compiler/nir/nir_builtin_builder.h"
 #include "compiler/nir/nir_deref.h"
 #include "main/errors.h"
 #include "main/imports.h"
@@ -63,6 +64,7 @@ public:
    virtual void visit(ir_loop *);
    virtual void visit(ir_if *);
    virtual void visit(ir_discard *);
+   virtual void visit(ir_demote *);
    virtual void visit(ir_loop_jump *);
    virtual void visit(ir_return *);
    virtual void visit(ir_call *);
@@ -443,6 +445,8 @@ nir_visitor::visit(ir_variable *ir)
    var->data.invariant = ir->data.invariant;
    var->data.location = ir->data.location;
    var->data.stream = ir->data.stream;
+   if (ir->data.stream & (1u << 31))
+      var->data.stream |= NIR_STREAM_PACKED;
    var->data.compact = false;
 
    switch(ir->data.mode) {
@@ -516,17 +520,17 @@ nir_visitor::visit(ir_variable *ir)
       unreachable("not reached");
    }
 
-   unsigned image_access = 0;
+   unsigned mem_access = 0;
    if (ir->data.memory_read_only)
-      image_access |= ACCESS_NON_WRITEABLE;
+      mem_access |= ACCESS_NON_WRITEABLE;
    if (ir->data.memory_write_only)
-      image_access |= ACCESS_NON_READABLE;
+      mem_access |= ACCESS_NON_READABLE;
    if (ir->data.memory_coherent)
-      image_access |= ACCESS_COHERENT;
+      mem_access |= ACCESS_COHERENT;
    if (ir->data.memory_volatile)
-      image_access |= ACCESS_VOLATILE;
+      mem_access |= ACCESS_VOLATILE;
    if (ir->data.memory_restrict)
-      image_access |= ACCESS_RESTRICT;
+      mem_access |= ACCESS_RESTRICT;
 
    /* For UBO and SSBO variables, we need explicit types */
    if (var->data.mode & (nir_var_mem_ubo | nir_var_mem_ssbo)) {
@@ -549,15 +553,15 @@ nir_visitor::visit(ir_variable *ir)
 
             var->type = field->type;
             if (field->memory_read_only)
-               image_access |= ACCESS_NON_WRITEABLE;
+               mem_access |= ACCESS_NON_WRITEABLE;
             if (field->memory_write_only)
-               image_access |= ACCESS_NON_READABLE;
+               mem_access |= ACCESS_NON_READABLE;
             if (field->memory_coherent)
-               image_access |= ACCESS_COHERENT;
+               mem_access |= ACCESS_COHERENT;
             if (field->memory_volatile)
-               image_access |= ACCESS_VOLATILE;
+               mem_access |= ACCESS_VOLATILE;
             if (field->memory_restrict)
-               image_access |= ACCESS_RESTRICT;
+               mem_access |= ACCESS_RESTRICT;
 
             found = true;
             break;
@@ -595,15 +599,18 @@ nir_visitor::visit(ir_variable *ir)
    var->data.explicit_binding = ir->data.explicit_binding;
    var->data.bindless = ir->data.bindless;
    var->data.offset = ir->data.offset;
+   var->data.access = (gl_access_qualifier)mem_access;
 
-   var->data.image.access = (gl_access_qualifier)image_access;
-   var->data.image.format = ir->data.image_format;
+   if (var->type->without_array()->is_image()) {
+      var->data.image.format = ir->data.image_format;
+   } else if (var->data.mode == nir_var_shader_out) {
+      var->data.xfb.buffer = ir->data.xfb_buffer;
+      var->data.xfb.stride = ir->data.xfb_stride;
+   }
 
    var->data.fb_fetch_output = ir->data.fb_fetch_output;
    var->data.explicit_xfb_buffer = ir->data.explicit_xfb_buffer;
    var->data.explicit_xfb_stride = ir->data.explicit_xfb_stride;
-   var->data.xfb_buffer = ir->data.xfb_buffer;
-   var->data.xfb_stride = ir->data.xfb_stride;
 
    var->num_state_slots = ir->get_num_state_slots();
    if (var->num_state_slots > 0) {
@@ -776,6 +783,15 @@ nir_visitor::visit(ir_discard *ir)
 }
 
 void
+nir_visitor::visit(ir_demote *ir)
+{
+   nir_intrinsic_instr *demote =
+      nir_intrinsic_instr_create(this->shader, nir_intrinsic_demote);
+
+   nir_builder_instr_insert(&b, &demote->instr);
+}
+
+void
 nir_visitor::visit(ir_emit_vertex *ir)
 {
    nir_intrinsic_instr *instr =
@@ -846,7 +862,7 @@ deref_get_qualifier(nir_deref_instr *deref)
    nir_deref_path path;
    nir_deref_path_init(&path, deref, NULL);
 
-   unsigned qualifiers = path.path[0]->var->data.image.access;
+   unsigned qualifiers = path.path[0]->var->data.access;
 
    const glsl_type *parent_type = path.path[0]->type;
    for (nir_deref_instr **cur_ptr = &path.path[1]; *cur_ptr; cur_ptr++) {
@@ -1155,6 +1171,9 @@ nir_visitor::visit(ir_call *ir)
          break;
       case ir_intrinsic_read_first_invocation:
          op = nir_intrinsic_read_first_invocation;
+         break;
+      case ir_intrinsic_helper_invocation:
+         op = nir_intrinsic_is_helper_invocation;
          break;
       default:
          unreachable("not reached");
@@ -1628,6 +1647,12 @@ nir_visitor::visit(ir_call *ir)
          ir_rvalue *value = (ir_rvalue *) ir->actual_parameters.get_head();
          instr->src[0] = nir_src_for_ssa(evaluate_rvalue(value));
 
+         nir_builder_instr_insert(&b, &instr->instr);
+         break;
+      }
+      case nir_intrinsic_is_helper_invocation: {
+         nir_ssa_dest_init(&instr->instr, &instr->dest, 1, 1, NULL);
+         instr->num_components = 1;
          nir_builder_instr_insert(&b, &instr->instr);
          break;
       }
@@ -2168,6 +2193,10 @@ nir_visitor::visit(ir_expression *ir)
       return;
    }
 
+   case ir_unop_atan:
+      result = nir_atan(&b, srcs[0]);
+      break;
+
    case ir_binop_add:
       result = type_is_float(out_type) ? nir_fadd(&b, srcs[0], srcs[1])
                                        : nir_iadd(&b, srcs[0], srcs[1]);
@@ -2330,6 +2359,10 @@ nir_visitor::visit(ir_expression *ir)
       }
       break;
    }
+
+   case ir_binop_atan2:
+      result = nir_atan2(&b, srcs[0], srcs[1]);
+      break;
 
    case ir_binop_ldexp: result = nir_ldexp(&b, srcs[0], srcs[1]); break;
    case ir_triop_fma:

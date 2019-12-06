@@ -2988,17 +2988,18 @@ teximage(struct gl_context *ctx, GLboolean compressed, GLuint dims,
 
    internalFormat = override_internal_format(internalFormat, width, height);
 
+   if (!no_error &&
+       /* target error checking */
+       !legal_teximage_target(ctx, dims, target)) {
+      _mesa_error(ctx, GL_INVALID_ENUM, "%s%uD(target=%s)",
+                  func, dims, _mesa_enum_to_string(target));
+      return;
+   }
+
    if (!texObj)
       texObj = _mesa_get_current_tex_object(ctx, target);
 
    if (!no_error) {
-      /* target error checking */
-      if (!legal_teximage_target(ctx, dims, target)) {
-         _mesa_error(ctx, GL_INVALID_ENUM, "%s%uD(target=%s)",
-                     func, dims, _mesa_enum_to_string(target));
-         return;
-      }
-
       /* general error checking */
       if (compressed) {
          if (compressed_texture_error_check(ctx, dims, target, texObj,
@@ -6005,9 +6006,9 @@ _mesa_get_texbuffer_format(const struct gl_context *ctx, GLenum internalFormat)
       case GL_LUMINANCE32UI_EXT:
          return MESA_FORMAT_L_UINT32;
       case GL_LUMINANCE8_ALPHA8:
-         return MESA_FORMAT_L8A8_UNORM;
+         return MESA_FORMAT_LA_UNORM8;
       case GL_LUMINANCE16_ALPHA16:
-         return MESA_FORMAT_L16A16_UNORM;
+         return MESA_FORMAT_LA_UNORM16;
       case GL_LUMINANCE_ALPHA16F_ARB:
          return MESA_FORMAT_LA_FLOAT16;
       case GL_LUMINANCE_ALPHA32F_ARB:
@@ -6088,11 +6089,11 @@ _mesa_get_texbuffer_format(const struct gl_context *ctx, GLenum internalFormat)
       return MESA_FORMAT_RGBA_UINT32;
 
    case GL_RG8:
-      return MESA_FORMAT_R8G8_UNORM;
+      return MESA_FORMAT_RG_UNORM8;
    case GL_RG16:
       if (_mesa_is_gles(ctx) && !_mesa_has_EXT_texture_norm16(ctx))
          return MESA_FORMAT_NONE;
-      return MESA_FORMAT_R16G16_UNORM;
+      return MESA_FORMAT_RG_UNORM16;
    case GL_RG16F:
       return MESA_FORMAT_RG_FLOAT16;
    case GL_RG32F:
@@ -6400,6 +6401,52 @@ _mesa_TexBufferRange(GLenum target, GLenum internalFormat, GLuint buffer,
                         offset, size, "glTexBufferRange");
 }
 
+
+/** GL_ARB_texture_buffer_range + GL_EXT_direct_state_access */
+void GLAPIENTRY
+_mesa_TextureBufferRangeEXT(GLuint texture, GLenum target, GLenum internalFormat,
+                            GLuint buffer, GLintptr offset, GLsizeiptr size)
+{
+   struct gl_texture_object *texObj;
+   struct gl_buffer_object *bufObj;
+
+   GET_CURRENT_CONTEXT(ctx);
+
+   texObj = _mesa_lookup_or_create_texture(ctx, target, texture, false, true,
+                                           "glTextureBufferRangeEXT");
+   if (!texObj)
+      return;
+
+   if (!check_texture_buffer_target(ctx, target, "glTextureBufferRangeEXT"))
+      return;
+
+   if (buffer) {
+      bufObj = _mesa_lookup_bufferobj_err(ctx, buffer, "glTextureBufferRangeEXT");
+      if (!bufObj)
+         return;
+
+      if (!check_texture_buffer_range(ctx, bufObj, offset, size,
+          "glTextureBufferRangeEXT"))
+         return;
+
+   } else {
+      /* OpenGL 4.5 core spec (02.02.2015) says in Section 8.9 Buffer
+       * Textures (PDF page 254):
+       *    "If buffer is zero, then any buffer object attached to the buffer
+       *    texture is detached, the values offset and size are ignored and
+       *    the state for offset and size for the buffer texture are reset to
+       *    zero."
+       */
+      offset = 0;
+      size = 0;
+      bufObj = NULL;
+   }
+
+   texture_buffer_range(ctx, texObj, internalFormat, bufObj,
+                        offset, size, "glTextureBufferRangeEXT");
+}
+
+
 void GLAPIENTRY
 _mesa_TextureBuffer(GLuint texture, GLenum internalFormat, GLuint buffer)
 {
@@ -6425,6 +6472,65 @@ _mesa_TextureBuffer(GLuint texture, GLenum internalFormat, GLuint buffer)
 
    texture_buffer_range(ctx, texObj, internalFormat,
                         bufObj, 0, buffer ? -1 : 0, "glTextureBuffer");
+}
+
+void GLAPIENTRY
+_mesa_TextureBufferEXT(GLuint texture, GLenum target,
+                       GLenum internalFormat, GLuint buffer)
+{
+   struct gl_texture_object *texObj;
+   struct gl_buffer_object *bufObj;
+
+   GET_CURRENT_CONTEXT(ctx);
+
+   if (buffer) {
+      bufObj = _mesa_lookup_bufferobj_err(ctx, buffer, "glTextureBuffer");
+      if (!bufObj)
+         return;
+   } else
+      bufObj = NULL;
+
+   /* Get the texture object by Name. */
+   texObj = _mesa_lookup_or_create_texture(ctx, target, texture,
+                                           false, true,
+                                           "glTextureBufferEXT");
+
+   if (!texObj ||
+       !check_texture_buffer_target(ctx, texObj->Target, "glTextureBufferEXT"))
+      return;
+
+   texture_buffer_range(ctx, texObj, internalFormat,
+                        bufObj, 0, buffer ? -1 : 0, "glTextureBufferEXT");
+}
+
+void GLAPIENTRY
+_mesa_MultiTexBufferEXT(GLenum texunit, GLenum target,
+                        GLenum internalFormat, GLuint buffer)
+{
+   struct gl_texture_object *texObj;
+   struct gl_buffer_object *bufObj;
+
+   GET_CURRENT_CONTEXT(ctx);
+
+   if (buffer) {
+      bufObj = _mesa_lookup_bufferobj_err(ctx, buffer, "glMultiTexBufferEXT");
+      if (!bufObj)
+         return;
+   } else
+      bufObj = NULL;
+
+   /* Get the texture object */
+   texObj = _mesa_get_texobj_by_target_and_texunit(ctx, target,
+                                                   texunit - GL_TEXTURE0,
+                                                   true,
+                                                   "glMultiTexBufferEXT");
+
+   if (!texObj ||
+       !check_texture_buffer_target(ctx, texObj->Target, "glMultiTexBufferEXT"))
+      return;
+
+   texture_buffer_range(ctx, texObj, internalFormat,
+                        bufObj, 0, buffer ? -1 : 0, "glMultiTexBufferEXT");
 }
 
 void GLAPIENTRY
@@ -6822,6 +6928,52 @@ _mesa_TextureStorage3DMultisample(GLuint texture, GLsizei samples,
                              internalformat, width, height, depth,
                              fixedsamplelocations, GL_TRUE, 0,
                              "glTextureStorage3DMultisample");
+}
+
+void GLAPIENTRY
+_mesa_TextureStorage2DMultisampleEXT(GLuint texture, GLenum target, GLsizei samples,
+                                     GLenum internalformat, GLsizei width,
+                                     GLsizei height,
+                                     GLboolean fixedsamplelocations)
+{
+   struct gl_texture_object *texObj;
+   GET_CURRENT_CONTEXT(ctx);
+
+   texObj = lookup_texture_ext_dsa(ctx, target, texture,
+                                   "glTextureStorage2DMultisampleEXT");
+   if (!texObj)
+      return;
+
+   if (!valid_texstorage_ms_parameters(width, height, 1, 2))
+      return;
+
+   texture_image_multisample(ctx, 2, texObj, NULL, texObj->Target,
+                             samples, internalformat, width, height, 1,
+                             fixedsamplelocations, GL_TRUE, 0,
+                             "glTextureStorage2DMultisampleEXT");
+}
+
+void GLAPIENTRY
+_mesa_TextureStorage3DMultisampleEXT(GLuint texture, GLenum target, GLsizei samples,
+                                     GLenum internalformat, GLsizei width,
+                                     GLsizei height, GLsizei depth,
+                                     GLboolean fixedsamplelocations)
+{
+   struct gl_texture_object *texObj;
+   GET_CURRENT_CONTEXT(ctx);
+
+   texObj = lookup_texture_ext_dsa(ctx, target, texture,
+                                   "glTextureStorage3DMultisampleEXT");
+   if (!texObj)
+      return;
+
+   if (!valid_texstorage_ms_parameters(width, height, depth, 3))
+      return;
+
+   texture_image_multisample(ctx, 3, texObj, NULL, texObj->Target, samples,
+                             internalformat, width, height, depth,
+                             fixedsamplelocations, GL_TRUE, 0,
+                             "glTextureStorage3DMultisampleEXT");
 }
 
 void

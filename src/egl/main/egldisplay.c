@@ -197,15 +197,6 @@ _eglNativePlatformDetectNativeDisplay(void *nativeDisplay)
       if (first_pointer == gbm_create_device)
          return _EGL_PLATFORM_DRM;
 #endif
-
-#ifdef HAVE_X11_PLATFORM
-      /* If not matched to any other platform, fallback to x11. */
-      return _EGL_PLATFORM_X11;
-#endif
-
-#ifdef HAVE_HAIKU_PLATFORM
-      return _EGL_PLATFORM_HAIKU;
-#endif
    }
 
    return _EGL_INVALID_PLATFORM;
@@ -217,33 +208,23 @@ _eglNativePlatformDetectNativeDisplay(void *nativeDisplay)
 _EGLPlatformType
 _eglGetNativePlatform(void *nativeDisplay)
 {
-   _EGLPlatformType native_platform = _EGL_INVALID_PLATFORM;
-   _EGLPlatformType detected_platform = native_platform;
+   _EGLPlatformType detected_platform = _eglGetNativePlatformFromEnv();
+   const char *detection_method = "environment";
 
    if (detected_platform == _EGL_INVALID_PLATFORM) {
-      const char *detection_method;
-
-      detected_platform = _eglGetNativePlatformFromEnv();
-      detection_method = "environment overwrite";
-
-      if (detected_platform == _EGL_INVALID_PLATFORM) {
-         detected_platform = _eglNativePlatformDetectNativeDisplay(nativeDisplay);
-         detection_method = "autodetected";
-      }
-
-      if (detected_platform == _EGL_INVALID_PLATFORM) {
-         detected_platform = _EGL_NATIVE_PLATFORM;
-         detection_method = "build-time configuration";
-      }
-
-      _eglLog(_EGL_DEBUG, "Native platform type: %s (%s)",
-              egl_platforms[detected_platform].name, detection_method);
-
-      p_atomic_cmpxchg(&native_platform, _EGL_INVALID_PLATFORM,
-                       detected_platform);
+      detected_platform = _eglNativePlatformDetectNativeDisplay(nativeDisplay);
+      detection_method = "autodetected";
    }
 
-   return native_platform;
+   if (detected_platform == _EGL_INVALID_PLATFORM) {
+      detected_platform = _EGL_NATIVE_PLATFORM;
+      detection_method = "build-time configuration";
+   }
+
+   _eglLog(_EGL_DEBUG, "Native platform type: %s (%s)",
+           egl_platforms[detected_platform].name, detection_method);
+
+   return detected_platform;
 }
 
 

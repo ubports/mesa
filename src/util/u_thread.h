@@ -69,7 +69,7 @@ static inline thrd_t u_thread_create(int (*routine)(void *), void *param)
 static inline void u_thread_setname( const char *name )
 {
 #if defined(HAVE_PTHREAD)
-#if DETECT_OS_LINUX || DETECT_OS_CYGWIN
+#if DETECT_OS_LINUX || DETECT_OS_CYGWIN || DETECT_OS_SOLARIS
    pthread_setname_np(pthread_self(), name);
 #elif DETECT_OS_FREEBSD || DETECT_OS_OPENBSD
    pthread_set_name_np(pthread_self(), name);
@@ -149,7 +149,7 @@ util_get_L3_for_pinned_thread(thrd_t thread, unsigned cores_per_L3)
 static inline int64_t
 u_thread_get_time_nano(thrd_t thread)
 {
-#if defined(__linux__) && defined(HAVE_PTHREAD)
+#if defined(HAVE_PTHREAD)
    struct timespec ts;
    clockid_t cid;
 

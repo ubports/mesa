@@ -132,7 +132,7 @@ def check_cc(env, cc, expr, cpp_opt = '-E'):
     sys.stdout.write('Checking for %s ... ' % cc)
 
     source = tempfile.NamedTemporaryFile(suffix='.c', delete=False)
-    source.write('#if !(%s)\n#error\n#endif\n' % expr)
+    source.write(('#if !(%s)\n#error\n#endif\n' % expr).encode())
     source.close()
 
     # sys.stderr.write('%r %s %s\n' % (env['CC'], cpp_opt, source.name));
@@ -237,6 +237,9 @@ def generate(env):
     hosthost_platform = host_platform.system().lower()
     if hosthost_platform.startswith('cygwin'):
         hosthost_platform = 'cygwin'
+    # Avoid spurious crosscompilation in MSYS2 environment.
+    if hosthost_platform.startswith('mingw'):
+        hosthost_platform = 'windows'
     host_machine = os.environ.get('PROCESSOR_ARCHITEW6432', os.environ.get('PROCESSOR_ARCHITECTURE', host_platform.machine()))
     host_machine = {
         'x86': 'x86',
@@ -378,6 +381,9 @@ def generate(env):
         if check_header(env, 'sys/shm.h'):
             cppdefines += ['HAVE_SYS_SHM_H']
 
+        if check_functions(env, ['strtok_r']):
+            cppdefines += ['HAVE_STRTOK_R']
+
         #FIXME: we should really be checking for the major()/minor()
         # functions/macros in these headers, but check_functions()'s
         # SConf.CheckFunc() doesn't seem to support macros.
@@ -485,8 +491,11 @@ def generate(env):
             '-Werror=missing-prototypes',
             '-Werror=return-type',
             '-Werror=incompatible-pointer-types',
-            '-std=gnu99',
         ]
+        if platform == 'darwin' and host_platform.mac_ver()[0] >= '10.15':
+            cflags += ['-std=gnu11']
+        else:
+            cflags += ['-std=gnu99']
     if icc:
         cflags += [
             '-std=gnu99',

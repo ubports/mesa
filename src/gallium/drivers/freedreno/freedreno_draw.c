@@ -29,7 +29,7 @@
 #include "util/u_string.h"
 #include "util/u_memory.h"
 #include "util/u_prim.h"
-#include "util/u_format.h"
+#include "util/format/u_format.h"
 #include "util/u_helpers.h"
 
 #include "freedreno_blitter.h"
@@ -256,7 +256,14 @@ fd_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info)
 
 	batch->num_draws++;
 
-	prims = u_reduced_prims_for_vertices(info->mode, info->count);
+	/* Counting prims in sw doesn't work for GS and tesselation. For older
+	 * gens we don't have those stages and don't have the hw counters enabled,
+	 * so keep the count accurate for non-patch geometry.
+	 */
+	if (info->mode != PIPE_PRIM_PATCHES)
+		prims = u_reduced_prims_for_vertices(info->mode, info->count);
+	else
+		prims = 0;
 
 	ctx->stats.draw_calls++;
 

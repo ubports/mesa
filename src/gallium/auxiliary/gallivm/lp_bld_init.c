@@ -46,6 +46,9 @@
 #endif
 #include <llvm-c/BitWriter.h>
 #if GALLIVM_HAVE_CORO
+#if LLVM_VERSION_MAJOR <= 8 && defined(PIPE_ARCH_AARCH64)
+#include <llvm-c/Transforms/IPO.h>
+#endif
 #include <llvm-c/Transforms/Coroutines.h>
 #endif
 
@@ -134,6 +137,9 @@ create_pass_manager(struct gallivm_state *gallivm)
    }
 
 #if GALLIVM_HAVE_CORO
+#if LLVM_VERSION_MAJOR <= 8 && defined(PIPE_ARCH_AARCH64)
+   LLVMAddFunctionAttrsPass(gallivm->cgpassmgr);
+#endif
    LLVMAddCoroEarlyPass(gallivm->cgpassmgr);
    LLVMAddCoroSplitPass(gallivm->cgpassmgr);
    LLVMAddCoroElidePass(gallivm->cgpassmgr);
@@ -363,7 +369,7 @@ init_gallivm_state(struct gallivm_state *gallivm, const char *name,
       const unsigned pointer_size = 8 * sizeof(void *);
       char layout[512];
       snprintf(layout, sizeof layout, "%c-p:%u:%u:%u-i64:64:64-a0:0:%u-s0:%u:%u",
-#ifdef PIPE_ARCH_LITTLE_ENDIAN
+#if UTIL_ARCH_LITTLE_ENDIAN
                     'e', // little endian
 #else
                     'E', // big endian

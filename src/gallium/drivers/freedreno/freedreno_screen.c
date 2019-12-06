@@ -31,8 +31,8 @@
 
 #include "util/u_memory.h"
 #include "util/u_inlines.h"
-#include "util/u_format.h"
-#include "util/u_format_s3tc.h"
+#include "util/format/u_format.h"
+#include "util/format/u_format_s3tc.h"
 #include "util/u_screen.h"
 #include "util/u_string.h"
 #include "util/u_debug.h"
@@ -74,6 +74,7 @@ static const struct debug_named_value debug_options[] = {
 		{"nobypass",  FD_DBG_NOBYPASS, "Disable GMEM bypass"},
 		{"fraghalf",  FD_DBG_FRAGHALF, "Use half-precision in fragment shader"},
 		{"nobin",     FD_DBG_NOBIN,  "Disable hw binning"},
+		{"nogmem",    FD_DBG_NOGMEM,  "Disable GMEM rendering (bypass only)"},
 		{"glsl120",   FD_DBG_GLSL120,"Temporary flag to force GLSL 1.20 (rather than 1.30) on a3xx+"},
 		{"shaderdb",  FD_DBG_SHADERDB, "Enable shaderdb output"},
 		{"flush",     FD_DBG_FLUSH,  "Force flush after every draw"},
@@ -345,6 +346,13 @@ fd_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 	case PIPE_CAP_MAX_VARYINGS:
 		return 16;
 
+	case PIPE_CAP_MAX_SHADER_PATCH_VARYINGS:
+		/* We don't really have a limit on this, it all goes into the main
+		 * memory buffer. Needs to be at least 120 / 4 (minimum requirement
+		 * for GL_MAX_TESS_PATCH_COMPONENTS).
+		 */
+		return 128;
+
 	case PIPE_CAP_SHAREABLE_SHADERS:
 	case PIPE_CAP_GLSL_OPTIMIZE_CONSERVATIVELY:
 	/* manage the variants for these ourself, to avoid breaking precompile: */
@@ -353,6 +361,14 @@ fd_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 		if (is_ir3(screen))
 			return 1;
 		return 0;
+
+	/* Geometry shaders.. */
+	case PIPE_CAP_MAX_GEOMETRY_OUTPUT_VERTICES:
+		return 512;
+	case PIPE_CAP_MAX_GEOMETRY_TOTAL_OUTPUT_COMPONENTS:
+		return 2048;
+	case PIPE_CAP_MAX_GS_INVOCATIONS:
+		return 32;
 
 	/* Stream output. */
 	case PIPE_CAP_MAX_STREAM_OUTPUT_BUFFERS:
@@ -367,6 +383,8 @@ fd_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 		return 0;
 	case PIPE_CAP_TGSI_FS_FACE_IS_INTEGER_SYSVAL:
 		return 1;
+	case PIPE_CAP_TGSI_FS_POINT_IS_SYSVAL:
+		return is_a2xx(screen);
 	case PIPE_CAP_MAX_STREAM_OUTPUT_SEPARATE_COMPONENTS:
 	case PIPE_CAP_MAX_STREAM_OUTPUT_INTERLEAVED_COMPONENTS:
 		if (is_ir3(screen))
@@ -460,12 +478,15 @@ fd_screen_get_shader_param(struct pipe_screen *pscreen,
 	case PIPE_SHADER_FRAGMENT:
 	case PIPE_SHADER_VERTEX:
 		break;
+	case PIPE_SHADER_TESS_CTRL:
+	case PIPE_SHADER_TESS_EVAL:
+	case PIPE_SHADER_GEOMETRY:
+		if (is_a6xx(screen))
+			break;
+		return 0;
 	case PIPE_SHADER_COMPUTE:
 		if (has_compute(screen))
 			break;
-		return 0;
-	case PIPE_SHADER_GEOMETRY:
-		/* maye we could emulate.. */
 		return 0;
 	default:
 		DBG("unknown shader type %d", shader);
@@ -502,8 +523,11 @@ fd_screen_get_shader_param(struct pipe_screen *pscreen,
 		 * everything is just normal registers.  This is just temporary
 		 * hack until load_input/store_output handle arrays in a similar
 		 * way as load_var/store_var..
+		 *
+		 * For tessellation stages, inputs are loaded using ldlw or ldg, both
+		 * of which support indirection.
 		 */
-		return 0;
+		return shader == PIPE_SHADER_TESS_CTRL || shader == PIPE_SHADER_TESS_EVAL;
 	case PIPE_SHADER_CAP_INDIRECT_TEMP_ADDR:
 	case PIPE_SHADER_CAP_INDIRECT_CONST_ADDR:
 		/* a2xx compiler doesn't handle indirect: */
@@ -538,8 +562,6 @@ fd_screen_get_shader_param(struct pipe_screen *pscreen,
 		return (1 << PIPE_SHADER_IR_NIR) | (1 << PIPE_SHADER_IR_TGSI);
 	case PIPE_SHADER_CAP_MAX_UNROLL_ITERATIONS_HINT:
 		return 32;
-	case PIPE_SHADER_CAP_SCALAR_ISA:
-		return is_ir3(screen) ? 1 : 0;
 	case PIPE_SHADER_CAP_MAX_SHADER_BUFFERS:
 	case PIPE_SHADER_CAP_MAX_SHADER_IMAGES:
 		if (is_a5xx(screen) || is_a6xx(screen)) {
@@ -890,11 +912,14 @@ fd_screen_create(struct fd_device *dev, struct renderonly *ro)
 	case 430:
 		fd4_screen_init(pscreen);
 		break;
+	case 510:
 	case 530:
 	case 540:
 		fd5_screen_init(pscreen);
 		break;
+	case 618:
 	case 630:
+	case 640:
 		fd6_screen_init(pscreen);
 		break;
 	default:
@@ -914,6 +939,11 @@ fd_screen_create(struct fd_device *dev, struct renderonly *ro)
 		screen->gmem_alignw = 32;
 		screen->gmem_alignh = 32;
 		screen->num_vsc_pipes = 8;
+	}
+
+	if (fd_mesa_debug & FD_DBG_PERFC) {
+		screen->perfcntr_groups = fd_perfcntrs(screen->gpu_id,
+				&screen->num_perfcntr_groups);
 	}
 
 	/* NOTE: don't enable if we have too old of a kernel to support

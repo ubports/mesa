@@ -59,21 +59,13 @@ panfrost_shader_compile(
 
         s->info.stage = stage;
 
-        if (stage == MESA_SHADER_FRAGMENT) {
-                /* Inject the alpha test now if we need to */
-
-                if (state->alpha_state.enabled) {
-                        NIR_PASS_V(s, nir_lower_alpha_test, state->alpha_state.func, false);
-                }
-        }
-
         /* Call out to Midgard compiler given the above NIR */
 
         midgard_program program = {
                 .alpha_ref = state->alpha_state.ref_value
         };
 
-        midgard_compile_shader_nir(&ctx->compiler, s, &program, false);
+        midgard_compile_shader_nir(s, &program, false, screen->gpu_id);
 
         /* Prepare the compiled binary for upload */
         int size = program.compiled.size;

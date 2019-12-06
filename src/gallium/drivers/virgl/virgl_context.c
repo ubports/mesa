@@ -30,7 +30,7 @@
 #include "pipe/p_state.h"
 #include "util/u_inlines.h"
 #include "util/u_memory.h"
-#include "util/u_format.h"
+#include "util/format/u_format.h"
 #include "util/u_prim.h"
 #include "util/u_transfer.h"
 #include "util/u_helpers.h"
@@ -1116,7 +1116,7 @@ static void virgl_resource_copy_region(struct pipe_context *ctx,
    struct virgl_resource *sres = virgl_resource(src);
 
    if (dres->u.b.target == PIPE_BUFFER)
-      util_range_add(&dres->valid_buffer_range, dstx, dstx + src_box->width);
+      util_range_add(&dres->u.b, &dres->valid_buffer_range, dstx, dstx + src_box->width);
    virgl_resource_dirty(dres, dst_level);
 
    virgl_encode_resource_copy_region(vctx, dres,

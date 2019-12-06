@@ -212,7 +212,7 @@ setup_render_state(struct gl_context *ctx,
    cso_set_rasterizer(cso, &st->bitmap.rasterizer);
 
    /* fragment shader state: TEX lookup program */
-   cso_set_fragment_shader_handle(cso, fpv->driver_shader);
+   cso_set_fragment_shader_handle(cso, fpv->base.driver_shader);
 
    /* vertex shader state: position + texcoord pass-through */
    cso_set_vertex_shader_handle(cso, st->passthrough_vs);
@@ -564,20 +564,15 @@ init_bitmap_state(struct st_context *st)
    st->bitmap.rasterizer.depth_clip_far = 1;
 
    /* find a usable texture format */
-   if (screen->is_format_supported(screen, PIPE_FORMAT_I8_UNORM,
+   if (screen->is_format_supported(screen, PIPE_FORMAT_R8_UNORM,
                                    st->internal_target, 0, 0,
                                    PIPE_BIND_SAMPLER_VIEW)) {
-      st->bitmap.tex_format = PIPE_FORMAT_I8_UNORM;
+      st->bitmap.tex_format = PIPE_FORMAT_R8_UNORM;
    }
    else if (screen->is_format_supported(screen, PIPE_FORMAT_A8_UNORM,
                                         st->internal_target, 0, 0,
                                         PIPE_BIND_SAMPLER_VIEW)) {
       st->bitmap.tex_format = PIPE_FORMAT_A8_UNORM;
-   }
-   else if (screen->is_format_supported(screen, PIPE_FORMAT_L8_UNORM,
-                                        st->internal_target, 0, 0,
-                                        PIPE_BIND_SAMPLER_VIEW)) {
-      st->bitmap.tex_format = PIPE_FORMAT_L8_UNORM;
    }
    else {
       /* XXX support more formats */

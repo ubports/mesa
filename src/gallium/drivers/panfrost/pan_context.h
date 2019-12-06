@@ -80,21 +80,19 @@ struct panfrost_query {
         unsigned type;
         unsigned index;
 
-        union {
-                /* For computed queries. 64-bit to prevent overflow */
-                struct {
-                        uint64_t start;
-                        uint64_t end;
-                };
-
-                /* Memory for the GPU to writeback the value of the query */
-                struct panfrost_transfer transfer;
+        /* For computed queries. 64-bit to prevent overflow */
+        struct {
+                uint64_t start;
+                uint64_t end;
         };
+
+        /* Memory for the GPU to writeback the value of the query */
+        struct panfrost_bo *bo;
 };
 
 struct panfrost_fence {
         struct pipe_reference reference;
-        int fd;
+        struct util_dynarray syncfds;
 };
 
 struct panfrost_streamout {
@@ -107,12 +105,12 @@ struct panfrost_context {
         /* Gallium context */
         struct pipe_context base;
 
-        /* Compiler context */
-        struct midgard_screen compiler;
-
         /* Bound job batch and map of panfrost_batch_key to job batches */
         struct panfrost_batch *batch;
         struct hash_table *batches;
+
+        /* panfrost_bo -> panfrost_bo_access */
+        struct hash_table *accessed_bos;
 
         /* Within a launch_grid call.. */
         const struct pipe_grid_info *compute_grid;
@@ -187,11 +185,6 @@ struct panfrost_context {
         struct pipe_blend_color blend_color;
         struct pipe_depth_stencil_alpha_state *depth_stencil;
         struct pipe_stencil_ref stencil_ref;
-
-        /* True for t6XX, false for t8xx. */
-        bool is_t6xx;
-
-        uint32_t out_sync;
 };
 
 /* Corresponds to the CSO */

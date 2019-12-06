@@ -409,16 +409,26 @@ typedef enum {
 
         /* val in r27.y, address embedded, outputs result to argument. Invert val for sub. Let val = +-1 for inc/dec. */
         midgard_op_atomic_add = 0x40,
+        midgard_op_atomic_add64 = 0x41,
+
         midgard_op_atomic_and = 0x44,
+        midgard_op_atomic_and64 = 0x45,
         midgard_op_atomic_or = 0x48,
+        midgard_op_atomic_or64 = 0x49,
         midgard_op_atomic_xor = 0x4C,
+        midgard_op_atomic_xor64 = 0x4D,
 
         midgard_op_atomic_imin = 0x50,
+        midgard_op_atomic_imin64 = 0x51,
         midgard_op_atomic_umin = 0x54,
+        midgard_op_atomic_umin64 = 0x55,
         midgard_op_atomic_imax = 0x58,
+        midgard_op_atomic_imax64 = 0x59,
         midgard_op_atomic_umax = 0x5C,
+        midgard_op_atomic_umax64 = 0x5D,
 
         midgard_op_atomic_xchg = 0x60,
+        midgard_op_atomic_xchg64 = 0x61,
 
         /* Used for compute shader's __global arguments, __local variables (or
          * for register spilling) */
@@ -438,7 +448,9 @@ typedef enum {
         midgard_op_ld_vary_16 = 0x99,
         midgard_op_ld_vary_32u = 0x9A,
         midgard_op_ld_vary_32i = 0x9B,
-        midgard_op_ld_color_buffer_16 = 0x9D,
+
+        /* Old version of midgard_op_ld_color_buffer_u8_as_fp16, for T720 */
+        midgard_op_ld_color_buffer_u8_as_fp16_old = 0x9D,
 
         /* The distinction between these ops is the alignment requirement /
          * accompanying shift. Thus, the offset to ld_ubo_int4 is in 16-byte
@@ -454,6 +466,8 @@ typedef enum {
         midgard_op_ld_ubo_short4 = 0xAC,
         midgard_op_ld_ubo_int4   = 0xB0,
 
+        /* New-style blending ops. Works on T760/T860 */
+        midgard_op_ld_color_buffer_u8_as_fp16 = 0xB9,
         midgard_op_ld_color_buffer_8 = 0xBA,
 
         midgard_op_st_char = 0xC0,

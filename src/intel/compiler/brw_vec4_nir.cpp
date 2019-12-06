@@ -627,6 +627,8 @@ vec4_visitor::nir_emit_intrinsic(nir_intrinsic_instr *instr)
    case nir_intrinsic_load_ubo: {
       src_reg surf_index;
 
+      prog_data->base.has_ubo_pull = true;
+
       dest = get_nir_dest(instr->dest);
 
       if (nir_src_is_const(instr->src[0])) {
@@ -1951,7 +1953,7 @@ vec4_visitor::nir_emit_alu(nir_alu_instr *instr)
       break;
 
    case nir_op_fdph_replicated:
-      try_immediate_source(instr, op, true, devinfo);
+      try_immediate_source(instr, op, false, devinfo);
       inst = emit(BRW_OPCODE_DPH, dst, op[0], op[1]);
       inst->saturate = instr->dest.saturate;
       break;

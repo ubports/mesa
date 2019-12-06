@@ -33,12 +33,14 @@
 
 #include "common/gen_gem.h"
 #include "gen_perf.h"
+#include "gen_perf_regs.h"
 #include "perf/gen_perf_mdapi.h"
 #include "perf/gen_perf_metrics.h"
 
 #include "dev/gen_debug.h"
 #include "dev/gen_device_info.h"
 #include "util/bitscan.h"
+#include "util/mesa-sha1.h"
 #include "util/u_math.h"
 
 #define FILE_DEBUG_FLAG DEBUG_PERFMON
@@ -68,6 +70,8 @@
 
 #define MAP_READ  (1 << 0)
 #define MAP_WRITE (1 << 1)
+
+#define OA_REPORT_INVALID_CTX_ID (0xffffffff)
 
 /**
  * Periodic OA samples are read() into these buffer structures via the
@@ -386,6 +390,11 @@ gen_perf_active_queries(struct gen_perf_context *perf_ctx,
    }
 }
 
+static inline uint64_t to_user_pointer(void *ptr)
+{
+   return (uintptr_t) ptr;
+}
+
 static bool
 get_sysfs_dev_dir(struct gen_perf_config *perf, int fd)
 {
@@ -553,15 +562,7 @@ enumerate_sysfs_metrics(struct gen_perf_config *perf)
                                       metric_entry->d_name);
       if (entry) {
          uint64_t id;
-
-         len = snprintf(buf, sizeof(buf), "%s/metrics/%s/id",
-                        perf->sysfs_dev_dir, metric_entry->d_name);
-         if (len < 0 || len >= sizeof(buf)) {
-            DBG("Failed to concatenate path to sysfs metric id file\n");
-            continue;
-         }
-
-         if (!read_file_uint64(buf, &id)) {
+         if (!gen_perf_load_metric_id(perf, metric_entry->d_name, &id)) {
             DBG("Failed to read metric set id from %s: %m", buf);
             continue;
          }
@@ -583,17 +584,90 @@ kernel_has_dynamic_config_support(struct gen_perf_config *perf, int fd)
                     &invalid_config_id) < 0 && errno == ENOENT;
 }
 
+static int
+i915_query_items(struct gen_perf_config *perf, int fd,
+                 struct drm_i915_query_item *items, uint32_t n_items)
+{
+   struct drm_i915_query q = {
+      .num_items = n_items,
+      .items_ptr = to_user_pointer(items),
+   };
+   return gen_ioctl(fd, DRM_IOCTL_I915_QUERY, &q);
+}
+
 static bool
-load_metric_id(struct gen_perf_config *perf, const char *guid,
-               uint64_t *metric_id)
+i915_query_perf_config_supported(struct gen_perf_config *perf, int fd)
+{
+   struct drm_i915_query_item item = {
+      .query_id = DRM_I915_QUERY_PERF_CONFIG,
+      .flags = DRM_I915_QUERY_PERF_CONFIG_LIST,
+   };
+
+   return i915_query_items(perf, fd, &item, 1) == 0 && item.length > 0;
+}
+
+static bool
+i915_query_perf_config_data(struct gen_perf_config *perf,
+                            int fd, const char *guid,
+                            struct drm_i915_perf_oa_config *config)
+{
+   struct {
+      struct drm_i915_query_perf_config query;
+      struct drm_i915_perf_oa_config config;
+   } item_data;
+   struct drm_i915_query_item item = {
+      .query_id = DRM_I915_QUERY_PERF_CONFIG,
+      .flags = DRM_I915_QUERY_PERF_CONFIG_DATA_FOR_UUID,
+      .data_ptr = to_user_pointer(&item_data),
+      .length = sizeof(item_data),
+   };
+
+   memset(&item_data, 0, sizeof(item_data));
+   memcpy(item_data.query.uuid, guid, sizeof(item_data.query.uuid));
+   memcpy(&item_data.config, config, sizeof(item_data.config));
+
+   if (!(i915_query_items(perf, fd, &item, 1) == 0 && item.length > 0))
+      return false;
+
+   memcpy(config, &item_data.config, sizeof(item_data.config));
+
+   return true;
+}
+
+bool
+gen_perf_load_metric_id(struct gen_perf_config *perf_cfg,
+                        const char *guid,
+                        uint64_t *metric_id)
 {
    char config_path[280];
 
    snprintf(config_path, sizeof(config_path), "%s/metrics/%s/id",
-            perf->sysfs_dev_dir, guid);
+            perf_cfg->sysfs_dev_dir, guid);
 
    /* Don't recreate already loaded configs. */
    return read_file_uint64(config_path, metric_id);
+}
+
+static uint64_t
+i915_add_config(struct gen_perf_config *perf, int fd,
+                const struct gen_perf_registers *config,
+                const char *guid)
+{
+   struct drm_i915_perf_oa_config i915_config = { 0, };
+
+   memcpy(i915_config.uuid, guid, sizeof(i915_config.uuid));
+
+   i915_config.n_mux_regs = config->n_mux_regs;
+   i915_config.mux_regs_ptr = to_user_pointer(config->mux_regs);
+
+   i915_config.n_boolean_regs = config->n_b_counter_regs;
+   i915_config.boolean_regs_ptr = to_user_pointer(config->b_counter_regs);
+
+   i915_config.n_flex_regs = config->n_flex_regs;
+   i915_config.flex_regs_ptr = to_user_pointer(config->flex_regs);
+
+   int ret = gen_ioctl(fd, DRM_IOCTL_I915_PERF_ADD_CONFIG, &i915_config);
+   return ret > 0 ? ret : 0;
 }
 
 static void
@@ -601,30 +675,15 @@ init_oa_configs(struct gen_perf_config *perf, int fd)
 {
    hash_table_foreach(perf->oa_metrics_table, entry) {
       const struct gen_perf_query_info *query = entry->data;
-      struct drm_i915_perf_oa_config config;
       uint64_t config_id;
-      int ret;
 
-      if (load_metric_id(perf, query->guid, &config_id)) {
+      if (gen_perf_load_metric_id(perf, query->guid, &config_id)) {
          DBG("metric set: %s (already loaded)\n", query->guid);
          register_oa_config(perf, query, config_id);
          continue;
       }
 
-      memset(&config, 0, sizeof(config));
-
-      memcpy(config.uuid, query->guid, sizeof(config.uuid));
-
-      config.n_mux_regs = query->n_mux_regs;
-      config.mux_regs_ptr = (uintptr_t) query->mux_regs;
-
-      config.n_boolean_regs = query->n_b_counter_regs;
-      config.boolean_regs_ptr = (uintptr_t) query->b_counter_regs;
-
-      config.n_flex_regs = query->n_flex_regs;
-      config.flex_regs_ptr = (uintptr_t) query->flex_regs;
-
-      ret = gen_ioctl(fd, DRM_IOCTL_I915_PERF_ADD_CONFIG, &config);
+      int ret = i915_add_config(perf, fd, &query->config, query->guid);
       if (ret < 0) {
          DBG("Failed to load \"%s\" (%s) metrics set in kernel: %s\n",
              query->name, query->guid, strerror(errno));
@@ -730,8 +789,13 @@ get_register_queries_function(const struct gen_device_info *devinfo)
    }
    if (devinfo->is_cannonlake)
       return gen_oa_register_queries_cnl;
-   if (devinfo->gen == 11)
+   if (devinfo->gen == 11) {
+      if (devinfo->is_elkhartlake)
+         return gen_oa_register_queries_lkf;
       return gen_oa_register_queries_icl;
+   }
+   if (devinfo->gen == 12)
+      return gen_oa_register_queries_tgl;
 
    return NULL;
 }
@@ -859,6 +923,8 @@ load_oa_metrics(struct gen_perf_config *perf, int fd,
    bool i915_perf_oa_available = false;
    struct stat sb;
 
+   perf->i915_query_supported = i915_query_perf_config_supported(perf, fd);
+
    /* The existence of this sysctl parameter implies the kernel supports
     * the i915 perf interface.
     */
@@ -901,6 +967,87 @@ load_oa_metrics(struct gen_perf_config *perf, int fd,
       enumerate_sysfs_metrics(perf);
 
    return true;
+}
+
+struct gen_perf_registers *
+gen_perf_load_configuration(struct gen_perf_config *perf_cfg, int fd, const char *guid)
+{
+   if (!perf_cfg->i915_query_supported)
+      return NULL;
+
+   struct drm_i915_perf_oa_config i915_config = { 0, };
+   if (!i915_query_perf_config_data(perf_cfg, fd, guid, &i915_config))
+      return NULL;
+
+   struct gen_perf_registers *config = rzalloc(NULL, struct gen_perf_registers);
+   config->n_flex_regs = i915_config.n_flex_regs;
+   config->flex_regs = rzalloc_array(config, struct gen_perf_query_register_prog, config->n_flex_regs);
+   config->n_mux_regs = i915_config.n_mux_regs;
+   config->mux_regs = rzalloc_array(config, struct gen_perf_query_register_prog, config->n_mux_regs);
+   config->n_b_counter_regs = i915_config.n_boolean_regs;
+   config->b_counter_regs = rzalloc_array(config, struct gen_perf_query_register_prog, config->n_b_counter_regs);
+
+   /*
+    * struct gen_perf_query_register_prog maps exactly to the tuple of
+    * (register offset, register value) returned by the i915.
+    */
+   i915_config.flex_regs_ptr = to_user_pointer(config->flex_regs);
+   i915_config.mux_regs_ptr = to_user_pointer(config->mux_regs);
+   i915_config.boolean_regs_ptr = to_user_pointer(config->b_counter_regs);
+   if (!i915_query_perf_config_data(perf_cfg, fd, guid, &i915_config)) {
+      ralloc_free(config);
+      return NULL;
+   }
+
+   return config;
+}
+
+uint64_t
+gen_perf_store_configuration(struct gen_perf_config *perf_cfg, int fd,
+                             const struct gen_perf_registers *config,
+                             const char *guid)
+{
+   if (guid)
+      return i915_add_config(perf_cfg, fd, config, guid);
+
+   struct mesa_sha1 sha1_ctx;
+   _mesa_sha1_init(&sha1_ctx);
+
+   if (config->flex_regs) {
+      _mesa_sha1_update(&sha1_ctx, config->flex_regs,
+                        sizeof(config->flex_regs[0]) *
+                        config->n_flex_regs);
+   }
+   if (config->mux_regs) {
+      _mesa_sha1_update(&sha1_ctx, config->mux_regs,
+                        sizeof(config->mux_regs[0]) *
+                        config->n_mux_regs);
+   }
+   if (config->b_counter_regs) {
+      _mesa_sha1_update(&sha1_ctx, config->b_counter_regs,
+                        sizeof(config->b_counter_regs[0]) *
+                        config->n_b_counter_regs);
+   }
+
+   uint8_t hash[20];
+   _mesa_sha1_final(&sha1_ctx, hash);
+
+   char formatted_hash[41];
+   _mesa_sha1_format(formatted_hash, hash);
+
+   char generated_guid[37];
+   snprintf(generated_guid, sizeof(generated_guid),
+            "%.8s-%.4s-%.4s-%.4s-%.12s",
+            &formatted_hash[0], &formatted_hash[8],
+            &formatted_hash[8 + 4], &formatted_hash[8 + 4 + 4],
+            &formatted_hash[8 + 4 + 4 + 4]);
+
+   /* Check if already present. */
+   uint64_t id;
+   if (gen_perf_load_metric_id(perf_cfg, generated_guid, &id))
+      return id;
+
+   return i915_add_config(perf_cfg, fd, config, generated_guid);
 }
 
 /* Accumulate 32bits OA counters */
@@ -964,11 +1111,11 @@ gen8_read_report_clock_ratios(const uint32_t *report,
    *unslice_freq_hz = unslice_freq * 16666667ULL;
 }
 
-static void
-query_result_read_frequencies(struct gen_perf_query_result *result,
-                              const struct gen_device_info *devinfo,
-                              const uint32_t *start,
-                              const uint32_t *end)
+void
+gen_perf_query_result_read_frequencies(struct gen_perf_query_result *result,
+                                       const struct gen_device_info *devinfo,
+                                       const uint32_t *start,
+                                       const uint32_t *end)
 {
    /* Slice/Unslice frequency is only available in the OA reports when the
     * "Disable OA reports due to clock ratio change" field in
@@ -989,15 +1136,17 @@ query_result_read_frequencies(struct gen_perf_query_result *result,
                                  &result->unslice_frequency[1]);
 }
 
-static void
-query_result_accumulate(struct gen_perf_query_result *result,
-                        const struct gen_perf_query_info *query,
-                        const uint32_t *start,
-                        const uint32_t *end)
+void
+gen_perf_query_result_accumulate(struct gen_perf_query_result *result,
+                                 const struct gen_perf_query_info *query,
+                                 const uint32_t *start,
+                                 const uint32_t *end)
 {
    int i, idx = 0;
 
-   result->hw_id = start[2];
+   if (result->hw_id == OA_REPORT_INVALID_CTX_ID &&
+       start[2] != OA_REPORT_INVALID_CTX_ID)
+      result->hw_id = start[2];
    result->reports_accumulated++;
 
    switch (query->oa_format) {
@@ -1031,11 +1180,11 @@ query_result_accumulate(struct gen_perf_query_result *result,
 
 }
 
-static void
-query_result_clear(struct gen_perf_query_result *result)
+void
+gen_perf_query_result_clear(struct gen_perf_query_result *result)
 {
    memset(result, 0, sizeof(*result));
-   result->hw_id = 0xffffffff; /* invalid */
+   result->hw_id = OA_REPORT_INVALID_CTX_ID; /* invalid */
 }
 
 static void
@@ -1292,8 +1441,8 @@ get_metric_id(struct gen_perf_config *perf,
    }
 
    struct gen_perf_query_info *raw_query = (struct gen_perf_query_info *)query;
-   if (!load_metric_id(perf, query->guid,
-                       &raw_query->oa_metrics_set_id)) {
+   if (!gen_perf_load_metric_id(perf, query->guid,
+                                &raw_query->oa_metrics_set_id)) {
       DBG("Unable to read query guid=%s ID, falling back to test config\n", query->guid);
       raw_query->oa_metrics_set_id = 1ULL;
    } else {
@@ -1316,8 +1465,8 @@ get_free_sample_buf(struct gen_perf_context *perf_ctx)
 
       exec_node_init(&buf->link);
       buf->refcount = 0;
-      buf->len = 0;
    }
+   buf->len = 0;
 
    return buf;
 }
@@ -1735,7 +1884,7 @@ gen_perf_begin_query(struct gen_perf_context *perf_ctx,
        */
       buf->refcount++;
 
-      query_result_clear(&query->oa.result);
+      gen_perf_query_result_clear(&query->oa.result);
       query->oa.results_accumulated = false;
 
       add_to_unaccumulated_query_list(perf_ctx, query);
@@ -1834,7 +1983,8 @@ read_oa_samples_until(struct gen_perf_context *perf_ctx,
       exec_list_get_tail(&perf_ctx->sample_buffers);
    struct oa_sample_buf *tail_buf =
       exec_node_data(struct oa_sample_buf, tail_node, link);
-   uint32_t last_timestamp = tail_buf->last_timestamp;
+   uint32_t last_timestamp =
+      tail_buf->len == 0 ? start_timestamp : tail_buf->last_timestamp;
 
    while (1) {
       struct oa_sample_buf *buf = get_free_sample_buf(perf_ctx);
@@ -1849,12 +1999,13 @@ read_oa_samples_until(struct gen_perf_context *perf_ctx,
          exec_list_push_tail(&perf_ctx->free_sample_buffers, &buf->link);
 
          if (len < 0) {
-            if (errno == EAGAIN)
-               return ((last_timestamp - start_timestamp) >=
+            if (errno == EAGAIN) {
+               return ((last_timestamp - start_timestamp) < INT32_MAX &&
+                       (last_timestamp - start_timestamp) >=
                        (end_timestamp - start_timestamp)) ?
                       OA_READ_STATUS_FINISHED :
                       OA_READ_STATUS_UNFINISHED;
-            else {
+            } else {
                DBG("Error reading i915 perf samples: %m\n");
             }
          } else
@@ -2070,6 +2221,17 @@ discard_all_queries(struct gen_perf_context *perf_ctx)
    }
 }
 
+/* Looks for the validity bit of context ID (dword 2) of an OA report. */
+static bool
+oa_report_ctx_id_valid(const struct gen_device_info *devinfo,
+                       const uint32_t *report)
+{
+   assert(devinfo->gen >= 8);
+   if (devinfo->gen == 8)
+      return (report[0] & (1 << 25)) != 0;
+   return (report[0] & (1 << 16)) != 0;
+}
+
 /**
  * Accumulate raw OA counter values based on deltas between pairs of
  * OA reports.
@@ -2097,7 +2259,7 @@ accumulate_oa_reports(struct gen_perf_context *perf_ctx,
    uint32_t *last;
    uint32_t *end;
    struct exec_node *first_samples_node;
-   bool in_ctx = true;
+   bool last_report_ctx_match = true;
    int out_duration = 0;
 
    assert(query->oa.map != NULL);
@@ -2114,6 +2276,14 @@ accumulate_oa_reports(struct gen_perf_context *perf_ctx,
       goto error;
    }
 
+   /* On Gen12+ OA reports are sourced from per context counters, so we don't
+    * ever have to look at the global OA buffer. Yey \o/
+    */
+   if (perf_ctx->devinfo->gen >= 12) {
+      last = start;
+      goto end;
+   }
+
    /* See if we have any periodic reports to accumulate too... */
 
    /* N.B. The oa.samples_head was set when the query began and
@@ -2126,7 +2296,7 @@ accumulate_oa_reports(struct gen_perf_context *perf_ctx,
    first_samples_node = query->oa.samples_head->next;
 
    foreach_list_typed_from(struct oa_sample_buf, buf, link,
-                           &perf_ctx.sample_buffers,
+                           &perf_ctx->sample_buffers,
                            first_samples_node)
    {
       int offset = 0;
@@ -2143,6 +2313,7 @@ accumulate_oa_reports(struct gen_perf_context *perf_ctx,
          switch (header->type) {
          case DRM_I915_PERF_RECORD_SAMPLE: {
             uint32_t *report = (uint32_t *)(header + 1);
+            bool report_ctx_match = true;
             bool add = true;
 
             /* Ignore reports that come before the start marker.
@@ -2171,43 +2342,40 @@ accumulate_oa_reports(struct gen_perf_context *perf_ctx,
              * of OA counters while any other context is acctive.
              */
             if (devinfo->gen >= 8) {
-               if (in_ctx && report[2] != query->oa.result.hw_id) {
-                  DBG("i915 perf: Switch AWAY (observed by ID change)\n");
-                  in_ctx = false;
+               /* Consider that the current report matches our context only if
+                * the report says the report ID is valid.
+                */
+               report_ctx_match = oa_report_ctx_id_valid(devinfo, report) &&
+                  report[2] == start[2];
+               if (report_ctx_match)
                   out_duration = 0;
-               } else if (in_ctx == false && report[2] == query->oa.result.hw_id) {
-                  DBG("i915 perf: Switch TO\n");
-                  in_ctx = true;
-
-                  /* From experimentation in IGT, we found that the OA unit
-                   * might label some report as "idle" (using an invalid
-                   * context ID), right after a report for a given context.
-                   * Deltas generated by those reports actually belong to the
-                   * previous context, even though they're not labelled as
-                   * such.
-                   *
-                   * We didn't *really* Switch AWAY in the case that we e.g.
-                   * saw a single periodic report while idle...
-                   */
-                  if (out_duration >= 1)
-                     add = false;
-               } else if (in_ctx) {
-                  assert(report[2] == query->oa.result.hw_id);
-                  DBG("i915 perf: Continuation IN\n");
-               } else {
-                  assert(report[2] != query->oa.result.hw_id);
-                  DBG("i915 perf: Continuation OUT\n");
-                  add = false;
+               else
                   out_duration++;
-               }
+
+               /* Only add the delta between <last, report> if the last report
+                * was clearly identified as our context, or if we have at most
+                * 1 report without a matching ID.
+                *
+                * The OA unit will sometimes label reports with an invalid
+                * context ID when i915 rewrites the execlist submit register
+                * with the same context as the one currently running. This
+                * happens when i915 wants to notify the HW of ringbuffer tail
+                * register update. We have to consider this report as part of
+                * our context as the 3d pipeline behind the OACS unit is still
+                * processing the operations started at the previous execlist
+                * submission.
+                */
+               add = last_report_ctx_match && out_duration < 2;
             }
 
             if (add) {
-               query_result_accumulate(&query->oa.result, query->queryinfo,
-                                       last, report);
+               gen_perf_query_result_accumulate(&query->oa.result,
+                                                query->queryinfo,
+                                                last, report);
             }
 
             last = report;
+            last_report_ctx_match = report_ctx_match;
 
             break;
          }
@@ -2224,8 +2392,8 @@ accumulate_oa_reports(struct gen_perf_context *perf_ctx,
 
 end:
 
-   query_result_accumulate(&query->oa.result, query->queryinfo,
-                           last, end);
+   gen_perf_query_result_accumulate(&query->oa.result, query->queryinfo,
+                                    last, end);
 
    query->oa.results_accumulated = true;
    drop_from_unaccumulated_query_list(perf_ctx, query);
@@ -2412,10 +2580,10 @@ gen_perf_get_query_data(struct gen_perf_context *perf_ctx,
          read_gt_frequency(perf_ctx, query);
          uint32_t *begin_report = query->oa.map;
          uint32_t *end_report = query->oa.map + MI_RPC_BO_END_OFFSET_BYTES;
-         query_result_read_frequencies(&query->oa.result,
-                                       perf_ctx->devinfo,
-                                       begin_report,
-                                       end_report);
+         gen_perf_query_result_read_frequencies(&query->oa.result,
+                                                perf_ctx->devinfo,
+                                                begin_report,
+                                                end_report);
          accumulate_oa_reports(perf_ctx, query);
          assert(query->oa.results_accumulated);
 

@@ -36,10 +36,13 @@ LOCAL_MODULE_CLASS := STATIC_LIBRARIES
 
 LOCAL_C_INCLUDES := \
 	$(MESA_TOP)/src/amd/common \
+	$(MESA_TOP)/src/amd/llvm \
 	$(call generated-sources-dir-for,STATIC_LIBRARIES,libmesa_amd_common,,)/common \
 	$(call generated-sources-dir-for,STATIC_LIBRARIES,libmesa_nir,,)/nir
 
-LOCAL_STATIC_LIBRARIES := libmesa_amd_common
+LOCAL_STATIC_LIBRARIES := \
+	libmesa_amd_common \
+	libmesa_galliumvl
 
 LOCAL_SHARED_LIBRARIES := libdrm_radeon
 LOCAL_MODULE := libmesa_pipe_radeonsi
@@ -62,7 +65,7 @@ $(intermediates)/radeonsi/si_driinfo.h: $(MERGE_DRIINFO) $(GEN_DRIINFO_INPUTS)
 	$(hide) $(MESA_PYTHON2) $(MERGE_DRIINFO) $(GEN_DRIINFO_INPUTS) > $@ || ($(RM) $@; false)
 
 GEN10_FORMAT_TABLE_INPUTS := \
-	$(MESA_TOP)/src/gallium/auxiliary/util/u_format.csv \
+	$(MESA_TOP)/src/util/format/u_format.csv \
 	$(MESA_TOP)/src/amd/registers/gfx10-rsrc.json
 
 GEN10_FORMAT_TABLE_DEP := \

@@ -69,15 +69,6 @@ enum radeon_bo_usage { /* bitfield */
 	RADEON_USAGE_READWRITE = RADEON_USAGE_READ | RADEON_USAGE_WRITE
 };
 
-enum ring_type {
-	RING_GFX = 0,
-	RING_COMPUTE,
-	RING_DMA,
-	RING_UVD,
-	RING_VCE,
-	RING_LAST,
-};
-
 enum radeon_ctx_priority {
 	RADEON_CTX_PRIORITY_INVALID = -1,
 	RADEON_CTX_PRIORITY_LOW = 0,
@@ -244,7 +235,7 @@ struct radeon_winsys {
 	struct radeon_winsys_bo *(*buffer_from_fd)(struct radeon_winsys *ws,
 						   int fd,
 						   unsigned priority,
-						   unsigned *stride, unsigned *offset);
+						   uint64_t *alloc_size);
 
 	bool (*buffer_get_fd)(struct radeon_winsys *ws,
 			      struct radeon_winsys_bo *bo,

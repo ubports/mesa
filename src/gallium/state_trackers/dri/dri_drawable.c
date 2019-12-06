@@ -34,14 +34,11 @@
 #include "dri_drawable.h"
 
 #include "pipe/p_screen.h"
-#include "util/u_format.h"
+#include "util/format/u_format.h"
 #include "util/u_memory.h"
 #include "util/u_inlines.h"
 
 static uint32_t drifb_ID = 0;
-
-static void
-swap_fences_unref(struct dri_drawable *draw);
 
 static bool
 dri_st_framebuffer_validate(struct st_context_iface *stctx,
@@ -94,6 +91,18 @@ dri_st_framebuffer_validate(struct st_context_iface *stctx,
          drawable->texture_mask = statt_mask;
       }
    } while (lastStamp != drawable->dPriv->lastStamp);
+
+   /* Flush the pending set_damage_region request. */
+   struct pipe_screen *pscreen = screen->base.screen;
+
+   if (new_mask & (1 << ST_ATTACHMENT_BACK_LEFT) &&
+       pscreen->set_damage_region) {
+      struct pipe_resource *resource = textures[ST_ATTACHMENT_BACK_LEFT];
+
+      pscreen->set_damage_region(pscreen, resource,
+                                 drawable->num_damage_rects,
+                                 drawable->damage_rects);
+   }
 
    if (!out)
       return true;
@@ -167,9 +176,6 @@ dri_create_buffer(__DRIscreen * sPriv,
    drawable->screen = screen;
    drawable->sPriv = sPriv;
    drawable->dPriv = dPriv;
-   drawable->desired_fences = screen->default_throttle_frames;
-   if (drawable->desired_fences > DRI_SWAP_FENCES_MAX)
-      drawable->desired_fences = DRI_SWAP_FENCES_MAX;
 
    dPriv->driverPrivate = (void *)drawable;
    p_atomic_set(&drawable->base.stamp, 1);
@@ -197,11 +203,13 @@ dri_destroy_buffer(__DRIdrawable * dPriv)
    for (i = 0; i < ST_ATTACHMENT_COUNT; i++)
       pipe_resource_reference(&drawable->msaa_textures[i], NULL);
 
-   swap_fences_unref(drawable);
+   screen->base.screen->fence_reference(screen->base.screen,
+         &drawable->throttle_fence, NULL);
 
    /* Notify the st manager that this drawable is no longer valid */
    stapi->destroy_drawable(stapi, &drawable->base);
 
+   FREE(drawable->damage_rects);
    FREE(drawable);
 }
 
@@ -336,75 +344,6 @@ dri_drawable_get_format(struct dri_drawable *drawable,
    }
 }
 
-
-/**
- * swap_fences_pop_front - pull a fence from the throttle queue
- *
- * If the throttle queue is filled to the desired number of fences,
- * pull fences off the queue until the number is less than the desired
- * number of fences, and return the last fence pulled.
- */
-static struct pipe_fence_handle *
-swap_fences_pop_front(struct dri_drawable *draw)
-{
-   struct pipe_screen *screen = draw->screen->base.screen;
-   struct pipe_fence_handle *fence = NULL;
-
-   if (draw->desired_fences == 0)
-      return NULL;
-
-   if (draw->cur_fences >= draw->desired_fences) {
-      screen->fence_reference(screen, &fence, draw->swap_fences[draw->tail]);
-      screen->fence_reference(screen, &draw->swap_fences[draw->tail++], NULL);
-      draw->tail &= DRI_SWAP_FENCES_MASK;
-      --draw->cur_fences;
-   }
-   return fence;
-}
-
-
-/**
- * swap_fences_push_back - push a fence onto the throttle queue
- *
- * push a fence onto the throttle queue and pull fences of the queue
- * so that the desired number of fences are on the queue.
- */
-static void
-swap_fences_push_back(struct dri_drawable *draw,
-		      struct pipe_fence_handle *fence)
-{
-   struct pipe_screen *screen = draw->screen->base.screen;
-
-   if (!fence || draw->desired_fences == 0)
-      return;
-
-   while(draw->cur_fences == draw->desired_fences)
-      swap_fences_pop_front(draw);
-
-   draw->cur_fences++;
-   screen->fence_reference(screen, &draw->swap_fences[draw->head++],
-			   fence);
-   draw->head &= DRI_SWAP_FENCES_MASK;
-}
-
-
-/**
- * swap_fences_unref - empty the throttle queue
- *
- * pulls fences of the throttle queue until it is empty.
- */
-static void
-swap_fences_unref(struct dri_drawable *draw)
-{
-   struct pipe_screen *screen = draw->screen->base.screen;
-
-   while(draw->cur_fences) {
-      screen->fence_reference(screen, &draw->swap_fences[draw->tail++], NULL);
-      draw->tail &= DRI_SWAP_FENCES_MASK;
-      --draw->cur_fences;
-   }
-}
-
 void
 dri_pipe_blit(struct pipe_context *pipe,
               struct pipe_resource *dst,
@@ -511,13 +450,15 @@ dri_flush(__DRIcontext *cPriv,
       struct pipe_context *pipe = st->pipe;
 
       if (drawable->stvis.samples > 1 &&
-          reason == __DRI2_THROTTLE_SWAPBUFFER) {
+          (reason == __DRI2_THROTTLE_SWAPBUFFER ||
+           reason == __DRI2_THROTTLE_COPYSUBBUFFER)) {
          /* Resolve the MSAA back buffer. */
          dri_pipe_blit(st->pipe,
                        drawable->textures[ST_ATTACHMENT_BACK_LEFT],
                        drawable->msaa_textures[ST_ATTACHMENT_BACK_LEFT]);
 
-         if (drawable->msaa_textures[ST_ATTACHMENT_FRONT_LEFT] &&
+         if (reason == __DRI2_THROTTLE_SWAPBUFFER &&
+             drawable->msaa_textures[ST_ATTACHMENT_FRONT_LEFT] &&
              drawable->msaa_textures[ST_ATTACHMENT_BACK_LEFT]) {
             swap_msaa_buffers = true;
          }
@@ -550,35 +491,22 @@ dri_flush(__DRIcontext *cPriv,
       flush_flags |= ST_FLUSH_END_OF_FRAME;
 
    /* Flush the context and throttle if needed. */
-   if (dri_screen(ctx->sPriv)->default_throttle_frames &&
+   if (dri_screen(ctx->sPriv)->throttle &&
        drawable &&
        (reason == __DRI2_THROTTLE_SWAPBUFFER ||
         reason == __DRI2_THROTTLE_FLUSHFRONT)) {
-      /* Throttle.
-       *
-       * This pulls a fence off the throttling queue and waits for it if the
-       * number of fences on the throttling queue has reached the desired
-       * number.
-       *
-       * Then flushes to insert a fence at the current rendering position, and
-       * pushes that fence on the queue. This requires that the st_context_iface
-       * flush method returns a fence even if there are no commands to flush.
-       */
+
       struct pipe_screen *screen = drawable->screen->base.screen;
-      struct pipe_fence_handle *oldest_fence, *new_fence = NULL;
+      struct pipe_fence_handle *new_fence = NULL;
 
       st->flush(st, flush_flags, &new_fence);
 
-      oldest_fence = swap_fences_pop_front(drawable);
-      if (oldest_fence) {
-         screen->fence_finish(screen, NULL, oldest_fence, PIPE_TIMEOUT_INFINITE);
-         screen->fence_reference(screen, &oldest_fence, NULL);
+      /* throttle on the previous fence */
+      if (drawable->throttle_fence) {
+         screen->fence_finish(screen, NULL, drawable->throttle_fence, PIPE_TIMEOUT_INFINITE);
+         screen->fence_reference(screen, &drawable->throttle_fence, NULL);
       }
-
-      if (new_fence) {
-         swap_fences_push_back(drawable, new_fence);
-         screen->fence_reference(screen, &new_fence, NULL);
-      }
+      drawable->throttle_fence = new_fence;
    }
    else if (flags & (__DRI2_FLUSH_DRAWABLE | __DRI2_FLUSH_CONTEXT)) {
       st->flush(st, flush_flags, NULL);

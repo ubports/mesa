@@ -22,7 +22,7 @@
  */
 
 #include <inttypes.h>
-#include "util/u_format.h"
+#include "util/format/u_format.h"
 #include "util/u_math.h"
 #include "util/u_memory.h"
 #include "util/ralloc.h"
@@ -207,6 +207,9 @@ ntq_emit_tmu_general(struct v3d_compile *c, nir_intrinsic_instr *instr,
                         instr->intrinsic == nir_intrinsic_load_ssbo ||
                         instr->intrinsic == nir_intrinsic_load_scratch ||
                         instr->intrinsic == nir_intrinsic_load_shared);
+
+        if (!is_load)
+                c->tmu_dirty_rcl = true;
 
         bool has_index = !is_shared_or_scratch;
 
@@ -406,6 +409,20 @@ ntq_init_ssa_def(struct v3d_compile *c, nir_ssa_def *def)
         return qregs;
 }
 
+static bool
+is_ld_signal(const struct v3d_qpu_sig *sig)
+{
+        return (sig->ldunif ||
+                sig->ldunifa ||
+                sig->ldunifrf ||
+                sig->ldunifarf ||
+                sig->ldtmu ||
+                sig->ldvary ||
+                sig->ldvpm ||
+                sig->ldtlb ||
+                sig->ldtlbu);
+}
+
 /**
  * This function is responsible for getting VIR results into the associated
  * storage for a NIR instruction.
@@ -426,7 +443,7 @@ ntq_store_dest(struct v3d_compile *c, nir_dest *dest, int chan,
                struct qreg result)
 {
         struct qinst *last_inst = NULL;
-        if (!list_empty(&c->cur_block->instructions))
+        if (!list_is_empty(&c->cur_block->instructions))
                 last_inst = (struct qinst *)c->cur_block->instructions.prev;
 
         assert((result.file == QFILE_TEMP &&
@@ -453,11 +470,12 @@ ntq_store_dest(struct v3d_compile *c, nir_dest *dest, int chan,
                         _mesa_hash_table_search(c->def_ht, reg);
                 struct qreg *qregs = entry->data;
 
-                /* Insert a MOV if the source wasn't an SSA def in the
-                 * previous instruction.
+                /* If the previous instruction can't be predicated for
+                 * the store into the nir_register, then emit a MOV
+                 * that can be.
                  */
-                if ((vir_in_nonuniform_control_flow(c) &&
-                     c->defs[last_inst->dst.index]->qpu.sig.ldunif)) {
+                if (vir_in_nonuniform_control_flow(c) &&
+                    is_ld_signal(&c->defs[last_inst->dst.index]->qpu.sig)) {
                         result = vir_MOV(c, result);
                         last_inst = c->defs[result.index];
                 }
@@ -2668,6 +2686,7 @@ const nir_shader_compiler_options v3d_nir_options = {
         .lower_mul_high = true,
         .lower_wpos_pntc = true,
         .lower_rotate = true,
+        .lower_to_scalar = true,
 };
 
 /**

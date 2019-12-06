@@ -24,7 +24,7 @@
  */
 
 #include "util/u_math.h"
-#include "util/u_format.h"
+#include "util/format/u_format.h"
 #include "util/u_debug.h"
 #include "util/u_half.h"
 #include "util/u_helpers.h"
@@ -147,8 +147,8 @@ struct lima_render_state {
 #define PLBU_CMD_VIEWPORT_TOP(v) PLBU_CMD(v, 0x10000106)
 #define PLBU_CMD_ARRAYS_SEMAPHORE_BEGIN() PLBU_CMD(0x00010002, 0x60000000)
 #define PLBU_CMD_ARRAYS_SEMAPHORE_END() PLBU_CMD(0x00010001, 0x60000000)
-#define PLBU_CMD_PRIMITIVE_SETUP(low_prim, cull, index_size) \
-   PLBU_CMD(((low_prim) ? 0x00003200 : 0x00002200) | (cull) | ((index_size) << 9), 0x1000010B)
+#define PLBU_CMD_PRIMITIVE_SETUP(prim, cull, index_size) \
+   PLBU_CMD(0x200 | (prim) | (cull) | ((index_size) << 9), 0x1000010B)
 #define PLBU_CMD_RSW_VERTEX_ARRAY(rsw, gl_pos) \
    PLBU_CMD(rsw, 0x80000000 | ((gl_pos) >> 4))
 #define PLBU_CMD_SCISSORS(minx, maxx, miny, maxy) \
@@ -160,6 +160,7 @@ struct lima_render_state {
 #define PLBU_CMD_DEPTH_RANGE_NEAR(v) PLBU_CMD(v, 0x1000010E)
 #define PLBU_CMD_DEPTH_RANGE_FAR(v) PLBU_CMD(v, 0x1000010F)
 #define PLBU_CMD_INDEXED_DEST(gl_pos) PLBU_CMD(gl_pos, 0x10000100)
+#define PLBU_CMD_INDEXED_PT_SIZE(pt_size) PLBU_CMD(pt_size, 0x10000102)
 #define PLBU_CMD_INDICES(va) PLBU_CMD(va, 0x10000101)
 #define PLBU_CMD_DRAW_ARRAYS(mode, start, count) \
    PLBU_CMD(((count) << 24) | (start), (((mode) & 0x1F) << 16) | ((count) >> 8))
@@ -289,8 +290,8 @@ lima_pack_reload_plbu_cmd(struct lima_context *ctx)
    lima_tex_desc *td = cpu + lima_reload_tex_desc_offset;
    memset(td, 0, lima_min_tex_desc_size);
    lima_texture_desc_set_res(ctx, td, fb->base.cbufs[0]->texture, 0, 0);
-   td->unknown_1_1 = 0x80;
-   td->texture_2d = 1;
+   td->unnorm_coords = 1;
+   td->texture_type = LIMA_TEXTURE_TYPE_2D;
    td->min_img_filter_nearest = 1;
    td->mag_img_filter_nearest = 1;
    td->wrap_s_clamp_to_edge = 1;
@@ -739,19 +740,19 @@ lima_pack_vs_cmd(struct lima_context *ctx, const struct pipe_draw_info *info)
    VS_CMD_SHADER_ADDRESS(ctx->vs->bo->va, ctx->vs->shader_size);
    VS_CMD_SHADER_INFO(ctx->vs->prefetch, ctx->vs->shader_size);
 
-   int num_varryings = ctx->vs->num_varying;
+   int num_outputs = ctx->vs->num_outputs;
    int num_attributes = ctx->vertex_elements->num_elements;
-   VS_CMD_VARYING_ATTRIBUTE_COUNT(num_varryings, num_attributes);
+   VS_CMD_VARYING_ATTRIBUTE_COUNT(num_outputs, MAX2(1, num_attributes));
 
    VS_CMD_UNKNOWN1();
 
    VS_CMD_ATTRIBUTES_ADDRESS(
       lima_ctx_buff_va(ctx, lima_ctx_buff_gp_attribute_info, LIMA_CTX_BUFF_SUBMIT_GP),
-      num_attributes);
+      MAX2(1, num_attributes));
 
    VS_CMD_VARYINGS_ADDRESS(
       lima_ctx_buff_va(ctx, lima_ctx_buff_gp_varying_info, LIMA_CTX_BUFF_SUBMIT_GP),
-      num_varryings);
+      num_outputs);
 
    unsigned num = info->index_size ? (ctx->max_index - ctx->min_index + 1) : info->count;
    VS_CMD_DRAW(num, info->index_size);
@@ -767,6 +768,7 @@ static void
 lima_pack_plbu_cmd(struct lima_context *ctx, const struct pipe_draw_info *info)
 {
    struct lima_context_framebuffer *fb = &ctx->framebuffer;
+   struct lima_vs_shader_state *vs = ctx->vs;
 
    lima_pack_head_plbu_cmd(ctx);
 
@@ -774,7 +776,7 @@ lima_pack_plbu_cmd(struct lima_context *ctx, const struct pipe_draw_info *info)
    if (lima_is_scissor_zero(ctx))
       return;
 
-   PLBU_CMD_BEGIN(30);
+   PLBU_CMD_BEGIN(32);
 
    PLBU_CMD_VIEWPORT_LEFT(fui(ctx->viewport.left));
    PLBU_CMD_VIEWPORT_RIGHT(fui(ctx->viewport.right));
@@ -784,7 +786,6 @@ lima_pack_plbu_cmd(struct lima_context *ctx, const struct pipe_draw_info *info)
    if (!info->index_size)
       PLBU_CMD_ARRAYS_SEMAPHORE_BEGIN();
 
-   bool low_prim = info->mode < PIPE_PRIM_TRIANGLES;
    int cf = ctx->rasterizer->base.cull_face;
    int ccw = ctx->rasterizer->base.front_ccw;
    uint32_t cull = 0;
@@ -794,7 +795,13 @@ lima_pack_plbu_cmd(struct lima_context *ctx, const struct pipe_draw_info *info)
       if (cf & PIPE_FACE_BACK)
          cull |= ccw ? 0x00020000 : 0x00040000;
    }
-   PLBU_CMD_PRIMITIVE_SETUP(low_prim, cull, info->index_size);
+
+   if (info->mode == PIPE_PRIM_POINTS && ctx->vs->point_size_idx != -1)
+      PLBU_CMD_PRIMITIVE_SETUP(0x0000, cull, info->index_size);
+   else if (info->mode < PIPE_PRIM_TRIANGLES)
+      PLBU_CMD_PRIMITIVE_SETUP(0x3000, cull, info->index_size);
+   else
+      PLBU_CMD_PRIMITIVE_SETUP(0x2000, cull, info->index_size);
 
    uint32_t gl_position_va =
       lima_ctx_buff_va(ctx, lima_ctx_buff_sh_gl_pos,
@@ -819,7 +826,9 @@ lima_pack_plbu_cmd(struct lima_context *ctx, const struct pipe_draw_info *info)
    PLBU_CMD_DEPTH_RANGE_NEAR(fui(ctx->viewport.near));
    PLBU_CMD_DEPTH_RANGE_FAR(fui(ctx->viewport.far));
 
-   if (low_prim) {
+   if ((info->mode == PIPE_PRIM_POINTS && ctx->vs->point_size_idx == -1) ||
+       ((info->mode >= PIPE_PRIM_LINES) && (info->mode < PIPE_PRIM_TRIANGLES)))
+   {
       uint32_t v = info->mode == PIPE_PRIM_POINTS ?
          fui(ctx->rasterizer->base.point_size) : fui(ctx->rasterizer->base.line_width);
       PLBU_CMD_LOW_PRIM_SIZE(v);
@@ -827,6 +836,13 @@ lima_pack_plbu_cmd(struct lima_context *ctx, const struct pipe_draw_info *info)
 
    if (info->index_size) {
       PLBU_CMD_INDEXED_DEST(gl_position_va);
+      if (vs->point_size_idx != -1) {
+         uint32_t gl_point_size_va =
+            lima_ctx_buff_va(ctx, lima_ctx_buff_sh_gl_point_size,
+                             LIMA_CTX_BUFF_SUBMIT_GP |
+                             LIMA_CTX_BUFF_SUBMIT_PP);
+         PLBU_CMD_INDEXED_PT_SIZE(gl_point_size_va);
+      }
 
       struct pipe_resource *indexbuf = NULL;
       unsigned index_offset = 0;
@@ -1074,7 +1090,9 @@ lima_pack_render_state(struct lima_context *ctx, const struct pipe_draw_info *in
 
    /* more investigation */
    render->aux0 = 0x00000300 | (ctx->vs->varying_stride >> 3);
-   render->aux1 = 0x00003000;
+   render->aux1 = 0x00001000;
+   if (ctx->blend->base.dither)
+      render->aux1 |= 0x00002000;
 
    if (ctx->tex_stateobj.num_samplers) {
       render->textures_address =
@@ -1086,17 +1104,28 @@ lima_pack_render_state(struct lima_context *ctx, const struct pipe_draw_info *in
    if (ctx->const_buffer[PIPE_SHADER_FRAGMENT].buffer) {
       render->uniforms_address =
          lima_ctx_buff_va(ctx, lima_ctx_buff_pp_uniform_array, LIMA_CTX_BUFF_SUBMIT_PP);
-      render->uniforms_address |= ((ctx->buffer_state[lima_ctx_buff_pp_uniform].size) / 4 - 1);
+      uint32_t size = ctx->buffer_state[lima_ctx_buff_pp_uniform].size;
+      uint32_t bits = 0;
+      if (size >= 8) {
+         bits = util_last_bit(size >> 3) - 1;
+         bits += size & u_bit_consecutive(0, bits + 3) ? 1 : 0;
+      }
+      render->uniforms_address |= bits > 0xf ? 0xf : bits;
+
       render->aux0 |= 0x80;
       render->aux1 |= 0x10000;
    }
 
-   if (ctx->vs->num_varying > 1) {
+   if (ctx->vs->num_varyings) {
       render->varying_types = 0x00000000;
       render->varyings_address =
          lima_ctx_buff_va(ctx, lima_ctx_buff_sh_varying, LIMA_CTX_BUFF_SUBMIT_PP);
-      for (int i = 1; i < ctx->vs->num_varying; i++) {
+      for (int i = 0, index = 0; i < ctx->vs->num_outputs; i++) {
          int val;
+
+         if (i == ctx->vs->gl_pos_idx ||
+             i == ctx->vs->point_size_idx)
+            continue;
 
          struct lima_varying_info *v = ctx->vs->varying + i;
          if (v->component_size == 4)
@@ -1104,7 +1133,6 @@ lima_pack_render_state(struct lima_context *ctx, const struct pipe_draw_info *in
          else
             val = v->components > 2 ? 2 : 3;
 
-         int index = i - 1;
          if (index < 10)
             render->varying_types |= val << (3 * index);
          else if (index == 10) {
@@ -1113,6 +1141,8 @@ lima_pack_render_state(struct lima_context *ctx, const struct pipe_draw_info *in
          }
          else if (index == 11)
             render->varyings_address |= val << 1;
+
+         index++;
       }
    }
    else {
@@ -1133,7 +1163,7 @@ lima_update_gp_attribute_info(struct lima_context *ctx, const struct pipe_draw_i
 
    uint32_t *attribute =
       lima_ctx_buff_alloc(ctx, lima_ctx_buff_gp_attribute_info,
-                          ve->num_elements * 8, true);
+                          MAX2(1, ve->num_elements) * 8, true);
 
    int n = 0;
    for (int i = 0; i < ve->num_elements; i++) {
@@ -1147,7 +1177,7 @@ lima_update_gp_attribute_info(struct lima_context *ctx, const struct pipe_draw_i
 
       lima_submit_add_bo(ctx->gp_submit, res->bo, LIMA_SUBMIT_BO_READ);
 
-      unsigned start = info->index_size ? ctx->min_index : info->start;
+      unsigned start = info->index_size ? (ctx->min_index + info->index_bias) : info->start;
       attribute[n++] = res->bo->va + pvb->buffer_offset + pve->src_offset
          + start * pvb->stride;
       attribute[n++] = (pvb->stride << 11) |
@@ -1227,7 +1257,7 @@ lima_update_varying(struct lima_context *ctx, const struct pipe_draw_info *info)
 
    uint32_t *varying =
       lima_ctx_buff_alloc(ctx, lima_ctx_buff_gp_varying_info,
-                          vs->num_varying * 8, true);
+                          vs->num_outputs * 8, true);
    int n = 0;
 
    /* should be LIMA_SUBMIT_BO_WRITE for GP, but each draw will use
@@ -1235,15 +1265,15 @@ lima_update_varying(struct lima_context *ctx, const struct pipe_draw_info *info)
    lima_ctx_buff_alloc(ctx, lima_ctx_buff_sh_gl_pos,
                        4 * 4 * info->count, false);
 
-   /* for gl_Position */
-   varying[n++] =
-      lima_ctx_buff_va(ctx, lima_ctx_buff_sh_gl_pos,
-                       LIMA_CTX_BUFF_SUBMIT_GP | LIMA_CTX_BUFF_SUBMIT_PP);
-   varying[n++] = 0x8020;
-
    int offset = 0;
-   for (int i = 1; i < vs->num_varying; i++) {
+
+   for (int i = 0; i < vs->num_outputs; i++) {
       struct lima_varying_info *v = vs->varying + i;
+
+      if (i == vs->gl_pos_idx ||
+          i == vs->point_size_idx)
+         continue;
+
       int size = v->component_size * 4;
 
       /* does component_size == 2 need to be 16 aligned? */
@@ -1253,19 +1283,38 @@ lima_update_varying(struct lima_context *ctx, const struct pipe_draw_info *info)
       v->offset = offset;
       offset += size;
    }
+
    vs->varying_stride = align(offset, 16);
 
-   if (vs->num_varying > 1)
+   if (vs->num_varyings)
       lima_ctx_buff_alloc(ctx, lima_ctx_buff_sh_varying,
                           vs->varying_stride * info->count, false);
 
-   for (int i = 1; i < vs->num_varying; i++) {
+   for (int i = 0; i < vs->num_outputs; i++) {
       struct lima_varying_info *v = vs->varying + i;
-      varying[n++] =
-         lima_ctx_buff_va(ctx, lima_ctx_buff_sh_varying, LIMA_CTX_BUFF_SUBMIT_GP) +
-         v->offset;
-      varying[n++] = (vs->varying_stride << 11) | (v->components - 1) |
-         (v->component_size == 2 ? 0x0C : 0);
+
+      if (i == vs->gl_pos_idx) {
+         /* gl_Position */
+         varying[n++] =
+            lima_ctx_buff_va(ctx, lima_ctx_buff_sh_gl_pos,
+                             LIMA_CTX_BUFF_SUBMIT_GP | LIMA_CTX_BUFF_SUBMIT_PP);
+         varying[n++] = 0x8020;
+      } else if (i == vs->point_size_idx) {
+         /* gl_PointSize */
+         lima_ctx_buff_alloc(ctx, lima_ctx_buff_sh_gl_point_size,
+                             4 * info->count, false);
+         varying[n++] =
+            lima_ctx_buff_va(ctx, lima_ctx_buff_sh_gl_point_size,
+                             LIMA_CTX_BUFF_SUBMIT_GP | LIMA_CTX_BUFF_SUBMIT_PP);
+         varying[n++] = 0x2021;
+      } else {
+         /* Varying */
+         varying[n++] =
+            lima_ctx_buff_va(ctx, lima_ctx_buff_sh_varying, LIMA_CTX_BUFF_SUBMIT_GP) +
+            v->offset;
+         varying[n++] = (vs->varying_stride << 11) | (v->components - 1) |
+            (v->component_size == 2 ? 0x0C : 0);
+      }
    }
 
    lima_dump_command_stream_print(
@@ -1386,12 +1435,13 @@ lima_pack_wb_cbuf_reg(struct lima_context *ctx, uint32_t *wb_reg, int wb_idx)
    struct lima_context_framebuffer *fb = &ctx->framebuffer;
    struct lima_resource *res = lima_resource(fb->base.cbufs[0]->texture);
    int level = fb->base.cbufs[0]->u.tex.level;
+   unsigned layer = fb->base.cbufs[0]->u.tex.first_layer;
    uint32_t format = lima_format_get_pixel(fb->base.cbufs[0]->format);
    bool swap_channels = lima_format_get_swap_rb(fb->base.cbufs[0]->format);
 
    struct lima_pp_wb_reg *wb = (void *)wb_reg;
    wb[wb_idx].type = 0x02; /* 2 for color buffer */
-   wb[wb_idx].address = res->bo->va + res->levels[level].offset;
+   wb[wb_idx].address = res->bo->va + res->levels[level].offset + layer * res->levels[level].layer_stride;
    wb[wb_idx].pixel_format = format;
    if (res->tiled) {
       wb[wb_idx].pixel_layout = 0x2;
@@ -1431,8 +1481,7 @@ lima_pack_pp_frame_reg(struct lima_context *ctx, uint32_t *frame_reg,
 
    /* These are "stack size" and "stack offset" shifted,
     * here they are assumed to be always the same. */
-   uint32_t fs_stack_size = ctx->fs ? ctx->fs->stack_size : 0;
-   frame->fragment_stack_size = fs_stack_size << 16 | fs_stack_size;
+   frame->fragment_stack_size = ctx->pp_max_stack_size << 16 | ctx->pp_max_stack_size;
 
    /* related with MSAA and different value when r4p0/r7p0 */
    frame->supersampled_height = fb->base.height * 2 - 1;
@@ -1476,6 +1525,7 @@ _lima_flush(struct lima_context *ctx, bool end_of_frame)
 
       lima_dump_command_stream_print(
          vs_cmd, vs_cmd_size, false, "flush vs cmd at va %x\n", vs_cmd_va);
+      lima_dump_vs_command_stream_print(vs_cmd, vs_cmd_size, vs_cmd_va);
    }
 
    void *plbu_cmd =
@@ -1487,6 +1537,7 @@ _lima_flush(struct lima_context *ctx, bool end_of_frame)
 
    lima_dump_command_stream_print(
       plbu_cmd, plbu_cmd_size, false, "flush plbu cmd at va %x\n", plbu_cmd_va);
+   lima_dump_plbu_command_stream_print(plbu_cmd, plbu_cmd_size, plbu_cmd_va);
 
    struct lima_screen *screen = lima_screen(ctx->base.screen);
    struct drm_lima_gp_frame gp_frame;

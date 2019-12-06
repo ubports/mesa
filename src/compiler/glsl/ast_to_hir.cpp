@@ -5195,7 +5195,8 @@ ast_declarator_list::hir(exec_list *instructions,
       apply_layout_qualifier_to_variable(&this->type->qualifier, var, state,
                                          &loc);
 
-      if ((var->data.mode == ir_var_auto || var->data.mode == ir_var_temporary)
+      if ((var->data.mode == ir_var_auto || var->data.mode == ir_var_temporary
+           || var->data.mode == ir_var_shader_out)
           && (var->type->is_numeric() || var->type->is_boolean())
           && state->zero_init) {
          const ir_constant_data data = { { 0 } };
@@ -6460,6 +6461,25 @@ ast_jump_statement::hir(exec_list *instructions,
 
    /* Jump instructions do not have r-values.
     */
+   return NULL;
+}
+
+
+ir_rvalue *
+ast_demote_statement::hir(exec_list *instructions,
+                          struct _mesa_glsl_parse_state *state)
+{
+   void *ctx = state;
+
+   if (state->stage != MESA_SHADER_FRAGMENT) {
+      YYLTYPE loc = this->get_location();
+
+      _mesa_glsl_error(& loc, state,
+                       "`demote' may only appear in a fragment shader");
+   }
+
+   instructions->push_tail(new(ctx) ir_demote);
+
    return NULL;
 }
 

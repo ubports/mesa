@@ -108,20 +108,25 @@ etna_set_constant_buffer(struct pipe_context *pctx,
 }
 
 static void
-etna_update_render_resource(struct pipe_context *pctx, struct pipe_resource *pres)
+etna_update_render_resource(struct pipe_context *pctx, struct etna_resource *base)
 {
-   struct etna_resource *res = etna_resource(pres);
+   struct etna_resource *to = base, *from = base;
 
-   if (res->texture && etna_resource_older(res, etna_resource(res->texture))) {
-      /* The render buffer is older than the texture buffer. Copy it over. */
-      etna_copy_resource(pctx, pres, res->texture, 0, pres->last_level);
-      res->seqno = etna_resource(res->texture)->seqno;
+   if (base->texture && etna_resource_newer(etna_resource(base->texture), base))
+      from = etna_resource(base->texture);
+
+   if (base->render)
+      to = etna_resource(base->render);
+
+   if ((to != from) && etna_resource_older(to, from)) {
+      etna_copy_resource(pctx, &to->base, &from->base, 0, base->base.last_level);
+      to->seqno = from->seqno;
    }
 }
 
 static void
 etna_set_framebuffer_state(struct pipe_context *pctx,
-      const struct pipe_framebuffer_state *sv)
+      const struct pipe_framebuffer_state *fb)
 {
    struct etna_context *ctx = etna_context(pctx);
    struct compiled_framebuffer_state *cs = &ctx->framebuffer;
@@ -132,16 +137,22 @@ etna_set_framebuffer_state(struct pipe_context *pctx,
    uint32_t ts_mem_config = 0;
    uint32_t pe_mem_config = 0;
 
-   if (sv->nr_cbufs > 0) { /* at least one color buffer? */
-      struct etna_surface *cbuf = etna_surface(sv->cbufs[0]);
+   if (fb->nr_cbufs > 0) { /* at least one color buffer? */
+      struct etna_surface *cbuf = etna_surface(fb->cbufs[0]);
       struct etna_resource *res = etna_resource(cbuf->base.texture);
       bool color_supertiled = (res->layout & ETNA_LAYOUT_BIT_SUPER) != 0;
+      uint32_t fmt = translate_pe_format(cbuf->base.format);
 
       assert(res->layout & ETNA_LAYOUT_BIT_TILE); /* Cannot render to linear surfaces */
-      etna_update_render_resource(pctx, cbuf->base.texture);
+      etna_update_render_resource(pctx, etna_resource(cbuf->prsc));
 
-      cs->PE_COLOR_FORMAT =
-         VIVS_PE_COLOR_FORMAT_FORMAT(translate_rs_format(cbuf->base.format)) |
+      if (fmt >= PE_FORMAT_R16F)
+          cs->PE_COLOR_FORMAT = VIVS_PE_COLOR_FORMAT_FORMAT_EXT(fmt) |
+                                VIVS_PE_COLOR_FORMAT_FORMAT_MASK;
+      else
+          cs->PE_COLOR_FORMAT = VIVS_PE_COLOR_FORMAT_FORMAT(fmt);
+
+      cs->PE_COLOR_FORMAT |=
          VIVS_PE_COLOR_FORMAT_COMPONENTS__MASK |
          VIVS_PE_COLOR_FORMAT_OVERWRITE |
          COND(color_supertiled, VIVS_PE_COLOR_FORMAT_SUPER_TILED) |
@@ -176,6 +187,7 @@ etna_set_framebuffer_state(struct pipe_context *pctx,
 
       if (cbuf->surf.ts_size) {
          cs->TS_COLOR_CLEAR_VALUE = cbuf->level->clear_value;
+         cs->TS_COLOR_CLEAR_VALUE_EXT = cbuf->level->clear_value >> 32;
 
          cs->TS_COLOR_STATUS_BASE = cbuf->ts_reloc;
          cs->TS_COLOR_STATUS_BASE.flags = ETNA_RELOC_READ | ETNA_RELOC_WRITE;
@@ -211,11 +223,11 @@ etna_set_framebuffer_state(struct pipe_context *pctx,
          cs->PE_PIPE_COLOR_ADDR[i] = ctx->dummy_rt_reloc;
    }
 
-   if (sv->zsbuf != NULL) {
-      struct etna_surface *zsbuf = etna_surface(sv->zsbuf);
+   if (fb->zsbuf != NULL) {
+      struct etna_surface *zsbuf = etna_surface(fb->zsbuf);
       struct etna_resource *res = etna_resource(zsbuf->base.texture);
 
-      etna_update_render_resource(pctx, zsbuf->base.texture);
+      etna_update_render_resource(pctx, etna_resource(zsbuf->prsc));
 
       assert(res->layout &ETNA_LAYOUT_BIT_TILE); /* Cannot render to linear surfaces */
 
@@ -228,6 +240,7 @@ etna_set_framebuffer_state(struct pipe_context *pctx,
          depth_format |
          COND(depth_supertiled, VIVS_PE_DEPTH_CONFIG_SUPER_TILED) |
          VIVS_PE_DEPTH_CONFIG_DEPTH_MODE_Z |
+         VIVS_PE_DEPTH_CONFIG_UNK18 | /* something to do with clipping? */
          COND(ctx->specs.halti >= 5, VIVS_PE_DEPTH_CONFIG_DISABLE_ZS) /* Needs to be enabled on GC7000, otherwise depth writes hang w/ TS - apparently it does something else now */
          ;
       /* VIVS_PE_DEPTH_CONFIG_ONLY_DEPTH */
@@ -329,10 +342,10 @@ etna_set_framebuffer_state(struct pipe_context *pctx,
    /* Scissor setup */
    cs->SE_SCISSOR_LEFT = 0; /* affected by rasterizer and scissor state as well */
    cs->SE_SCISSOR_TOP = 0;
-   cs->SE_SCISSOR_RIGHT = (sv->width << 16) + ETNA_SE_SCISSOR_MARGIN_RIGHT;
-   cs->SE_SCISSOR_BOTTOM = (sv->height << 16) + ETNA_SE_SCISSOR_MARGIN_BOTTOM;
-   cs->SE_CLIP_RIGHT = (sv->width << 16) + ETNA_SE_CLIP_MARGIN_RIGHT;
-   cs->SE_CLIP_BOTTOM = (sv->height << 16) + ETNA_SE_CLIP_MARGIN_BOTTOM;
+   cs->SE_SCISSOR_RIGHT = (fb->width << 16) + ETNA_SE_SCISSOR_MARGIN_RIGHT;
+   cs->SE_SCISSOR_BOTTOM = (fb->height << 16) + ETNA_SE_SCISSOR_MARGIN_BOTTOM;
+   cs->SE_CLIP_RIGHT = (fb->width << 16) + ETNA_SE_CLIP_MARGIN_RIGHT;
+   cs->SE_CLIP_BOTTOM = (fb->height << 16) + ETNA_SE_CLIP_MARGIN_BOTTOM;
 
    cs->TS_MEM_CONFIG = ts_mem_config;
    cs->PE_MEM_CONFIG = pe_mem_config;
@@ -344,7 +357,7 @@ etna_set_framebuffer_state(struct pipe_context *pctx,
    cs->PE_LOGIC_OP = VIVS_PE_LOGIC_OP_SINGLE_BUFFER(ctx->specs.single_buffer ? 3 : 0);
 
    /* keep copy of original structure */
-   util_copy_framebuffer_state(&ctx->framebuffer_s, sv);
+   util_copy_framebuffer_state(&ctx->framebuffer_s, fb);
    ctx->dirty |= ETNA_DIRTY_FRAMEBUFFER | ETNA_DIRTY_DERIVE_TS;
 }
 
@@ -584,7 +597,11 @@ etna_vertex_elements_state_create(struct pipe_context *pctx,
             COND(nonconsecutive, VIVS_NFE_GENERIC_ATTRIB_CONFIG1_NONCONSECUTIVE) |
             VIVS_NFE_GENERIC_ATTRIB_CONFIG1_END(end_offset - start_offset);
       }
-      cs->NFE_GENERIC_ATTRIB_SCALE[idx] = 0x3f800000; /* 1 for integer, 1.0 for float */
+
+      if (util_format_is_pure_integer(elements[idx].src_format))
+         cs->NFE_GENERIC_ATTRIB_SCALE[idx] = 1;
+      else
+         cs->NFE_GENERIC_ATTRIB_SCALE[idx] = fui(1.0f);
    }
 
    return cs;

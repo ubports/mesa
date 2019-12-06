@@ -31,6 +31,36 @@
 #include "pan_allocate.h"
 #include "pan_resource.h"
 
+/* panfrost_batch_fence is the out fence of a batch that users or other batches
+ * might want to wait on. The batch fence lifetime is different from the batch
+ * one as want will certainly want to wait upon the fence after the batch has
+ * been submitted (which is when panfrost_batch objects are freed).
+ */
+struct panfrost_batch_fence {
+        /* Refcounting object for the fence. */
+        struct pipe_reference reference;
+
+        /* Batch that created this fence object. Will become NULL at batch
+         * submission time. This field is mainly here to know whether the
+         * batch has been flushed or not.
+         */
+        struct panfrost_batch *batch;
+
+        /* Context this fence is attached to. We need both ctx and batch, as
+         * the batch will go away after it's been submitted, but the fence
+         * will stay a bit longer.
+         */
+        struct panfrost_context *ctx;
+
+        /* Sync object backing this fence. */
+        uint32_t syncobj;
+
+        /* Cached value of the signaled state to avoid calling WAIT_SYNCOBJs
+         * when we know the fence has already been signaled.
+         */
+        bool signaled;
+};
+
 #define PAN_REQ_MSAA            (1 << 0)
 #define PAN_REQ_DEPTH_WRITE     (1 << 1)
 
@@ -98,7 +128,7 @@ struct panfrost_batch {
         unsigned job_index;
 
         /* BOs referenced -- will be used for flushing logic */
-        struct set *bos;
+        struct hash_table *bos;
 
         /* Current transient BO */
 	struct panfrost_bo *transient_bo;
@@ -120,27 +150,51 @@ struct panfrost_batch {
 
         /* Framebuffer descriptor. */
         mali_ptr framebuffer;
+
+        /* Output sync object. Only valid when submitted is true. */
+        struct panfrost_batch_fence *out_sync;
+
+        /* Batch dependencies */
+        struct util_dynarray dependencies;
 };
 
 /* Functions for managing the above */
 
+void
+panfrost_batch_fence_unreference(struct panfrost_batch_fence *fence);
+
+void
+panfrost_batch_fence_reference(struct panfrost_batch_fence *batch);
+
 struct panfrost_batch *
 panfrost_get_batch_for_fbo(struct panfrost_context *ctx);
+
+struct panfrost_batch *
+panfrost_get_fresh_batch_for_fbo(struct panfrost_context *ctx);
 
 void
 panfrost_batch_init(struct panfrost_context *ctx);
 
 void
-panfrost_batch_add_bo(struct panfrost_batch *batch, struct panfrost_bo *bo);
+panfrost_batch_add_bo(struct panfrost_batch *batch, struct panfrost_bo *bo,
+                      uint32_t flags);
 
 void panfrost_batch_add_fbo_bos(struct panfrost_batch *batch);
 
 struct panfrost_bo *
 panfrost_batch_create_bo(struct panfrost_batch *batch, size_t size,
-                         uint32_t create_flags);
+                         uint32_t create_flags, uint32_t access_flags);
 
 void
-panfrost_batch_submit(struct panfrost_batch *batch);
+panfrost_flush_all_batches(struct panfrost_context *ctx, bool wait);
+
+bool
+panfrost_pending_batches_access_bo(struct panfrost_context *ctx,
+                                   const struct panfrost_bo *bo);
+
+void
+panfrost_flush_batches_accessing_bo(struct panfrost_context *ctx,
+                                    struct panfrost_bo *bo, uint32_t flags);
 
 void
 panfrost_batch_set_requirements(struct panfrost_batch *batch);

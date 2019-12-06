@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2019 Collabora, Ltd.
+ * Copyright (C) 2019 Red Hat Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -27,6 +28,7 @@
 
 #include "pan_context.h"
 #include "util/u_memory.h"
+#include "nir_serialize.h"
 
 /* Compute CSOs are tracked like graphics shader CSOs, but are
  * considerably simpler. We do not implement multiple
@@ -51,11 +53,18 @@ panfrost_create_compute_state(
 
         v->tripipe = malloc(sizeof(struct mali_shader_meta));
 
+        if (cso->ir_type == PIPE_SHADER_IR_NIR_SERIALIZED) {
+                struct blob_reader reader;
+                const struct pipe_binary_program_header *hdr = cso->prog;
+
+                blob_reader_init(&reader, hdr->blob, hdr->num_bytes);
+                so->cbase.prog = nir_deserialize(NULL, &midgard_nir_options, &reader);
+                so->cbase.ir_type = PIPE_SHADER_IR_NIR;
+        }
+
         panfrost_shader_compile(ctx, v->tripipe,
-                        cso->ir_type, cso->prog,
+                        so->cbase.ir_type, so->cbase.prog,
                         MESA_SHADER_COMPUTE, v, NULL);
-
-
 
         return so;
 }
@@ -101,6 +110,19 @@ panfrost_launch_grid(struct pipe_context *pipe,
         /* TODO: Stub */
         struct midgard_payload_vertex_tiler *payload = &ctx->payloads[PIPE_SHADER_COMPUTE];
 
+        /* We implement OpenCL inputs as uniforms (or a UBO -- same thing), so
+         * reuse the graphics path for this by lowering to Gallium */
+
+        struct pipe_constant_buffer ubuf = {
+                .buffer = NULL,
+                .buffer_offset = 0,
+                .buffer_size = ctx->shader[PIPE_SHADER_COMPUTE]->cbase.req_input_mem,
+                .user_buffer = info->input
+        };
+
+        if (info->input)
+                pipe->set_constant_buffer(pipe, PIPE_SHADER_COMPUTE, 0, &ubuf);
+
         panfrost_emit_for_draw(ctx, false);
 
         /* Compute jobs have a "compute FBD". It's not a real framebuffer
@@ -133,7 +155,30 @@ panfrost_launch_grid(struct pipe_context *pipe,
         /* Queue the job */
         panfrost_scoreboard_queue_compute_job(batch, transfer);
 
-        panfrost_flush(pipe, NULL, PIPE_FLUSH_END_OF_FRAME);
+        panfrost_flush_all_batches(ctx, true);
+}
+
+static void
+panfrost_set_compute_resources(struct pipe_context *pctx,
+                         unsigned start, unsigned count,
+                         struct pipe_surface **resources)
+{
+        /* TODO */
+}
+
+static void
+panfrost_set_global_binding(struct pipe_context *pctx,
+                      unsigned first, unsigned count,
+                      struct pipe_resource **resources,
+                      uint32_t **handles)
+{
+        /* TODO */
+}
+
+static void
+panfrost_memory_barrier(struct pipe_context *pctx, unsigned flags)
+{
+        /* TODO */
 }
 
 void
@@ -144,6 +189,9 @@ panfrost_compute_context_init(struct pipe_context *pctx)
         pctx->delete_compute_state = panfrost_delete_compute_state;
 
         pctx->launch_grid = panfrost_launch_grid;
+
+        pctx->set_compute_resources = panfrost_set_compute_resources;
+        pctx->set_global_binding = panfrost_set_global_binding;
+
+        pctx->memory_barrier = panfrost_memory_barrier;
 }
-
-

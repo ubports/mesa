@@ -51,6 +51,7 @@
 #include <time.h>
 
 #include "errno.h"
+#include "common/gen_aux_map.h"
 #include "common/gen_clflush.h"
 #include "dev/gen_debug.h"
 #include "common/gen_gem.h"
@@ -146,6 +147,8 @@ struct iris_bufmgr {
 
    bool has_llc:1;
    bool bo_reuse:1;
+
+   struct gen_aux_map_context *aux_map_ctx;
 };
 
 static int bo_set_tiling_internal(struct iris_bo *bo, uint32_t tiling_mode,
@@ -391,6 +394,20 @@ alloc_bo_from_cache(struct iris_bufmgr *bufmgr,
 
    if (!bo)
       return NULL;
+
+   if (bo->aux_map_address) {
+      /* This buffer was associated with an aux-buffer range. We make sure
+       * that buffers are not reused from the cache while the buffer is (busy)
+       * being used by an executing batch. Since we are here, the buffer is no
+       * longer being used by a batch and the buffer was deleted (in order to
+       * end up in the cache). Therefore its old aux-buffer range can be
+       * removed from the aux-map.
+       */
+      if (bo->bufmgr->aux_map_ctx)
+         gen_aux_map_unmap_range(bo->bufmgr->aux_map_ctx, bo->gtt_offset,
+                                 bo->size);
+      bo->aux_map_address = 0;
+   }
 
    /* If the cached BO isn't in the right memory zone, or the alignment
     * isn't sufficient, free the old memory and assign it a new address.
@@ -725,6 +742,11 @@ bo_close(struct iris_bo *bo)
    if (ret != 0) {
       DBG("DRM_IOCTL_GEM_CLOSE %d failed (%s): %s\n",
           bo->gem_handle, bo->name, strerror(errno));
+   }
+
+   if (bo->aux_map_address && bo->bufmgr->aux_map_ctx) {
+      gen_aux_map_unmap_range(bo->bufmgr->aux_map_ctx, bo->gtt_offset,
+                              bo->size);
    }
 
    /* Return the VMA for reuse */
@@ -1193,6 +1215,12 @@ iris_bo_wait(struct iris_bo *bo, int64_t timeout_ns)
 void
 iris_bufmgr_destroy(struct iris_bufmgr *bufmgr)
 {
+   /* Free aux-map buffers */
+   gen_aux_map_finish(bufmgr->aux_map_ctx);
+
+   /* bufmgr will no longer try to free VMA entries in the aux-map */
+   bufmgr->aux_map_ctx = NULL;
+
    mtx_destroy(&bufmgr->lock);
 
    /* Free any cached buffer objects we were going to reuse */
@@ -1266,7 +1294,8 @@ iris_bo_get_tiling(struct iris_bo *bo, uint32_t *tiling_mode,
 }
 
 struct iris_bo *
-iris_bo_import_dmabuf(struct iris_bufmgr *bufmgr, int prime_fd)
+iris_bo_import_dmabuf(struct iris_bufmgr *bufmgr, int prime_fd,
+                      uint32_t tiling, uint32_t stride)
 {
    uint32_t handle;
    struct iris_bo *bo;
@@ -1317,9 +1346,15 @@ iris_bo_import_dmabuf(struct iris_bufmgr *bufmgr, int prime_fd)
    if (gen_ioctl(bufmgr->fd, DRM_IOCTL_I915_GEM_GET_TILING, &get_tiling))
       goto err;
 
-   bo->tiling_mode = get_tiling.tiling_mode;
-   bo->swizzle_mode = get_tiling.swizzle_mode;
-   /* XXX stride is unknown */
+   if (get_tiling.tiling_mode == tiling || tiling > I915_TILING_LAST) {
+      bo->tiling_mode = get_tiling.tiling_mode;
+      bo->swizzle_mode = get_tiling.swizzle_mode;
+       /* XXX stride is unknown */
+   } else {
+      if (bo_set_tiling_internal(bo, tiling, stride)) {
+         goto err;
+      }
+   }
 
 out:
    mtx_unlock(&bufmgr->lock);
@@ -1560,6 +1595,38 @@ iris_gtt_size(int fd)
    return 0;
 }
 
+static struct gen_buffer *
+gen_aux_map_buffer_alloc(void *driver_ctx, uint32_t size)
+{
+   struct gen_buffer *buf = malloc(sizeof(struct gen_buffer));
+   if (!buf)
+      return NULL;
+
+   struct iris_bufmgr *bufmgr = (struct iris_bufmgr *)driver_ctx;
+
+   struct iris_bo *bo =
+      iris_bo_alloc_tiled(bufmgr, "aux-map", size, 64 * 1024,
+                          IRIS_MEMZONE_OTHER, I915_TILING_NONE, 0, 0);
+
+   buf->driver_bo = bo;
+   buf->gpu = bo->gtt_offset;
+   buf->gpu_end = buf->gpu + bo->size;
+   buf->map = iris_bo_map(NULL, bo, MAP_WRITE | MAP_RAW);
+   return buf;
+}
+
+static void
+gen_aux_map_buffer_free(void *driver_ctx, struct gen_buffer *buffer)
+{
+   iris_bo_unreference((struct iris_bo*)buffer->driver_bo);
+   free(buffer);
+}
+
+static struct gen_mapped_pinned_buffer_alloc aux_map_allocator = {
+   .alloc = gen_aux_map_buffer_alloc,
+   .free = gen_aux_map_buffer_free,
+};
+
 /**
  * Initializes the GEM buffer manager, which uses the kernel to allocate, map,
  * and manage map buffer objections.
@@ -1600,6 +1667,7 @@ iris_bufmgr_init(struct gen_device_info *devinfo, int fd, bool bo_reuse)
 
    STATIC_ASSERT(IRIS_MEMZONE_SHADER_START == 0ull);
    const uint64_t _4GB = 1ull << 32;
+   const uint64_t _2GB = 1ul << 31;
 
    /* The STATE_BASE_ADDRESS size field can only hold 1 page shy of 4GB */
    const uint64_t _4GB_minus_1 = _4GB - PAGE_SIZE;
@@ -1609,9 +1677,16 @@ iris_bufmgr_init(struct gen_device_info *devinfo, int fd, bool bo_reuse)
    util_vma_heap_init(&bufmgr->vma_allocator[IRIS_MEMZONE_SURFACE],
                       IRIS_MEMZONE_SURFACE_START,
                       _4GB_minus_1 - IRIS_MAX_BINDERS * IRIS_BINDER_SIZE);
+   /* TODO: Why does limiting to 2GB help some state items on gen12?
+    *  - CC Viewport Pointer
+    *  - Blend State Pointer
+    *  - Color Calc State Pointer
+    */
+   const uint64_t dynamic_pool_size =
+      (devinfo->gen >= 12 ? _2GB : _4GB_minus_1) - IRIS_BORDER_COLOR_POOL_SIZE;
    util_vma_heap_init(&bufmgr->vma_allocator[IRIS_MEMZONE_DYNAMIC],
                       IRIS_MEMZONE_DYNAMIC_START + IRIS_BORDER_COLOR_POOL_SIZE,
-                      _4GB_minus_1 - IRIS_BORDER_COLOR_POOL_SIZE);
+                      dynamic_pool_size);
 
    /* Leave the last 4GB out of the high vma range, so that no state
     * base address + size can overflow 48 bits.
@@ -1627,5 +1702,17 @@ iris_bufmgr_init(struct gen_device_info *devinfo, int fd, bool bo_reuse)
    bufmgr->handle_table =
       _mesa_hash_table_create(NULL, key_hash_uint, key_uint_equal);
 
+   if (devinfo->gen >= 12) {
+      bufmgr->aux_map_ctx = gen_aux_map_init(bufmgr, &aux_map_allocator,
+                                             devinfo);
+      assert(bufmgr->aux_map_ctx);
+   }
+
    return bufmgr;
+}
+
+void*
+iris_bufmgr_get_aux_map_context(struct iris_bufmgr *bufmgr)
+{
+   return bufmgr->aux_map_ctx;
 }

@@ -119,6 +119,12 @@ struct brw_compiler {
     * whether nir_opt_large_constants will be run.
     */
    bool supports_shader_constants;
+
+   /**
+    * Whether or not the driver wants uniform params to be compacted by the
+    * back-end compiler.
+    */
+   bool compact_params;
 };
 
 /**
@@ -1461,7 +1467,7 @@ brw_stage_has_packed_dispatch(ASSERTED const struct gen_device_info *devinfo,
     * to do a full test run with brw_fs_test_dispatch_packing() hooked up to
     * the NIR front-end before changing this assertion.
     */
-   assert(devinfo->gen <= 11);
+   assert(devinfo->gen <= 12);
 
    switch (stage) {
    case MESA_SHADER_FRAGMENT: {

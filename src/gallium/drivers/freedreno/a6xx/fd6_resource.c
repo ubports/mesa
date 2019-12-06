@@ -73,23 +73,23 @@ setup_slices(struct fd_resource *rsc, uint32_t alignment, enum pipe_format forma
 	/* in layer_first layout, the level (slice) contains just one
 	 * layer (since in fact the layer contains the slices)
 	 */
-	uint32_t layers_in_level = rsc->layer_first ? 1 : prsc->array_size;
-	int ta = rsc->cpp;
+	uint32_t layers_in_level = rsc->layout.layer_first ? 1 : prsc->array_size;
+	int ta = rsc->layout.cpp;
 
 	/* The z16/r16 formats seem to not play by the normal tiling rules: */
-	if ((rsc->cpp == 2) && (util_format_get_nr_components(format) == 1))
+	if ((rsc->layout.cpp == 2) && (util_format_get_nr_components(format) == 1))
 		ta = 0;
 
 	debug_assert(ta < ARRAY_SIZE(tile_alignment));
 	debug_assert(tile_alignment[ta].pitchalign);
 
 	for (level = 0; level <= prsc->last_level; level++) {
-		struct fd_resource_slice *slice = fd_resource_slice(rsc, level);
-		bool linear_level = fd_resource_level_linear(prsc, level);
+		struct fdl_slice *slice = fd_resource_slice(rsc, level);
+		uint32_t tile_mode = fd_resource_tile_mode(prsc, level);
 		uint32_t width, height;
 
 		/* tiled levels of 3D textures are rounded up to PoT dimensions: */
-		if ((prsc->target == PIPE_TEXTURE_3D) && rsc->tile_mode && !linear_level) {
+		if ((prsc->target == PIPE_TEXTURE_3D) && tile_mode) {
 			width = twidth;
 			height = theight;
 		} else {
@@ -99,7 +99,7 @@ setup_slices(struct fd_resource *rsc, uint32_t alignment, enum pipe_format forma
 		uint32_t aligned_height = height;
 		uint32_t blocks;
 
-		if (rsc->tile_mode && !linear_level) {
+		if (tile_mode) {
 			pitchalign = tile_alignment[ta].pitchalign;
 			aligned_height = align(aligned_height,
 					tile_alignment[ta].heightalign);
@@ -133,24 +133,24 @@ setup_slices(struct fd_resource *rsc, uint32_t alignment, enum pipe_format forma
 		 * range gets into range, we stop reducing it.
 		 */
 		if (prsc->target == PIPE_TEXTURE_3D) {
-			if (level < 1 || (rsc->slices[level - 1].size0 > 0xf000)) {
-				slice->size0 = align(blocks * rsc->cpp, alignment);
+			if (level < 1 || fd_resource_slice(rsc, level - 1)->size0 > 0xf000) {
+				slice->size0 = align(blocks * rsc->layout.cpp, alignment);
 			} else {
-				slice->size0 = rsc->slices[level - 1].size0;
+				slice->size0 = fd_resource_slice(rsc, level - 1)->size0;
 			}
 		} else {
-			slice->size0 = align(blocks * rsc->cpp, alignment);
+			slice->size0 = align(blocks * rsc->layout.cpp, alignment);
 		}
 
 		size += slice->size0 * depth * layers_in_level;
 
 #if 0
-		debug_printf("%s: %ux%ux%u@%u:\t%2u: stride=%4u, size=%6u,%7u, aligned_height=%3u, blocks=%u, offset=0x%x\n",
+		fprintf(stderr, "%s: %ux%ux%u@%u:\t%2u: stride=%4u, size=%6u,%7u, aligned_height=%3u, blocks=%u, offset=0x%x tiling=%d\n",
 				util_format_name(prsc->format),
-				width, height, depth, rsc->cpp,
-				level, slice->pitch * rsc->cpp,
+				width, height, depth, rsc->layout.cpp,
+				level, slice->pitch * rsc->layout.cpp,
 				slice->size0, size, aligned_height, blocks,
-				slice->offset);
+				slice->offset, fd_resource_tile_mode(prsc, level));
 #endif
 
 		depth = u_minify(depth, 1);
@@ -206,8 +206,8 @@ ok_ubwc_format(enum pipe_format pfmt)
 	case RB6_R8G8_SINT:
 	case RB6_R8G8_UINT:
 	case RB6_R8G8_UNORM:
-	case RB6_X8Z24_UNORM:
 	case RB6_Z24_UNORM_S8_UINT:
+	case RB6_Z24_UNORM_S8_UINT_AS_R8G8B8A8:
 		return true;
 	default:
 		return false;
@@ -233,7 +233,7 @@ fd6_fill_ubwc_buffer_sizes(struct fd_resource *rsc)
 		return 0;
 
 	uint32_t block_width, block_height;
-	switch (rsc->cpp) {
+	switch (rsc->layout.cpp) {
 	case 2:
 	case 4:
 		block_width = 16;
@@ -262,11 +262,11 @@ fd6_fill_ubwc_buffer_sizes(struct fd_resource *rsc)
 	 * because it is what the kernel expects for scanout.  For non-2D we
 	 * could just use a separate UBWC buffer..
 	 */
-	rsc->ubwc_offset = 0;
-	rsc->offset = meta_size;
-	rsc->ubwc_pitch = meta_stride;
-	rsc->ubwc_size = meta_size >> 2;   /* in dwords??? */
-	rsc->tile_mode = TILE6_3;
+	rsc->layout.ubwc_offset = 0;
+	rsc->layout.offset = meta_size;
+	rsc->layout.ubwc_pitch = meta_stride;
+	rsc->layout.ubwc_size = meta_size >> 2;   /* in dwords??? */
+	rsc->layout.tile_mode = TILE6_3;
 
 	return meta_size;
 }
@@ -280,7 +280,7 @@ void
 fd6_validate_format(struct fd_context *ctx, struct fd_resource *rsc,
 		enum pipe_format format)
 {
-	if (!rsc->ubwc_size)
+	if (!rsc->layout.ubwc_size)
 		return;
 
 	if (ok_ubwc_format(format))
@@ -296,11 +296,11 @@ fd6_setup_slices(struct fd_resource *rsc)
 
 	switch (rsc->base.target) {
 	case PIPE_TEXTURE_3D:
-		rsc->layer_first = false;
+		rsc->layout.layer_first = false;
 		alignment = 4096;
 		break;
 	default:
-		rsc->layer_first = true;
+		rsc->layout.layer_first = true;
 		alignment = 1;
 		break;
 	}

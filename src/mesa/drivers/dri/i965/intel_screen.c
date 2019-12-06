@@ -98,6 +98,7 @@ DRI_CONF_BEGIN
 
    DRI_CONF_SECTION_MISCELLANEOUS
       DRI_CONF_GLSL_ZERO_INIT("false")
+      DRI_CONF_VS_POSITION_ALWAYS_INVARIANT("false")
       DRI_CONF_ALLOW_RGB10_CONFIGS("false")
       DRI_CONF_ALLOW_RGB565_CONFIGS("true")
       DRI_CONF_ALLOW_FP16_CONFIGS("false")
@@ -764,9 +765,9 @@ intel_create_image_common(__DRIscreen *dri_screen,
       return NULL;
    }
 
-   struct isl_surf aux_surf;
+   struct isl_surf aux_surf = {0,};
    if (mod_info->aux_usage == ISL_AUX_USAGE_CCS_E) {
-      ok = isl_surf_get_ccs_surf(&screen->isl_dev, &surf, &aux_surf, 0);
+      ok = isl_surf_get_ccs_surf(&screen->isl_dev, &surf, &aux_surf, NULL, 0);
       if (!ok) {
          free(image);
          return NULL;
@@ -1185,8 +1186,8 @@ intel_create_image_from_fds_common(__DRIscreen *dri_screen,
          return NULL;
       }
 
-      struct isl_surf aux_surf;
-      ok = isl_surf_get_ccs_surf(&screen->isl_dev, &surf, &aux_surf,
+      struct isl_surf aux_surf = {0,};
+      ok = isl_surf_get_ccs_surf(&screen->isl_dev, &surf, &aux_surf, NULL,
                                  image->aux_pitch);
       if (!ok) {
          brw_bo_unreference(image->bo);
@@ -2798,7 +2799,10 @@ __DRIconfig **intelInitScreen2(__DRIscreen *dri_screen)
    screen->compiler->constant_buffer_0_is_relative = devinfo->gen < 8 ||
       !(screen->kernel_features & KERNEL_ALLOWS_CONTEXT_ISOLATION);
 
+   screen->compiler->glsl_compiler_options[MESA_SHADER_VERTEX].PositionAlwaysInvariant = driQueryOptionb(&screen->optionCache, "vs_position_always_invariant");
+
    screen->compiler->supports_pull_constants = true;
+   screen->compiler->compact_params = true;
 
    screen->has_exec_fence =
      intel_get_boolean(screen, I915_PARAM_HAS_EXEC_FENCE);

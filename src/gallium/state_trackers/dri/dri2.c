@@ -33,7 +33,7 @@
 #include "util/disk_cache.h"
 #include "util/u_memory.h"
 #include "util/u_inlines.h"
-#include "util/u_format.h"
+#include "util/format/u_format.h"
 #include "util/u_debug.h"
 #include "state_tracker/drm_driver.h"
 #include "state_tracker/st_cb_bufferobjects.h"
@@ -932,7 +932,7 @@ dri2_create_image_from_fd(__DRIscreen *_screen,
       whandles[i].stride = (unsigned)strides[index];
       whandles[i].offset = (unsigned)offsets[index];
       whandles[i].modifier = modifier;
-      whandles[i].plane = i;
+      whandles[i].plane = index;
    }
 
    img = dri2_create_image_from_winsys(_screen, width, height, map,
@@ -1886,8 +1886,6 @@ static void
 dri2_set_damage_region(__DRIdrawable *dPriv, unsigned int nrects, int *rects)
 {
    struct dri_drawable *drawable = dri_drawable(dPriv);
-   struct pipe_resource *resource = drawable->textures[ST_ATTACHMENT_BACK_LEFT];
-   struct pipe_screen *screen = resource->screen;
    struct pipe_box *boxes = NULL;
 
    if (nrects) {
@@ -1901,8 +1899,25 @@ dri2_set_damage_region(__DRIdrawable *dPriv, unsigned int nrects, int *rects)
       }
    }
 
-   screen->set_damage_region(screen, resource, nrects, boxes);
-   FREE(boxes);
+   FREE(drawable->damage_rects);
+   drawable->damage_rects = boxes;
+   drawable->num_damage_rects = nrects;
+
+   /* Only apply the damage region if the BACK_LEFT texture is up-to-date. */
+   if (drawable->texture_stamp == drawable->dPriv->lastStamp &&
+       (drawable->texture_mask & (1 << ST_ATTACHMENT_BACK_LEFT))) {
+      struct pipe_screen *screen = drawable->screen->base.screen;
+      struct pipe_resource *resource;
+
+      if (drawable->stvis.samples > 1)
+         resource = drawable->msaa_textures[ST_ATTACHMENT_BACK_LEFT];
+      else
+         resource = drawable->textures[ST_ATTACHMENT_BACK_LEFT];
+
+      screen->set_damage_region(screen, resource,
+                                drawable->num_damage_rects,
+                                drawable->damage_rects);
+   }
 }
 
 static __DRI2bufferDamageExtension dri2BufferDamageExtension = {
@@ -2064,8 +2079,7 @@ dri2_init_screen(__DRIscreen * sPriv)
    if (!pscreen)
        goto release_pipe;
 
-   screen->default_throttle_frames =
-      pscreen->get_param(pscreen, PIPE_CAP_MAX_FRAMES_IN_FLIGHT);
+   screen->throttle = pscreen->get_param(pscreen, PIPE_CAP_THROTTLE);
 
    if (pscreen->resource_create_with_modifiers)
       dri2ImageExtension.createImageWithModifiers =

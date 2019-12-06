@@ -22,6 +22,13 @@ clover_cpp_args = []
 clover_spirv_cpp_args = []
 clover_incs = [inc_include, inc_src, inc_gallium, inc_gallium_aux]
 
+# the CL header files declare attributes on the CL types. Compilers warn if
+# we use them as template arguments. Disable the warning as there isn't
+# anything we can do about it
+if cpp.has_argument('-Wno-ignored-attributes')
+   clover_cpp_args += '-Wno-ignored-attributes'
+endif
+
 if with_opencl_icd
   clover_cpp_args += '-DHAVE_CLOVER_ICD'
 endif
@@ -45,7 +52,9 @@ libclllvm = static_library(
   ),
   include_directories : clover_incs,
   cpp_args : [
-    clover_spirv_cpp_args, cpp_vis_args,
+    clover_cpp_args,
+    clover_spirv_cpp_args,
+    cpp_vis_args,
     '-DLIBCLC_INCLUDEDIR="@0@/"'.format(dep_clc.get_pkgconfig_variable('includedir')),
     '-DLIBCLC_LIBEXECDIR="@0@/"'.format(dep_clc.get_pkgconfig_variable('libexecdir')),
     '-DCLANG_RESOURCE_DIR="@0@"'.format(join_paths(
@@ -68,10 +77,10 @@ libclspirv = static_library(
 
 libclnir = static_library(
   'clnir',
-  [files('nir/invocation.cpp', 'nir/invocation.hpp'), nir_opcodes_h],
+  files('nir/invocation.cpp', 'nir/invocation.hpp'),
   include_directories : [clover_incs, inc_mesa],
+  dependencies : idep_nir,
   cpp_args : [clover_spirv_cpp_args, cpp_vis_args],
-  link_with : [libnir],
   override_options : clover_cpp_std,
 )
 

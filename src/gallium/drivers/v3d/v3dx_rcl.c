@@ -21,7 +21,7 @@
  * IN THE SOFTWARE.
  */
 
-#include "util/u_format.h"
+#include "util/format/u_format.h"
 #include "v3d_context.h"
 #include "v3d_tiling.h"
 #include "broadcom/common/v3d_macros.h"
@@ -793,21 +793,6 @@ v3dX(emit_rcl)(struct v3d_job *job)
                                 coords.row_number_in_supertiles = y;
                         }
                 }
-        }
-
-        if (job->tmu_dirty_rcl) {
-           cl_emit(&job->rcl, L1_CACHE_FLUSH_CONTROL, flush) {
-              flush.tmu_config_cache_clear = 0xf;
-              flush.tmu_data_cache_clear = 0xf;
-              flush.uniforms_cache_clear = 0xf;
-              flush.instruction_cache_clear = 0xf;
-           }
-
-           cl_emit(&job->rcl, L2T_CACHE_FLUSH_CONTROL, flush) {
-              flush.l2t_flush_mode = L2T_FLUSH_MODE_CLEAN;
-              flush.l2t_flush_start = cl_address(NULL, 0);
-              flush.l2t_flush_end = cl_address(NULL, ~0);
-           }
         }
 
         cl_emit(&job->rcl, END_OF_RENDERING, end);

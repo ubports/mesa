@@ -101,6 +101,7 @@ lima_program_optimize_vs_nir(struct nir_shader *s)
    bool progress;
 
    NIR_PASS_V(s, nir_lower_viewport_transform);
+   NIR_PASS_V(s, nir_lower_point_size, 1.0f, 100.0f);
    NIR_PASS_V(s, nir_lower_io, nir_var_all, type_size, 0);
    NIR_PASS_V(s, nir_lower_load_const_to_scalar);
    NIR_PASS_V(s, lima_nir_lower_uniform_to_scalar);
@@ -224,6 +225,7 @@ lima_program_optimize_fs_nir(struct nir_shader *s)
                nir_var_shader_in |
                nir_var_shader_out |
                nir_var_function_temp);
+      NIR_PASS(progress, s, lima_nir_split_load_input);
    } while (progress);
 
    NIR_PASS_V(s, nir_lower_int_to_float);
@@ -377,6 +379,8 @@ lima_create_vs_state(struct pipe_context *pctx,
       ralloc_free(so);
       return NULL;
    }
+
+   ralloc_free(nir);
 
    return so;
 }
