@@ -324,8 +324,6 @@ public:
          setFixed(PhysReg{246});
       else if (v == 0xc0800000) /* -4.0 */
          setFixed(PhysReg{247});
-      else if (v == 0x3e22f983) /* 1/(2*PI) */
-         setFixed(PhysReg{248});
       else /* Literal Constant */
          setFixed(PhysReg{255});
    };
@@ -353,8 +351,6 @@ public:
          setFixed(PhysReg{246});
       else if (v == 0xC010000000000000) /* -4.0 */
          setFixed(PhysReg{247});
-      else if (v == 0x3fc45f306dc9c882) /* 1/(2*PI) */
-         setFixed(PhysReg{248});
       else { /* Literal Constant: we don't know if it is a long or double.*/
          isConstant_ = 0;
          assert(false && "attempt to create a 64-bit literal constant");
@@ -1259,6 +1255,7 @@ uint16_t get_sgpr_alloc(Program *program, uint16_t addressable_sgprs);
 uint16_t get_addr_sgpr_from_waves(Program *program, uint16_t max_waves);
 
 typedef struct {
+   const int16_t opcode_gfx7[static_cast<int>(aco_opcode::num_opcodes)];
    const int16_t opcode_gfx9[static_cast<int>(aco_opcode::num_opcodes)];
    const int16_t opcode_gfx10[static_cast<int>(aco_opcode::num_opcodes)];
    const std::bitset<static_cast<int>(aco_opcode::num_opcodes)> can_use_input_modifiers;

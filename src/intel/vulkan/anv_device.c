@@ -3139,19 +3139,6 @@ VkResult anv_AllocateMemory(
          break;
       }
 
-      case VK_STRUCTURE_TYPE_WSI_MEMORY_ALLOCATE_INFO_MESA: {
-         const struct wsi_memory_allocate_info *wsi_info = (void *)ext;
-         if (wsi_info->implicit_sync) {
-            /* We need to set the WRITE flag on window system buffers so that
-             * GEM will know we're writing to them and synchronize uses on
-             * other rings (eg if the display server uses the blitter ring).
-             */
-            alloc_flags |= ANV_BO_ALLOC_IMPLICIT_SYNC |
-                           ANV_BO_ALLOC_IMPLICIT_WRITE;
-         }
-         break;
-      }
-
       default:
          anv_debug_ignored_stype(ext->sType);
          break;
@@ -3925,7 +3912,16 @@ VkResult anv_CreateBuffer(
     VkBuffer*                                   pBuffer)
 {
    ANV_FROM_HANDLE(anv_device, device, _device);
+   struct anv_physical_device *pdevice = &device->instance->physicalDevice;
    struct anv_buffer *buffer;
+
+   /* Don't allow creating buffers bigger than our address space.  The real
+    * issue here is that we may align up the buffer size and we don't want
+    * doing so to cause roll-over.  However, no one has any business
+    * allocating a buffer larger than our GTT size.
+    */
+   if (pCreateInfo->size > pdevice->gtt_size)
+      return vk_error(VK_ERROR_OUT_OF_DEVICE_MEMORY);
 
    assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO);
 

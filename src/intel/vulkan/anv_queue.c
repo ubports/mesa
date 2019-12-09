@@ -702,6 +702,7 @@ anv_queue_submit(struct anv_queue *queue,
                  const VkSemaphore *out_semaphores,
                  const uint64_t *out_values,
                  uint32_t num_out_semaphores,
+                 struct anv_bo *wsi_signal_bo,
                  VkFence _fence)
 {
    ANV_FROM_HANDLE(anv_fence, fence, _fence);
@@ -727,6 +728,18 @@ anv_queue_submit(struct anv_queue *queue,
       case ANV_SEMAPHORE_TYPE_BO:
          assert(!pdevice->has_syncobj);
          result = anv_queue_submit_add_fence_bo(submit, impl->bo, false /* signal */);
+         if (result != VK_SUCCESS)
+            goto error;
+         break;
+
+      case ANV_SEMAPHORE_TYPE_WSI_BO:
+         /* When using a window-system buffer as a semaphore, always enable
+          * EXEC_OBJECT_WRITE.  This gives us a WaR hazard with the display or
+          * compositor's read of the buffer and enforces that we don't start
+          * rendering until they are finished.  This is exactly the
+          * synchronization we want with vkAcquireNextImage.
+          */
+         result = anv_queue_submit_add_fence_bo(submit, impl->bo, true /* signal */);
          if (result != VK_SUCCESS)
             goto error;
          break;
@@ -829,6 +842,12 @@ anv_queue_submit(struct anv_queue *queue,
       }
    }
 
+   if (wsi_signal_bo) {
+      result = anv_queue_submit_add_fence_bo(submit, wsi_signal_bo, true /* signal */);
+      if (result != VK_SUCCESS)
+         goto error;
+   }
+
    if (fence) {
       /* Under most circumstances, out fences won't be temporary.  However,
        * the spec does allow it for opaque_fd.  From the Vulkan 1.0.53 spec:
@@ -923,13 +942,21 @@ VkResult anv_QueueSubmit(
        * come up with something more efficient but this shouldn't be a
        * common case.
        */
-      result = anv_queue_submit(queue, NULL, NULL, NULL, 0, NULL, NULL, 0, fence);
+      result = anv_queue_submit(queue, NULL, NULL, NULL, 0, NULL, NULL, 0,
+                                NULL, fence);
       goto out;
    }
 
    for (uint32_t i = 0; i < submitCount; i++) {
       /* Fence for this submit.  NULL for all but the last one */
       VkFence submit_fence = (i == submitCount - 1) ? fence : VK_NULL_HANDLE;
+
+      const struct wsi_memory_signal_submit_info *mem_signal_info =
+         vk_find_struct_const(pSubmits[i].pNext,
+                              WSI_MEMORY_SIGNAL_SUBMIT_INFO_MESA);
+      struct anv_bo *wsi_signal_bo =
+         mem_signal_info && mem_signal_info->memory != VK_NULL_HANDLE ?
+         anv_device_memory_from_handle(mem_signal_info->memory)->bo : NULL;
 
       const VkTimelineSemaphoreSubmitInfoKHR *timeline_info =
          vk_find_struct_const(pSubmits[i].pNext,
@@ -954,6 +981,7 @@ VkResult anv_QueueSubmit(
                                    pSubmits[i].pSignalSemaphores,
                                    signal_values,
                                    pSubmits[i].signalSemaphoreCount,
+                                   wsi_signal_bo,
                                    submit_fence);
          if (result != VK_SUCCESS)
             goto out;
@@ -992,7 +1020,7 @@ VkResult anv_QueueSubmit(
          result = anv_queue_submit(queue, cmd_buffer,
                                    in_semaphores, in_values, num_in_semaphores,
                                    out_semaphores, out_values, num_out_semaphores,
-                                   execbuf_fence);
+                                   wsi_signal_bo, execbuf_fence);
          if (result != VK_SUCCESS)
             goto out;
       }
@@ -1092,6 +1120,10 @@ anv_fence_impl_cleanup(struct anv_device *device,
       anv_bo_pool_free(&device->batch_bo_pool, impl->bo.bo);
       break;
 
+   case ANV_FENCE_TYPE_WSI_BO:
+      anv_device_release_bo(device, impl->bo.bo);
+      break;
+
    case ANV_FENCE_TYPE_SYNCOBJ:
       anv_gem_syncobj_destroy(device, impl->syncobj);
       break;
@@ -1105,6 +1137,16 @@ anv_fence_impl_cleanup(struct anv_device *device,
    }
 
    impl->type = ANV_FENCE_TYPE_NONE;
+}
+
+void
+anv_fence_reset_temporary(struct anv_device *device,
+                          struct anv_fence *fence)
+{
+   if (fence->temporary.type == ANV_FENCE_TYPE_NONE)
+      return;
+
+   anv_fence_impl_cleanup(device, &fence->temporary);
 }
 
 void anv_DestroyFence(
@@ -1141,8 +1183,7 @@ VkResult anv_ResetFences(
        *    first restored. The remaining operations described therefore
        *    operate on the restored payload.
        */
-      if (fence->temporary.type != ANV_FENCE_TYPE_NONE)
-         anv_fence_impl_cleanup(device, &fence->temporary);
+      anv_fence_reset_temporary(device, fence);
 
       struct anv_fence_impl *impl = &fence->permanent;
 
@@ -1179,6 +1220,7 @@ VkResult anv_GetFenceStatus(
 
    switch (impl->type) {
    case ANV_FENCE_TYPE_BO:
+   case ANV_FENCE_TYPE_WSI_BO:
       /* BO fences don't support import/export */
       assert(fence->temporary.type == ANV_FENCE_TYPE_NONE);
       switch (impl->bo.state) {
@@ -1286,13 +1328,11 @@ anv_wait_for_bo_fences(struct anv_device *device,
       for (uint32_t i = 0; i < fenceCount; i++) {
          ANV_FROM_HANDLE(anv_fence, fence, pFences[i]);
 
-         /* This function assumes that all fences are BO fences and that they
-          * have no temporary state.  Since BO fences will never be exported,
-          * this should be a safe assumption.
-          */
-         assert(fence->permanent.type == ANV_FENCE_TYPE_BO);
-         assert(fence->temporary.type == ANV_FENCE_TYPE_NONE);
-         struct anv_fence_impl *impl = &fence->permanent;
+         struct anv_fence_impl *impl =
+            fence->temporary.type != ANV_FENCE_TYPE_NONE ?
+            &fence->temporary : &fence->permanent;
+         assert(impl->type == ANV_FENCE_TYPE_BO ||
+                impl->type == ANV_FENCE_TYPE_WSI_BO);
 
          switch (impl->bo.state) {
          case ANV_BO_FENCE_STATE_RESET:
@@ -1410,6 +1450,7 @@ anv_wait_for_fences(struct anv_device *device,
          ANV_FROM_HANDLE(anv_fence, fence, pFences[i]);
          switch (fence->permanent.type) {
          case ANV_FENCE_TYPE_BO:
+         case ANV_FENCE_TYPE_WSI_BO:
             result = anv_wait_for_bo_fences(device, 1, &pFences[i],
                                             true, abs_timeout);
             break;
@@ -1773,6 +1814,7 @@ anv_semaphore_impl_cleanup(struct anv_device *device,
       break;
 
    case ANV_SEMAPHORE_TYPE_BO:
+   case ANV_SEMAPHORE_TYPE_WSI_BO:
       anv_device_release_bo(device, impl->bo);
       break;
 

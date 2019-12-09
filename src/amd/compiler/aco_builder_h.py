@@ -327,7 +327,10 @@ public:
       Operand op = op_.op;
       if (dst.regClass() == s1 && op.size() == 1 && op.isLiteral()) {
          uint32_t imm = op.constantValue();
-         if (imm >= 0xffff8000 || imm <= 0x7fff) {
+         if (imm == 0x3e22f983) {
+            if (program->chip_class >= GFX8)
+               op.setFixed(PhysReg{248}); /* it can be an inline constant on GFX8+ */
+         } else if (imm >= 0xffff8000 || imm <= 0x7fff) {
             return sopk(aco_opcode::s_movk_i32, dst, imm & 0xFFFFu);
          } else if (util_bitreverse(imm) <= 64 || util_bitreverse(imm) >= 0xFFFFFFF0) {
             uint32_t rev = util_bitreverse(imm);
@@ -418,6 +421,19 @@ public:
       return insert(std::move(sub));
    }
 
+   Result readlane(Definition dst, Op vsrc, Op lane)
+   {
+      if (program->chip_class >= GFX8)
+         return vop3(aco_opcode::v_readlane_b32_e64, dst, vsrc, lane);
+      else
+         return vop2(aco_opcode::v_readlane_b32, dst, vsrc, lane);
+   }
+   Result writelane(Definition dst, Op val, Op lane, Op vsrc) {
+      if (program->chip_class >= GFX8)
+         return vop3(aco_opcode::v_writelane_b32_e64, dst, val, lane, vsrc);
+      else
+         return vop2(aco_opcode::v_writelane_b32, dst, val, lane, vsrc);
+   }
 <%
 import itertools
 formats = [("pseudo", [Format.PSEUDO], 'Pseudo_instruction', list(itertools.product(range(5), range(5))) + [(8, 1), (1, 8)]),

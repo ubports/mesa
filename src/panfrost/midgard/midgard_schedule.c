@@ -165,6 +165,9 @@ mir_create_dependency_graph(midgard_instruction **instructions, unsigned count, 
                 util_dynarray_fini(&last_read[i]);
                 util_dynarray_fini(&last_write[i]);
         }
+
+        free(last_read);
+        free(last_write);
 }
 
 /* Does the mask cover more than a scalar? */
@@ -1091,6 +1094,9 @@ schedule_block(compiler_context *ctx, midgard_block *block)
         mir_foreach_instr_in_block_scheduled_rev(block, ins) {
                 list_add(&ins->link, &block->instructions);
         }
+
+	free(instructions); /* Allocated by flatten_mir() */
+	free(worklist);
 }
 
 /* When we're 'squeezing down' the values in the IR, we maintain a hash
@@ -1386,6 +1392,8 @@ static void mir_spill_register(
         mir_foreach_instr_global(ctx, ins) {
                 ins->hint = false;
         }
+
+        free(cost);
 }
 
 void
@@ -1421,7 +1429,11 @@ schedule_program(compiler_context *ctx)
                 mir_squeeze_index(ctx);
                 mir_invalidate_liveness(ctx);
 
-                l = NULL;
+                if (l) {
+                        lcra_free(l);
+                        l = NULL;
+                }
+
                 l = allocate_registers(ctx, &spilled);
         } while(spilled && ((iter_count--) > 0));
 
@@ -1436,4 +1448,6 @@ schedule_program(compiler_context *ctx)
         ctx->tls_size = spill_count * 16;
 
         install_registers(ctx, l);
+
+        lcra_free(l);
 }
