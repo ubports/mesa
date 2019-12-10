@@ -330,7 +330,7 @@ lima_resource_from_handle(struct pipe_screen *pscreen,
       res->tiled = true;
       break;
    case DRM_FORMAT_MOD_INVALID:
-      res->tiled = screen->ro == NULL;
+      res->tiled = false;
       break;
    default:
       fprintf(stderr, "Attempted to import unsupported modifier 0x%llx\n",
