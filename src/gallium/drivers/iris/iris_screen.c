@@ -39,7 +39,7 @@
 #include "pipe/p_screen.h"
 #include "util/debug.h"
 #include "util/u_inlines.h"
-#include "util/u_format.h"
+#include "util/format/u_format.h"
 #include "util/u_transfer_helper.h"
 #include "util/u_upload_mgr.h"
 #include "util/ralloc.h"
@@ -673,6 +673,7 @@ iris_screen_create(int fd, const struct pipe_screen_config *config)
    screen->compiler->shader_perf_log = iris_shader_perf_log;
    screen->compiler->supports_pull_constants = false;
    screen->compiler->supports_shader_constants = true;
+   screen->compiler->compact_params = false;
 
    iris_disk_cache_init(screen);
 

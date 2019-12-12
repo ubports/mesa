@@ -431,11 +431,11 @@ etna_screen_is_format_supported(struct pipe_screen *pscreen,
 
    if (usage & PIPE_BIND_RENDER_TARGET) {
       /* if render target, must be RS-supported format */
-      if (translate_rs_format(format) != ETNA_NO_MATCH) {
+      if (translate_pe_format(format) != ETNA_NO_MATCH) {
          /* Validate MSAA; number of samples must be allowed, and render target
           * must have MSAA'able format. */
          if (sample_count > 1) {
-            if (translate_samples_to_xyscale(sample_count, NULL, NULL, NULL) &&
+            if (translate_samples_to_xyscale(sample_count, NULL, NULL) &&
                 translate_ts_format(format) != ETNA_NO_MATCH) {
                allowed |= PIPE_BIND_RENDER_TARGET;
             }

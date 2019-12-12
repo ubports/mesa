@@ -232,6 +232,8 @@ static void si_destroy_context(struct pipe_context *context)
 		sctx->b.delete_compute_state(&sctx->b, sctx->cs_clear_render_target);
 	if (sctx->cs_clear_render_target_1d_array)
 		sctx->b.delete_compute_state(&sctx->b, sctx->cs_clear_render_target_1d_array);
+	if (sctx->cs_clear_12bytes_buffer)
+		sctx->b.delete_compute_state(&sctx->b, sctx->cs_clear_12bytes_buffer);
 	if (sctx->cs_dcc_retile)
 		sctx->b.delete_compute_state(&sctx->b, sctx->cs_dcc_retile);
 
@@ -483,7 +485,7 @@ static struct pipe_context *si_create_context(struct pipe_screen *screen,
 	if (!sctx->ctx)
 		goto fail;
 
-	if (sscreen->info.num_sdma_rings &&
+	if (sscreen->info.num_rings[RING_DMA] &&
 	    !(sscreen->debug_flags & DBG(NO_ASYNC_DMA)) &&
 	    /* SDMA timeouts sometimes on gfx10 so disable it for now. See:
 	     *    https://bugs.freedesktop.org/show_bug.cgi?id=111481
@@ -669,8 +671,6 @@ static struct pipe_context *si_create_context(struct pipe_screen *screen,
 	 */
 	sctx->scratch_waves = MAX2(32 * sscreen->info.num_good_compute_units,
 				   max_threads_per_block / 64);
-
-	si_init_compiler(sscreen, &sctx->compiler);
 
 	/* Bindless handles. */
 	sctx->tex_handles = _mesa_hash_table_create(NULL, _mesa_hash_pointer,
@@ -904,8 +904,9 @@ static void si_disk_cache_create(struct si_screen *sscreen)
 	#define ALL_FLAGS (DBG(SI_SCHED) | DBG(GISEL))
 	uint64_t shader_debug_flags = sscreen->debug_flags & ALL_FLAGS;
 	/* Reserve left-most bit for tgsi/nir selector */
-	assert(!(shader_debug_flags & (1 << 31)));
-	shader_debug_flags |= ((sscreen->options.enable_nir & 0x1) << 31);
+	assert(!(shader_debug_flags & (1u << 31)));
+	shader_debug_flags |= (uint32_t)
+		((sscreen->options.enable_nir & 0x1) << 31);
 
 	/* Add the high bits of 32-bit addresses, which affects
 	 * how 32-bit addresses are expanded to 64 bits.

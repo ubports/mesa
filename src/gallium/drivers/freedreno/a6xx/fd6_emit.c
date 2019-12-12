@@ -29,7 +29,7 @@
 #include "util/u_string.h"
 #include "util/u_memory.h"
 #include "util/u_helpers.h"
-#include "util/u_format.h"
+#include "util/format/u_format.h"
 #include "util/u_viewport.h"
 
 #include "freedreno_resource.h"
@@ -344,7 +344,7 @@ fd6_emit_fb_tex(struct fd_ringbuffer *state, struct fd_context *ctx)
 	OUT_RINGP(state, A6XX_TEX_CONST_2_TYPE(A6XX_TEX_2D) |
 			A6XX_TEX_CONST_2_FETCHSIZE(TFETCH6_2_BYTE),
 			&ctx->batch->fb_read_patches);
-	OUT_RING(state, A6XX_TEX_CONST_3_ARRAY_PITCH(rsc->layer_size));
+	OUT_RING(state, A6XX_TEX_CONST_3_ARRAY_PITCH(rsc->layout.layer_size));
 
 	OUT_RING(state, A6XX_TEX_CONST_4_BASE_LO(ctx->screen->gmem_base));
 	OUT_RING(state, A6XX_TEX_CONST_5_BASE_HI(ctx->screen->gmem_base >> 32) |
@@ -696,6 +696,7 @@ build_vbo_state(struct fd6_emit *emit, const struct ir3_shader_variant *vp)
 static struct fd_ringbuffer *
 build_lrz(struct fd6_emit *emit, bool binning_pass)
 {
+	struct fd6_blend_stateobj *blend = fd6_blend_stateobj(emit->ctx->blend);
 	struct fd6_zsa_stateobj *zsa = fd6_zsa_stateobj(emit->ctx->zsa);
 	struct pipe_framebuffer_state *pfb = &emit->ctx->batch->framebuffer;
 	struct fd_resource *rsc = fd_resource(pfb->zsbuf->texture);
@@ -705,10 +706,14 @@ build_lrz(struct fd6_emit *emit, bool binning_pass)
 	struct fd_ringbuffer *ring = fd_submit_new_ringbuffer(emit->ctx->batch->submit,
 			16, FD_RINGBUFFER_STREAMING);
 
-	if (emit->no_lrz_write || !rsc->lrz || !rsc->lrz_valid) {
+	if (zsa->invalidate_lrz) {
+		rsc->lrz_valid = false;
 		gras_lrz_cntl = 0;
 		rb_lrz_cntl = 0;
-	} else if (binning_pass && zsa->lrz_write) {
+	} else if (emit->no_lrz_write || !rsc->lrz || !rsc->lrz_valid) {
+		gras_lrz_cntl = 0;
+		rb_lrz_cntl = 0;
+	} else if (binning_pass && blend->lrz_write && zsa->lrz_write) {
 		gras_lrz_cntl |= A6XX_GRAS_LRZ_CNTL_LRZ_WRITE;
 	}
 
@@ -791,24 +796,98 @@ fd6_emit_streamout(struct fd_ringbuffer *ring, struct fd6_emit *emit, struct ir3
 }
 
 static void
+emit_tess_bos(struct fd_ringbuffer *ring, struct fd6_emit *emit, struct ir3_shader_variant *s)
+{
+	struct fd_context *ctx = emit->ctx;
+	const unsigned regid = s->shader->const_state.offsets.primitive_param * 4 + 4;
+	uint32_t dwords = 16;
+
+	OUT_PKT7(ring, fd6_stage2opcode(s->type), 3);
+	OUT_RING(ring, CP_LOAD_STATE6_0_DST_OFF(regid / 4) |
+			CP_LOAD_STATE6_0_STATE_TYPE(ST6_CONSTANTS)|
+			CP_LOAD_STATE6_0_STATE_SRC(SS6_INDIRECT) |
+			CP_LOAD_STATE6_0_STATE_BLOCK(fd6_stage2shadersb(s->type)) |
+			CP_LOAD_STATE6_0_NUM_UNIT(dwords / 4));
+	OUT_RB(ring, ctx->batch->tess_addrs_constobj);
+}
+
+static void
+emit_stage_tess_consts(struct fd_ringbuffer *ring, struct ir3_shader_variant *v,
+		uint32_t *params, int num_params)
+{
+	const unsigned regid = v->shader->const_state.offsets.primitive_param;
+	int size = MIN2(1 + regid, v->constlen) - regid;
+	if (size > 0)
+		fd6_emit_const(ring, v->type, regid * 4, 0, num_params, params, NULL);
+}
+
+static void
 fd6_emit_tess_const(struct fd6_emit *emit)
 {
 	struct fd_context *ctx = emit->ctx;
-	const unsigned vs_regid = emit->vs->shader->const_state.offsets.primitive_param;
-	const unsigned gs_regid = emit->gs->shader->const_state.offsets.primitive_param;
-	uint32_t num_vertices = emit->gs->shader->nir->info.gs.vertices_in;
-
-	uint32_t params[4] = {
-		emit->vs->shader->output_size * num_vertices * 4,	/* vs primitive stride */
-		emit->vs->shader->output_size * 4,					/* vs vertex stride */
-		0, 0,
-	};
 
 	struct fd_ringbuffer *constobj = fd_submit_new_ringbuffer(
 		ctx->batch->submit, 0x1000, FD_RINGBUFFER_STREAMING);
 
-	fd6_emit_const(constobj, emit->vs->type, vs_regid * 4, 0, ARRAY_SIZE(params), params, NULL);
-	fd6_emit_const(constobj, emit->gs->type, gs_regid * 4, 0, ARRAY_SIZE(params), params, NULL);
+	/* VS sizes are in bytes since that's what STLW/LDLW use, while the HS
+	 * size is dwords, since that's what LDG/STG use.
+	 */
+	unsigned num_vertices =
+		emit->hs ?
+		emit->info->vertices_per_patch :
+		emit->gs->shader->nir->info.gs.vertices_in;
+
+	uint32_t vs_params[4] = {
+		emit->vs->shader->output_size * num_vertices * 4,	/* vs primitive stride */
+		emit->vs->shader->output_size * 4,					/* vs vertex stride */
+		0,
+		0
+	};
+
+	emit_stage_tess_consts(constobj, emit->vs, vs_params, ARRAY_SIZE(vs_params));
+
+	if (emit->hs) {
+		uint32_t hs_params[4] = {
+			emit->vs->shader->output_size * num_vertices * 4,	/* vs primitive stride */
+			emit->vs->shader->output_size * 4,					/* vs vertex stride */
+			emit->hs->shader->output_size,
+			emit->info->vertices_per_patch
+		};
+
+		emit_stage_tess_consts(constobj, emit->hs, hs_params, ARRAY_SIZE(hs_params));
+		emit_tess_bos(constobj, emit, emit->hs);
+
+		if (emit->gs)
+			num_vertices = emit->gs->shader->nir->info.gs.vertices_in;
+
+		uint32_t ds_params[4] = {
+			emit->ds->shader->output_size * num_vertices * 4,	/* ds primitive stride */
+			emit->ds->shader->output_size * 4,					/* ds vertex stride */
+			emit->hs->shader->output_size,                      /* hs vertex stride (dwords) */
+			emit->hs->shader->nir->info.tess.tcs_vertices_out
+		};
+
+		emit_stage_tess_consts(constobj, emit->ds, ds_params, ARRAY_SIZE(ds_params));
+		emit_tess_bos(constobj, emit, emit->ds);
+	}
+
+	if (emit->gs) {
+		struct ir3_shader_variant *prev;
+		if (emit->ds)
+			prev = emit->ds;
+		else
+			prev = emit->vs;
+
+		uint32_t gs_params[4] = {
+			prev->shader->output_size * num_vertices * 4,	/* ds primitive stride */
+			prev->shader->output_size * 4,					/* ds vertex stride */
+			0,
+			0,
+		};
+
+		num_vertices = emit->gs->shader->nir->info.gs.vertices_in;
+		emit_stage_tess_consts(constobj, emit->gs, gs_params, ARRAY_SIZE(gs_params));
+	}
 
 	fd6_emit_take_group(emit, constobj, FD6_GROUP_PRIMITIVE_PARAMS, 0x7);
 }
@@ -869,7 +948,7 @@ fd6_emit_state(struct fd_ringbuffer *ring, struct fd6_emit *emit)
 			fd6_emit_add_group(emit, zsa->stateobj, FD6_GROUP_ZSA, 0x7);
 	}
 
-	if ((dirty & (FD_DIRTY_ZSA | FD_DIRTY_PROG)) && pfb->zsbuf) {
+	if ((dirty & (FD_DIRTY_ZSA | FD_DIRTY_BLEND | FD_DIRTY_PROG)) && pfb->zsbuf) {
 		struct fd_ringbuffer *state;
 
 		state = build_lrz(emit, false);
@@ -990,7 +1069,7 @@ fd6_emit_state(struct fd_ringbuffer *ring, struct fd6_emit *emit)
 	fd6_emit_consts(emit, gs, PIPE_SHADER_GEOMETRY, FD6_GROUP_GS_CONST, 0x7);
 	fd6_emit_consts(emit, fs, PIPE_SHADER_FRAGMENT, FD6_GROUP_FS_CONST, 0x6);
 
-	if (emit->key.key.has_gs)
+	if (emit->key.key.has_gs || emit->key.key.tessellation)
 		fd6_emit_tess_const(emit);
 
 	/* if driver-params are needed, emit each time: */
@@ -1264,7 +1343,6 @@ fd6_emit_restore(struct fd_batch *batch, struct fd_ringbuffer *ring)
 
 	WRITE(REG_A6XX_VPC_SO_OVERRIDE, A6XX_VPC_SO_OVERRIDE_SO_DISABLE);
 
-	WRITE(REG_A6XX_PC_UNKNOWN_9801, 0);
 	WRITE(REG_A6XX_PC_UNKNOWN_9806, 0);
 	WRITE(REG_A6XX_PC_UNKNOWN_9980, 0);
 

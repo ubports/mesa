@@ -711,6 +711,15 @@ emit_builtin_binop(struct ntv_context *ctx, enum GLSLstd450 op, SpvId type,
 }
 
 static SpvId
+emit_builtin_triop(struct ntv_context *ctx, enum GLSLstd450 op, SpvId type,
+                   SpvId src0, SpvId src1, SpvId src2)
+{
+   SpvId args[] = { src0, src1, src2 };
+   return spirv_builder_emit_ext_inst(&ctx->builder, type, ctx->GLSL_std_450,
+                                      op, args, ARRAY_SIZE(args));
+}
+
+static SpvId
 get_fvec_constant(struct ntv_context *ctx, unsigned bit_size,
                   unsigned num_components, float value)
 {
@@ -1013,6 +1022,12 @@ emit_alu(struct ntv_context *ctx, nir_alu_instr *alu)
       }
       break;
 
+   case nir_op_flrp:
+      assert(nir_op_infos[alu->op].num_inputs == 3);
+      result = emit_builtin_triop(ctx, GLSLstd450FMix, dest_type,
+                                  src[0], src[1], src[2]);
+      break;
+
    case nir_op_fcsel:
       result = emit_binop(ctx, SpvOpFOrdGreaterThan,
                           get_bvec_type(ctx, num_components),
@@ -1026,6 +1041,54 @@ emit_alu(struct ntv_context *ctx, nir_alu_instr *alu)
    case nir_op_bcsel:
       assert(nir_op_infos[alu->op].num_inputs == 3);
       result = emit_select(ctx, dest_type, src[0], src[1], src[2]);
+      break;
+
+   case nir_op_bany_fnequal2:
+   case nir_op_bany_fnequal3:
+   case nir_op_bany_fnequal4:
+      assert(nir_op_infos[alu->op].num_inputs == 2);
+      assert(alu_instr_src_components(alu, 0) ==
+             alu_instr_src_components(alu, 1));
+      result = emit_binop(ctx, SpvOpFOrdNotEqual,
+                          get_bvec_type(ctx, alu_instr_src_components(alu, 0)),
+                          src[0], src[1]);
+      result = emit_unop(ctx, SpvOpAny, dest_type, result);
+      break;
+
+   case nir_op_ball_fequal2:
+   case nir_op_ball_fequal3:
+   case nir_op_ball_fequal4:
+      assert(nir_op_infos[alu->op].num_inputs == 2);
+      assert(alu_instr_src_components(alu, 0) ==
+             alu_instr_src_components(alu, 1));
+      result = emit_binop(ctx, SpvOpFOrdEqual,
+                          get_bvec_type(ctx, alu_instr_src_components(alu, 0)),
+                          src[0], src[1]);
+      result = emit_unop(ctx, SpvOpAll, dest_type, result);
+      break;
+
+   case nir_op_bany_inequal2:
+   case nir_op_bany_inequal3:
+   case nir_op_bany_inequal4:
+      assert(nir_op_infos[alu->op].num_inputs == 2);
+      assert(alu_instr_src_components(alu, 0) ==
+             alu_instr_src_components(alu, 1));
+      result = emit_binop(ctx, SpvOpINotEqual,
+                          get_bvec_type(ctx, alu_instr_src_components(alu, 0)),
+                          src[0], src[1]);
+      result = emit_unop(ctx, SpvOpAny, dest_type, result);
+      break;
+
+   case nir_op_ball_iequal2:
+   case nir_op_ball_iequal3:
+   case nir_op_ball_iequal4:
+      assert(nir_op_infos[alu->op].num_inputs == 2);
+      assert(alu_instr_src_components(alu, 0) ==
+             alu_instr_src_components(alu, 1));
+      result = emit_binop(ctx, SpvOpIEqual,
+                          get_bvec_type(ctx, alu_instr_src_components(alu, 0)),
+                          src[0], src[1]);
+      result = emit_unop(ctx, SpvOpAll, dest_type, result);
       break;
 
    case nir_op_vec2:
@@ -1052,26 +1115,39 @@ emit_alu(struct ntv_context *ctx, nir_alu_instr *alu)
 static void
 emit_load_const(struct ntv_context *ctx, nir_load_const_instr *load_const)
 {
-   uint32_t values[NIR_MAX_VEC_COMPONENTS];
-   for (int i = 0; i < load_const->def.num_components; ++i)
-      values[i] = load_const->value[i].u32;
-
    unsigned bit_size = load_const->def.bit_size;
    unsigned num_components = load_const->def.num_components;
 
    SpvId constant;
    if (num_components > 1) {
       SpvId components[num_components];
-      for (int i = 0; i < num_components; i++)
-         components[i] = emit_uint_const(ctx, bit_size, values[i]);
+      SpvId type;
+      if (bit_size == 1) {
+         for (int i = 0; i < num_components; i++)
+            components[i] = spirv_builder_const_bool(&ctx->builder,
+                                                     load_const->value[i].b);
 
-      SpvId type = get_uvec_type(ctx, bit_size, num_components);
+         type = get_bvec_type(ctx, num_components);
+      } else {
+         for (int i = 0; i < num_components; i++)
+            components[i] = emit_uint_const(ctx, bit_size,
+                                            load_const->value[i].u32);
+
+         type = get_uvec_type(ctx, bit_size, num_components);
+      }
       constant = spirv_builder_const_composite(&ctx->builder, type,
                                                components, num_components);
    } else {
       assert(num_components == 1);
-      constant = emit_uint_const(ctx, bit_size, values[0]);
+      if (bit_size == 1)
+         constant = spirv_builder_const_bool(&ctx->builder,
+                                             load_const->value[0].b);
+      else
+         constant = emit_uint_const(ctx, bit_size, load_const->value[0].u32);
    }
+
+   if (bit_size == 1)
+      constant = bvec_to_uvec(ctx, constant, num_components);
 
    store_ssa_def_uint(ctx, &load_const->def, constant);
 }
@@ -1253,7 +1329,7 @@ emit_tex(struct ntv_context *ctx, nir_tex_instr *tex)
    assert(tex->texture_index == tex->sampler_index);
 
    SpvId coord = 0, proj = 0, bias = 0, lod = 0, dref = 0;
-   unsigned coord_components;
+   unsigned coord_components = 0;
    for (unsigned i = 0; i < tex->num_srcs; i++) {
       switch (tex->src[i].src_type) {
       case nir_tex_src_coord:

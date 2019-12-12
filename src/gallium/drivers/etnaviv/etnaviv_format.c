@@ -39,19 +39,19 @@
 struct etna_format {
    unsigned vtx;
    unsigned tex;
-   unsigned rs;
+   unsigned pe;
    bool present;
    const unsigned char tex_swiz[4];
 };
 
-#define RS_FORMAT_NONE ~0
+#define PE_FORMAT_NONE ~0
 
-#define RS_FORMAT_MASK        0xf
-#define RS_FORMAT(x)          ((x) & RS_FORMAT_MASK)
-#define RS_FORMAT_RB_SWAP     0x10
+#define PE_FORMAT_MASK        0x7f
+#define PE_FORMAT(x)          ((x) & PE_FORMAT_MASK)
+#define PE_FORMAT_RB_SWAP     0x80
 
-#define RS_FORMAT_X8B8G8R8    (RS_FORMAT_X8R8G8B8 | RS_FORMAT_RB_SWAP)
-#define RS_FORMAT_A8B8G8R8    (RS_FORMAT_A8R8G8B8 | RS_FORMAT_RB_SWAP)
+#define PE_FORMAT_X8B8G8R8    (PE_FORMAT_X8R8G8B8 | PE_FORMAT_RB_SWAP)
+#define PE_FORMAT_A8B8G8R8    (PE_FORMAT_A8R8G8B8 | PE_FORMAT_RB_SWAP)
 
 #define TS_SAMPLER_FORMAT_NONE      ETNA_NO_MATCH
 
@@ -67,7 +67,7 @@ struct etna_format {
    [PIPE_FORMAT_##pipe] = {                               \
       .vtx = FE_DATA_TYPE_##vtxfmt, \
       .tex = TEXTURE_FORMAT_##texfmt,                     \
-      .rs = RS_FORMAT_##rsfmt,                            \
+      .pe = PE_FORMAT_##rsfmt,                            \
       .present = 1,                                       \
       .tex_swiz = texswiz,                                \
    }
@@ -77,7 +77,7 @@ struct etna_format {
    [PIPE_FORMAT_##pipe] = {        \
       .vtx = ETNA_NO_MATCH,        \
       .tex = TEXTURE_FORMAT_##fmt, \
-      .rs = RS_FORMAT_##rsfmt,     \
+      .pe = PE_FORMAT_##rsfmt,     \
       .present = 1,                \
       .tex_swiz = swiz,            \
    }
@@ -87,7 +87,7 @@ struct etna_format {
    [PIPE_FORMAT_##pipe] = {                            \
       .vtx = FE_DATA_TYPE_##fmt, \
       .tex = ETNA_NO_MATCH,                            \
-      .rs = RS_FORMAT_##rsfmt,                         \
+      .pe = PE_FORMAT_##rsfmt,                         \
       .present = 1,                                    \
    }
 
@@ -95,8 +95,8 @@ static struct etna_format formats[PIPE_FORMAT_COUNT] = {
    /* 8-bit */
    VT(R8_UNORM,   UNSIGNED_BYTE, L8, SWIZ(X, 0, 0, 1), NONE),
    V_(R8_SNORM,   BYTE,          NONE),
-   V_(R8_UINT,    UNSIGNED_BYTE, NONE),
-   V_(R8_SINT,    BYTE,          NONE),
+   V_(R8_UINT,    BYTE_I,        NONE),
+   V_(R8_SINT,    BYTE_I,        NONE),
    V_(R8_USCALED, UNSIGNED_BYTE, NONE),
    V_(R8_SSCALED, BYTE,          NONE),
 
@@ -107,8 +107,8 @@ static struct etna_format formats[PIPE_FORMAT_COUNT] = {
    /* 16-bit */
    V_(R16_UNORM,   UNSIGNED_SHORT, NONE),
    V_(R16_SNORM,   SHORT,          NONE),
-   V_(R16_UINT,    UNSIGNED_SHORT, NONE),
-   V_(R16_SINT,    SHORT,          NONE),
+   V_(R16_UINT,    SHORT_I,        NONE),
+   V_(R16_SINT,    SHORT_I,        NONE),
    V_(R16_USCALED, UNSIGNED_SHORT, NONE),
    V_(R16_SSCALED, SHORT,          NONE),
    V_(R16_FLOAT,   HALF_FLOAT,     NONE),
@@ -118,31 +118,31 @@ static struct etna_format formats[PIPE_FORMAT_COUNT] = {
 
    _T(L8A8_UNORM, A8L8, SWIZ(X, Y, Z, W), NONE),
 
-   _T(Z16_UNORM,      D16,      SWIZ(X, Y, Z, W), A4R4G4B4),
+   _T(Z16_UNORM,      D16,      SWIZ(X, Y, Z, W), NONE),
    _T(B5G6R5_UNORM,   R5G6B5,   SWIZ(X, Y, Z, W), R5G6B5),
    _T(B5G5R5A1_UNORM, A1R5G5B5, SWIZ(X, Y, Z, W), A1R5G5B5),
    _T(B5G5R5X1_UNORM, X1R5G5B5, SWIZ(X, Y, Z, W), X1R5G5B5),
 
    VT(R8G8_UNORM,   UNSIGNED_BYTE,  EXT_G8R8 | EXT_FORMAT, SWIZ(X, Y, 0, 1), NONE),
    V_(R8G8_SNORM,   BYTE,           NONE),
-   V_(R8G8_UINT,    UNSIGNED_BYTE,  NONE),
-   V_(R8G8_SINT,    BYTE,           NONE),
+   V_(R8G8_UINT,    BYTE_I,         NONE),
+   V_(R8G8_SINT,    BYTE_I,         NONE),
    V_(R8G8_USCALED, UNSIGNED_BYTE,  NONE),
    V_(R8G8_SSCALED, BYTE,           NONE),
 
    /* 24-bit */
    V_(R8G8B8_UNORM,   UNSIGNED_BYTE, NONE),
    V_(R8G8B8_SNORM,   BYTE,          NONE),
-   V_(R8G8B8_UINT,    UNSIGNED_BYTE, NONE),
-   V_(R8G8B8_SINT,    BYTE,          NONE),
+   V_(R8G8B8_UINT,    BYTE_I,        NONE),
+   V_(R8G8B8_SINT,    BYTE_I,        NONE),
    V_(R8G8B8_USCALED, UNSIGNED_BYTE, NONE),
    V_(R8G8B8_SSCALED, BYTE,          NONE),
 
    /* 32-bit */
    V_(R32_UNORM,   UNSIGNED_INT, NONE),
    V_(R32_SNORM,   INT,          NONE),
-   V_(R32_SINT,    INT,          NONE),
-   V_(R32_UINT,    UNSIGNED_INT, NONE),
+   V_(R32_SINT,    FLOAT,        NONE),
+   V_(R32_UINT,    FLOAT,        NONE),
    V_(R32_USCALED, UNSIGNED_INT, NONE),
    V_(R32_SSCALED, INT,          NONE),
    V_(R32_FLOAT,   FLOAT,        NONE),
@@ -150,8 +150,8 @@ static struct etna_format formats[PIPE_FORMAT_COUNT] = {
 
    V_(R16G16_UNORM,   UNSIGNED_SHORT, NONE),
    V_(R16G16_SNORM,   SHORT,          NONE),
-   V_(R16G16_UINT,    UNSIGNED_SHORT, NONE),
-   V_(R16G16_SINT,    SHORT,          NONE),
+   V_(R16G16_UINT,    SHORT_I,        NONE),
+   V_(R16G16_SINT,    SHORT_I,        NONE),
    V_(R16G16_USCALED, UNSIGNED_SHORT, NONE),
    V_(R16G16_SSCALED, SHORT,          NONE),
    V_(R16G16_FLOAT,   HALF_FLOAT,     NONE),
@@ -161,8 +161,8 @@ static struct etna_format formats[PIPE_FORMAT_COUNT] = {
    VT(R8G8B8A8_UNORM,   UNSIGNED_BYTE, A8B8G8R8, SWIZ(X, Y, Z, W), A8B8G8R8),
    V_(R8G8B8A8_SNORM,   BYTE,          A8B8G8R8),
    _T(R8G8B8X8_UNORM,   X8B8G8R8,      SWIZ(X, Y, Z, W), X8B8G8R8),
-   V_(R8G8B8A8_UINT,    UNSIGNED_BYTE, A8B8G8R8),
-   V_(R8G8B8A8_SINT,    BYTE,          A8B8G8R8),
+   V_(R8G8B8A8_UINT,    BYTE_I,        A8B8G8R8),
+   V_(R8G8B8A8_SINT,    BYTE_I,        A8B8G8R8),
    V_(R8G8B8A8_USCALED, UNSIGNED_BYTE, A8B8G8R8),
    V_(R8G8B8A8_SSCALED, BYTE,          A8B8G8R8),
 
@@ -171,19 +171,19 @@ static struct etna_format formats[PIPE_FORMAT_COUNT] = {
    _T(B8G8R8A8_SRGB,  A8R8G8B8, SWIZ(X, Y, Z, W), A8R8G8B8),
    _T(B8G8R8X8_SRGB,  X8R8G8B8, SWIZ(X, Y, Z, W), X8R8G8B8),
 
-   V_(R10G10B10A2_UNORM,   UNSIGNED_INT_10_10_10_2, NONE),
-   V_(R10G10B10A2_SNORM,   INT_10_10_10_2,          NONE),
-   V_(R10G10B10A2_USCALED, UNSIGNED_INT_10_10_10_2, NONE),
-   V_(R10G10B10A2_SSCALED, INT_10_10_10_2,          NONE),
+   V_(R10G10B10A2_UNORM,   UNSIGNED_INT_2_10_10_10_REV, NONE),
+   V_(R10G10B10A2_SNORM,   INT_2_10_10_10_REV,          NONE),
+   V_(R10G10B10A2_USCALED, UNSIGNED_INT_2_10_10_10_REV, NONE),
+   V_(R10G10B10A2_SSCALED, INT_2_10_10_10_REV,          NONE),
 
-   _T(X8Z24_UNORM,       D24X8, SWIZ(X, Y, Z, W), A8R8G8B8),
-   _T(S8_UINT_Z24_UNORM, D24X8, SWIZ(X, Y, Z, W), A8R8G8B8),
+   _T(X8Z24_UNORM,       D24X8, SWIZ(X, Y, Z, W), NONE),
+   _T(S8_UINT_Z24_UNORM, D24X8, SWIZ(X, Y, Z, W), NONE),
 
    /* 48-bit */
    V_(R16G16B16_UNORM,   UNSIGNED_SHORT, NONE),
    V_(R16G16B16_SNORM,   SHORT,          NONE),
-   V_(R16G16B16_UINT,    UNSIGNED_SHORT, NONE),
-   V_(R16G16B16_SINT,    SHORT,          NONE),
+   V_(R16G16B16_UINT,    SHORT_I,        NONE),
+   V_(R16G16B16_SINT,    SHORT_I,        NONE),
    V_(R16G16B16_USCALED, UNSIGNED_SHORT, NONE),
    V_(R16G16B16_SSCALED, SHORT,          NONE),
    V_(R16G16B16_FLOAT,   HALF_FLOAT,     NONE),
@@ -191,16 +191,16 @@ static struct etna_format formats[PIPE_FORMAT_COUNT] = {
    /* 64-bit */
    V_(R16G16B16A16_UNORM,   UNSIGNED_SHORT, NONE),
    V_(R16G16B16A16_SNORM,   SHORT,          NONE),
-   V_(R16G16B16A16_UINT,    UNSIGNED_SHORT, NONE),
-   V_(R16G16B16A16_SINT,    SHORT,          NONE),
+   V_(R16G16B16A16_UINT,    SHORT_I,        NONE),
+   V_(R16G16B16A16_SINT,    SHORT_I,        NONE),
    V_(R16G16B16A16_USCALED, UNSIGNED_SHORT, NONE),
    V_(R16G16B16A16_SSCALED, SHORT,          NONE),
    V_(R16G16B16A16_FLOAT,   HALF_FLOAT,     NONE),
 
    V_(R32G32_UNORM,   UNSIGNED_INT, NONE),
    V_(R32G32_SNORM,   INT,          NONE),
-   V_(R32G32_UINT,    UNSIGNED_INT, NONE),
-   V_(R32G32_SINT,    INT,          NONE),
+   V_(R32G32_UINT,    FLOAT,        NONE),
+   V_(R32G32_SINT,    FLOAT,        NONE),
    V_(R32G32_USCALED, UNSIGNED_INT, NONE),
    V_(R32G32_SSCALED, INT,          NONE),
    V_(R32G32_FLOAT,   FLOAT,        NONE),
@@ -209,8 +209,8 @@ static struct etna_format formats[PIPE_FORMAT_COUNT] = {
    /* 96-bit */
    V_(R32G32B32_UNORM,   UNSIGNED_INT, NONE),
    V_(R32G32B32_SNORM,   INT,          NONE),
-   V_(R32G32B32_UINT,    UNSIGNED_INT, NONE),
-   V_(R32G32B32_SINT,    INT,          NONE),
+   V_(R32G32B32_UINT,    FLOAT,        NONE),
+   V_(R32G32B32_SINT,    FLOAT,        NONE),
    V_(R32G32B32_USCALED, UNSIGNED_INT, NONE),
    V_(R32G32B32_SSCALED, INT,          NONE),
    V_(R32G32B32_FLOAT,   FLOAT,        NONE),
@@ -219,8 +219,8 @@ static struct etna_format formats[PIPE_FORMAT_COUNT] = {
    /* 128-bit */
    V_(R32G32B32A32_UNORM,   UNSIGNED_INT, NONE),
    V_(R32G32B32A32_SNORM,   INT,          NONE),
-   V_(R32G32B32A32_UINT,    UNSIGNED_INT, NONE),
-   V_(R32G32B32A32_SINT,    INT,          NONE),
+   V_(R32G32B32A32_UINT,    FLOAT,        NONE),
+   V_(R32G32B32A32_SINT,    FLOAT,        NONE),
    V_(R32G32B32A32_USCALED, UNSIGNED_INT, NONE),
    V_(R32G32B32A32_SSCALED, INT,          NONE),
    V_(R32G32B32A32_FLOAT,   FLOAT,        NONE),
@@ -330,23 +330,23 @@ get_texture_swiz(enum pipe_format fmt, unsigned swizzle_r,
 }
 
 uint32_t
-translate_rs_format(enum pipe_format fmt)
+translate_pe_format(enum pipe_format fmt)
 {
    if (!formats[fmt].present)
       return ETNA_NO_MATCH;
 
-   if (formats[fmt].rs == ETNA_NO_MATCH)
+   if (formats[fmt].pe == ETNA_NO_MATCH)
       return ETNA_NO_MATCH;
 
-   return RS_FORMAT(formats[fmt].rs);
+   return PE_FORMAT(formats[fmt].pe);
 }
 
 int
-translate_rs_format_rb_swap(enum pipe_format fmt)
+translate_pe_format_rb_swap(enum pipe_format fmt)
 {
    assert(formats[fmt].present);
 
-   return formats[fmt].rs & RS_FORMAT_RB_SWAP;
+   return formats[fmt].pe & PE_FORMAT_RB_SWAP;
 }
 
 /* Return type flags for vertex element format */

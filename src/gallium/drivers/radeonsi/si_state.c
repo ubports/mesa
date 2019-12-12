@@ -27,8 +27,8 @@
 #include "si_query.h"
 
 #include "util/u_dual_blend.h"
-#include "util/u_format.h"
-#include "util/u_format_s3tc.h"
+#include "util/format/u_format.h"
+#include "util/format/u_format_s3tc.h"
 #include "util/u_memory.h"
 #include "util/u_resource.h"
 #include "util/u_upload_mgr.h"
@@ -2984,6 +2984,7 @@ static void si_set_framebuffer_state(struct pipe_context *ctx,
 
 	sctx->framebuffer.compressed_cb_mask = 0;
 	sctx->framebuffer.uncompressed_cb_mask = 0;
+	sctx->framebuffer.displayable_dcc_cb_mask = 0;
 	sctx->framebuffer.nr_samples = util_framebuffer_get_num_samples(state);
 	sctx->framebuffer.nr_color_samples = sctx->framebuffer.nr_samples;
 	sctx->framebuffer.log_samples = util_logbase2(sctx->framebuffer.nr_samples);
@@ -3023,6 +3024,9 @@ static void si_set_framebuffer_state(struct pipe_context *ctx,
 			sctx->framebuffer.compressed_cb_mask |= 1 << i;
 		else
 			sctx->framebuffer.uncompressed_cb_mask |= 1 << i;
+
+		if (tex->surface.dcc_offset)
+			sctx->framebuffer.displayable_dcc_cb_mask |= 1 << i;
 
 		/* Don't update nr_color_samples for non-AA buffers.
 		 * (e.g. destination of MSAA resolve)
@@ -5456,15 +5460,17 @@ static void si_init_config(struct si_context *sctx)
 		si_pm4_set_reg(pm4, R_008A14_PA_CL_ENHANCE, S_008A14_NUM_CLIP_SEQ(3) |
 			       S_008A14_CLIP_VTX_REORDER_ENA(1));
 
+	/* CLEAR_STATE doesn't restore these correctly. */
+	si_pm4_set_reg(pm4, R_028240_PA_SC_GENERIC_SCISSOR_TL, S_028240_WINDOW_OFFSET_DISABLE(1));
+	si_pm4_set_reg(pm4, R_028244_PA_SC_GENERIC_SCISSOR_BR,
+		       S_028244_BR_X(16384) | S_028244_BR_Y(16384));
+
 	/* CLEAR_STATE doesn't clear these correctly on certain generations.
 	 * I don't know why. Deduced by trial and error.
 	 */
 	if (sctx->chip_class <= GFX7 || !has_clear_state) {
 		si_pm4_set_reg(pm4, R_028B28_VGT_STRMOUT_DRAW_OPAQUE_OFFSET, 0);
 		si_pm4_set_reg(pm4, R_028204_PA_SC_WINDOW_SCISSOR_TL, S_028204_WINDOW_OFFSET_DISABLE(1));
-		si_pm4_set_reg(pm4, R_028240_PA_SC_GENERIC_SCISSOR_TL, S_028240_WINDOW_OFFSET_DISABLE(1));
-		si_pm4_set_reg(pm4, R_028244_PA_SC_GENERIC_SCISSOR_BR,
-			       S_028244_BR_X(16384) | S_028244_BR_Y(16384));
 		si_pm4_set_reg(pm4, R_028030_PA_SC_SCREEN_SCISSOR_TL, 0);
 		si_pm4_set_reg(pm4, R_028034_PA_SC_SCREEN_SCISSOR_BR,
 			       S_028034_BR_X(16384) | S_028034_BR_Y(16384));

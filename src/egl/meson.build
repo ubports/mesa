@@ -1,4 +1,4 @@
-# Copyright Â© 2017 Intel Corporation
+# Copyright © 2017-2019 Intel Corporation
 
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -149,6 +149,7 @@ if not with_glvnd
 else
   egl_lib_name = 'EGL_mesa'
   egl_lib_version = '0.0.0'
+  deps_for_egl += dep_glvnd
   files_egl += [g_egldispatchstubs_h, g_egldispatchstubs_c]
   files_egl += files('main/eglglvnd.c', 'main/egldispatchstubs.c')
   install_data(
@@ -185,7 +186,7 @@ if not with_glvnd
   )
 endif
 
-if with_tests and prog_nm.found()
+if with_symbols_check
   if with_glvnd
     egl_symbols = files('egl-glvnd-symbols.txt')
   else
@@ -196,7 +197,7 @@ if with_tests and prog_nm.found()
     args : [
       '--lib', libegl,
       '--symbols-file', egl_symbols,
-      '--nm', prog_nm.path(),
+      symbols_check_args,
     ],
     suite : ['egl'],
   )

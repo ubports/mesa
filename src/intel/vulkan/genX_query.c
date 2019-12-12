@@ -94,12 +94,7 @@ VkResult genX(CreateQueryPool)(
       uint64s_per_slot += 4;
       break;
    case VK_QUERY_TYPE_PERFORMANCE_QUERY_INTEL: {
-      uint64s_per_slot = 2 * OA_REPORT_N_UINT64; /* begin & end OA reports */
-      uint64s_per_slot += 4; /* PerfCounter 1 & 2 */
-      uint64s_per_slot++; /* 2 * 32bit RPSTAT register */
-      uint64s_per_slot++; /* 64bit marker */
-      uint64s_per_slot++; /* availability */
-      uint64s_per_slot = align_u32(uint64s_per_slot, 8); /* OA reports must be aligned to 64 bytes */
+      uint64s_per_slot = 72; /* 576 bytes, see layout below */
       break;
    }
    default:
@@ -130,6 +125,7 @@ VkResult genX(CreateQueryPool)(
    result = anv_device_alloc_bo(device, size,
                                 ANV_BO_ALLOC_MAPPED |
                                 ANV_BO_ALLOC_SNOOPED,
+                                0 /* explicit_address */,
                                 &pool->bo);
    if (result != VK_SUCCESS)
       goto fail;
@@ -169,54 +165,51 @@ anv_query_address(struct anv_query_pool *pool, uint32_t query)
 }
 
 /**
- * VK_INTEL_performance_query layout:
+ * VK_INTEL_performance_query layout (576 bytes) :
  *
  * ------------------------------
- * |       end MI_RPC (256b)    |
+ * |       availability (8b)    |
  * |----------------------------|
- * |     begin MI_RPC (256b)    |
- * |----------------------------|
- * | begin perfcntr 1 & 2 (16b) |
- * |----------------------------|
- * |  end perfcntr 1 & 2 (16b)  |
+ * |         marker (8b)        |
  * |----------------------------|
  * | begin RPSTAT register (4b) |
  * |----------------------------|
  * |  end RPSTAT register (4b)  |
  * |----------------------------|
- * |         marker (8b)        |
+ * | begin perfcntr 1 & 2 (16b) |
  * |----------------------------|
- * |       availability (8b)    |
+ * |  end perfcntr 1 & 2 (16b)  |
+ * |----------------------------|
+ * |          Unused (8b)       |
+ * |----------------------------|
+ * |     begin MI_RPC (256b)    |
+ * |----------------------------|
+ * |       end MI_RPC (256b)    |
  * ------------------------------
  */
 
 static uint32_t
-intel_perf_mi_rpc_offset(bool end)
+intel_perf_marker_offset(void)
 {
-   return end ? 0 : 256;
-}
-
-static uint32_t
-intel_perf_counter(bool end)
-{
-   uint32_t offset = 512;
-   offset += end ? 2 * sizeof(uint64_t) : 0;
-   return offset;
+   return 8;
 }
 
 static uint32_t
 intel_perf_rpstart_offset(bool end)
 {
-   uint32_t offset = intel_perf_counter(false) +
-      4 * sizeof(uint64_t);
-   offset += end ? sizeof(uint32_t) : 0;
-   return offset;
+   return 16 + (end ? sizeof(uint32_t) : 0);
 }
 
 static uint32_t
-intel_perf_marker_offset(void)
+intel_perf_counter(bool end)
 {
-   return intel_perf_rpstart_offset(false) + sizeof(uint64_t);
+   return 24 + (end ? (2 * sizeof(uint64_t)) : 0);
+}
+
+static uint32_t
+intel_perf_mi_rpc_offset(bool end)
+{
+   return 64 + (end ? 256 : 0);
 }
 
 static void
@@ -241,49 +234,24 @@ query_slot(struct anv_query_pool *pool, uint32_t query)
 static bool
 query_is_available(struct anv_query_pool *pool, uint32_t query)
 {
-   if (pool->type == VK_QUERY_TYPE_PERFORMANCE_QUERY_INTEL) {
-      return *(volatile uint64_t *)((uint8_t *)query_slot(pool, query) +
-                                    pool->stride - 8);
-   } else
-      return *(volatile uint64_t *)query_slot(pool, query);
+   return *(volatile uint64_t *)query_slot(pool, query);
 }
 
 static VkResult
 wait_for_available(struct anv_device *device,
                    struct anv_query_pool *pool, uint32_t query)
 {
-   while (true) {
+   uint64_t abs_timeout = anv_get_absolute_timeout(5 * NSEC_PER_SEC);
+
+   while (anv_gettime_ns() < abs_timeout) {
       if (query_is_available(pool, query))
          return VK_SUCCESS;
-
-      int ret = anv_gem_busy(device, pool->bo->gem_handle);
-      if (ret == 1) {
-         /* The BO is still busy, keep waiting. */
-         continue;
-      } else if (ret == -1) {
-         /* We don't know the real error. */
-         return anv_device_set_lost(device, "gem wait failed: %m");
-      } else {
-         assert(ret == 0);
-         /* The BO is no longer busy. */
-         if (query_is_available(pool, query)) {
-            return VK_SUCCESS;
-         } else {
-            VkResult status = anv_device_query_status(device);
-            if (status != VK_SUCCESS)
-               return status;
-
-            /* If we haven't seen availability yet, then we never will.  This
-             * can only happen if we have a client error where they call
-             * GetQueryPoolResults on a query that they haven't submitted to
-             * the GPU yet.  The spec allows us to do anything in this case,
-             * but returning VK_SUCCESS doesn't seem right and we shouldn't
-             * just keep spinning.
-             */
-            return VK_NOT_READY;
-         }
-      }
+      VkResult status = anv_device_query_status(device);
+      if (status != VK_SUCCESS)
+         return status;
    }
+
+   return anv_device_set_lost(device, "query timeout");
 }
 
 VkResult genX(GetQueryPoolResults)(

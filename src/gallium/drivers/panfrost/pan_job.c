@@ -31,10 +31,11 @@
 #include "pan_context.h"
 #include "util/hash_table.h"
 #include "util/ralloc.h"
-#include "util/u_format.h"
+#include "util/format/u_format.h"
 #include "util/u_pack_color.h"
 #include "pan_util.h"
 #include "pandecode/decode.h"
+#include "panfrost-quirks.h"
 
 /* panfrost_bo_access is here to help us keep track of batch accesses to BOs
  * and build a proper dependency graph such that batches can be pipelined for
@@ -670,11 +671,18 @@ panfrost_batch_get_tiler_heap(struct panfrost_batch *batch)
 struct panfrost_bo *
 panfrost_batch_get_tiler_dummy(struct panfrost_batch *batch)
 {
+        struct panfrost_screen *screen = pan_screen(batch->ctx->base.screen);
+
+        uint32_t create_flags = 0;
+
         if (batch->tiler_dummy)
                 return batch->tiler_dummy;
 
+        if (!(screen->quirks & MIDGARD_NO_HIER_TILING))
+                create_flags = PAN_BO_INVISIBLE;
+
         batch->tiler_dummy = panfrost_batch_create_bo(batch, 4096,
-                                                      PAN_BO_INVISIBLE,
+                                                      create_flags,
                                                       PAN_BO_ACCESS_PRIVATE |
                                                       PAN_BO_ACCESS_RW |
                                                       PAN_BO_ACCESS_VERTEX_TILER |
@@ -799,7 +807,8 @@ panfrost_batch_draw_wallpaper(struct panfrost_batch *batch)
 static int
 panfrost_batch_submit_ioctl(struct panfrost_batch *batch,
                             mali_ptr first_job_desc,
-                            uint32_t reqs)
+                            uint32_t reqs,
+                            struct mali_job_descriptor_header *header)
 {
         struct panfrost_context *ctx = batch->ctx;
         struct pipe_context *gallium = (struct pipe_context *) ctx;
@@ -869,12 +878,32 @@ panfrost_batch_submit_ioctl(struct panfrost_batch *batch,
                 return errno;
         }
 
+        if (pan_debug & PAN_DBG_SYNC) {
+                u32 status;
+
+                /* Wait so we can get errors reported back */
+                drmSyncobjWait(screen->fd, &batch->out_sync->syncobj, 1,
+                               INT64_MAX, 0, NULL);
+
+                status = header->exception_status;
+
+                if (status && status != 0x1) {
+                        fprintf(stderr, "Job %" PRIx64 " failed: source ID: 0x%x access: %s exception: 0x%x (exception_status 0x%x) fault_pointer 0x%" PRIx64 " \n",
+                               first_job_desc,
+                               (status >> 16) & 0xFFFF,
+                               pandecode_exception_access((status >> 8) & 0x3),
+                               status  & 0xFF,
+                               status,
+                               header->fault_pointer);
+                }
+        }
+
         /* Trace the job if we're doing that */
         if (pan_debug & PAN_DBG_TRACE) {
                 /* Wait so we can get errors reported back */
                 drmSyncobjWait(screen->fd, &batch->out_sync->syncobj, 1,
                                INT64_MAX, 0, NULL);
-                pandecode_jc(submit.jc, FALSE);
+                pandecode_jc(submit.jc, FALSE, screen->gpu_id);
         }
 
         return 0;
@@ -884,17 +913,19 @@ static int
 panfrost_batch_submit_jobs(struct panfrost_batch *batch)
 {
         bool has_draws = batch->first_job.gpu;
+        struct mali_job_descriptor_header *header;
         int ret = 0;
 
         if (has_draws) {
-                ret = panfrost_batch_submit_ioctl(batch, batch->first_job.gpu, 0);
+                header = (struct mali_job_descriptor_header *)batch->first_job.cpu;
+                ret = panfrost_batch_submit_ioctl(batch, batch->first_job.gpu, 0, header);
                 assert(!ret);
         }
 
         if (batch->first_tiler.gpu || batch->clear) {
-                mali_ptr fragjob = panfrost_fragment_job(batch, has_draws);
+                mali_ptr fragjob = panfrost_fragment_job(batch, has_draws, &header);
 
-                ret = panfrost_batch_submit_ioctl(batch, fragjob, PANFROST_JD_REQ_FS);
+                ret = panfrost_batch_submit_ioctl(batch, fragjob, PANFROST_JD_REQ_FS, header);
                 assert(!ret);
         }
 
@@ -932,6 +963,25 @@ panfrost_batch_submit(struct panfrost_batch *batch)
 
         if (ret)
                 fprintf(stderr, "panfrost_batch_submit failed: %d\n", ret);
+
+        /* We must reset the damage info of our render targets here even
+         * though a damage reset normally happens when the DRI layer swaps
+         * buffers. That's because there can be implicit flushes the GL
+         * app is not aware of, and those might impact the damage region: if
+         * part of the damaged portion is drawn during those implicit flushes,
+         * you have to reload those areas before next draws are pushed, and
+         * since the driver can't easily know what's been modified by the draws
+         * it flushed, the easiest solution is to reload everything.
+         */
+        for (unsigned i = 0; i < batch->key.nr_cbufs; i++) {
+                struct panfrost_resource *res;
+
+                if (!batch->key.cbufs[i])
+                        continue;
+
+                res = pan_resource(batch->key.cbufs[i]->texture);
+                panfrost_resource_reset_damage(res);
+        }
 
 out:
         panfrost_freeze_batch(batch);
@@ -1084,10 +1134,10 @@ pan_pack_color(uint32_t *packed, const union pipe_color_union *color, enum pipe_
 
         if (util_format_is_rgba8_variant(desc)) {
                 pan_pack_color_32(packed,
-                                  (float_to_ubyte(clear_alpha) << 24) |
-                                  (float_to_ubyte(color->f[2]) << 16) |
-                                  (float_to_ubyte(color->f[1]) <<  8) |
-                                  (float_to_ubyte(color->f[0]) <<  0));
+                                  ((uint32_t) float_to_ubyte(clear_alpha) << 24) |
+                                  ((uint32_t) float_to_ubyte(color->f[2]) << 16) |
+                                  ((uint32_t) float_to_ubyte(color->f[1]) <<  8) |
+                                  ((uint32_t) float_to_ubyte(color->f[0]) <<  0));
         } else if (format == PIPE_FORMAT_B5G6R5_UNORM) {
                 /* First, we convert the components to R5, G6, B5 separately */
                 unsigned r5 = CLAMP(color->f[0], 0.0, 1.0) * 31.0;

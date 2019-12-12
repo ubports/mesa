@@ -27,6 +27,7 @@
 #include "midgard.h"
 #include "helpers.h"
 #include "midgard_compile.h"
+#include "lcra.h"
 
 #include "util/hash_table.h"
 #include "util/u_dynarray.h"
@@ -126,9 +127,10 @@ typedef struct midgard_instruction {
         bool invert;
 
         /* Hint for the register allocator not to spill the destination written
-         * from this instruction (because it is a spill/unspill node itself) */
+         * from this instruction (because it is a spill/unspill node itself).
+         * Bitmask of spilled classes */
 
-        bool no_spill;
+        unsigned no_spill;
 
         /* Generic hint for intra-pass use */
         bool hint;
@@ -142,6 +144,9 @@ typedef struct midgard_instruction {
 
         unsigned nr_dependencies;
         BITSET_WORD *dependents;
+
+        /* For load/store ops.. force 64-bit destination */
+        bool load_64;
 
         union {
                 midgard_load_store_word load_store;
@@ -216,9 +221,6 @@ typedef struct compiler_context {
         nir_shader *nir;
         gl_shader_stage stage;
 
-        /* The screen we correspond to */
-        struct midgard_screen *screen;
-
         /* Is internally a blend shader? Depends on stage == FRAGMENT */
         bool is_blend;
 
@@ -292,6 +294,9 @@ typedef struct compiler_context {
 
         /* Bitmask of valid metadata */
         unsigned metadata;
+
+        /* Model-specific quirk set */
+        uint32_t quirks;
 } compiler_context;
 
 /* Per-block live_in/live_out */
@@ -386,7 +391,7 @@ mir_next_op(struct midgard_instruction *ins)
         mir_foreach_bundle_in_block_rev(block, _bundle) \
                 for (i = (_bundle->instruction_count - 1), v = _bundle->instructions[i]; \
                                 i >= 0; \
-                                --i, v = _bundle->instructions[i]) \
+                                --i, v = (i >= 0) ? _bundle->instructions[i] : NULL) \
 
 #define mir_foreach_instr_global(ctx, v) \
         mir_foreach_block(ctx, v_block) \
@@ -514,11 +519,12 @@ bool mir_special_index(compiler_context *ctx, unsigned idx);
 unsigned mir_use_count(compiler_context *ctx, unsigned value);
 bool mir_is_written_before(compiler_context *ctx, midgard_instruction *ins, unsigned node);
 uint16_t mir_bytemask_of_read_components(midgard_instruction *ins, unsigned node);
-unsigned mir_ubo_shift(midgard_load_store_op op);
 midgard_reg_mode mir_typesize(midgard_instruction *ins);
 midgard_reg_mode mir_srcsize(midgard_instruction *ins, unsigned i);
 unsigned mir_bytes_for_mode(midgard_reg_mode mode);
+midgard_reg_mode mir_mode_for_destsize(unsigned size);
 uint16_t mir_from_bytemask(uint16_t bytemask, midgard_reg_mode mode);
+uint16_t mir_to_bytemask(midgard_reg_mode mode, unsigned mask);
 uint16_t mir_bytemask(midgard_instruction *ins);
 uint16_t mir_round_bytemask_down(uint16_t mask, midgard_reg_mode mode);
 void mir_set_bytemask(midgard_instruction *ins, uint16_t bytemask);
@@ -560,6 +566,62 @@ v_mov(unsigned src, unsigned dest)
         return ins;
 }
 
+/* Broad types of register classes so we can handle special
+ * registers */
+
+#define REG_CLASS_WORK          0
+#define REG_CLASS_LDST          1
+#define REG_CLASS_TEXR          3
+#define REG_CLASS_TEXW          4
+
+/* Like a move, but to thread local storage! */
+
+static inline midgard_instruction
+v_load_store_scratch(
+                unsigned srcdest,
+                unsigned index,
+                bool is_store,
+                unsigned mask)
+{
+        /* We index by 32-bit vec4s */
+        unsigned byte = (index * 4 * 4);
+
+        midgard_instruction ins = {
+                .type = TAG_LOAD_STORE_4,
+                .mask = mask,
+                .dest = ~0,
+                .src = { ~0, ~0, ~0 },
+                .swizzle = SWIZZLE_IDENTITY_4,
+                .load_store = {
+                        .op = is_store ? midgard_op_st_int4 : midgard_op_ld_int4,
+
+                        /* For register spilling - to thread local storage */
+                        .arg_1 = 0xEA,
+                        .arg_2 = 0x1E,
+                },
+
+                /* If we spill an unspill, RA goes into an infinite loop */
+                .no_spill = (1 << REG_CLASS_WORK)
+        };
+
+        ins.constants[0] = byte;
+
+        if (is_store) {
+                ins.src[0] = srcdest;
+
+                /* Ensure we are tightly swizzled so liveness analysis is
+                 * correct */
+
+                for (unsigned i = 0; i < 4; ++i) {
+                        if (!(mask & (1 << i)))
+                                ins.swizzle[0][i] = COMPONENT_X;
+                }
+        } else
+                ins.dest = srcdest;
+
+        return ins;
+}
+
 static inline bool
 mir_has_arg(midgard_instruction *ins, unsigned arg)
 {
@@ -578,25 +640,9 @@ mir_has_arg(midgard_instruction *ins, unsigned arg)
 
 void schedule_program(compiler_context *ctx);
 
-/* Register allocation */
-
-struct ra_graph;
-
-/* Broad types of register classes so we can handle special
- * registers */
-
-#define NR_REG_CLASSES 6
-
-#define REG_CLASS_WORK          0
-#define REG_CLASS_LDST          1
-#define REG_CLASS_LDST27        2
-#define REG_CLASS_TEXR          3
-#define REG_CLASS_TEXW          4
-#define REG_CLASS_FRAGC         5
-
+void mir_ra(compiler_context *ctx);
+void mir_squeeze_index(compiler_context *ctx);
 void mir_lower_special_reads(compiler_context *ctx);
-struct ra_graph* allocate_registers(compiler_context *ctx, bool *spilled);
-void install_registers(compiler_context *ctx, struct ra_graph *g);
 void mir_liveness_ins_update(uint16_t *live, midgard_instruction *ins, unsigned max);
 void mir_compute_liveness(compiler_context *ctx);
 void mir_invalidate_liveness(compiler_context *ctx);
@@ -625,7 +671,7 @@ midgard_emit_derivatives(compiler_context *ctx, nir_alu_instr *instr);
 void
 midgard_lower_derivatives(compiler_context *ctx, midgard_block *block);
 
-bool mir_op_computes_derivatives(unsigned op);
+bool mir_op_computes_derivatives(gl_shader_stage stage, unsigned op);
 
 /* Final emission */
 
@@ -637,6 +683,8 @@ void emit_binary_bundle(
 
 bool
 nir_undef_to_zero(nir_shader *shader);
+
+void midgard_nir_lod_errata(nir_shader *shader);
 
 /* Optimizations */
 

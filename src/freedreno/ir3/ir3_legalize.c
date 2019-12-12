@@ -134,6 +134,15 @@ legalize_block(struct ir3_legalize_ctx *ctx, struct ir3_block *block)
 		if (last_n && is_barrier(last_n)) {
 			n->flags |= IR3_INSTR_SS | IR3_INSTR_SY;
 			last_input_needs_ss = false;
+			regmask_init(&state->needs_ss_war);
+			regmask_init(&state->needs_ss);
+			regmask_init(&state->needs_sy);
+		}
+
+		if (last_n && (last_n->opc == OPC_CONDEND)) {
+			n->flags |= IR3_INSTR_SS;
+			regmask_init(&state->needs_ss_war);
+			regmask_init(&state->needs_ss);
 		}
 
 		/* NOTE: consider dst register too.. it could happen that

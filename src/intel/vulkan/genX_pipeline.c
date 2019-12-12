@@ -369,8 +369,8 @@ emit_3dstate_sbe(struct anv_pipeline *pipeline)
       if (input_index < 0)
          continue;
 
-      /* gl_Layer is stored in the VUE header */
-      if (attr == VARYING_SLOT_LAYER) {
+      /* gl_Viewport and gl_Layer are stored in the VUE header */
+      if (attr == VARYING_SLOT_VIEWPORT || attr == VARYING_SLOT_LAYER) {
          urb_entry_read_offset = 0;
          continue;
       }
@@ -999,6 +999,7 @@ emit_ds_state(struct anv_pipeline *pipeline,
       pipeline->stencil_test_enable = false;
       pipeline->writes_depth = false;
       pipeline->depth_test_enable = false;
+      pipeline->depth_bounds_test_enable = false;
       memset(depth_stencil_dw, 0, sizeof(depth_stencil_dw));
       return;
    }
@@ -1016,8 +1017,6 @@ emit_ds_state(struct anv_pipeline *pipeline,
    pipeline->writes_depth = info.depthWriteEnable;
    pipeline->depth_test_enable = info.depthTestEnable;
    pipeline->depth_bounds_test_enable = info.depthBoundsTestEnable;
-
-   /* VkBool32 depthBoundsTestEnable; // optional (depth_bounds_test) */
 
 #if GEN_GEN <= 7
    struct GENX(DEPTH_STENCIL_STATE) depth_stencil = {
@@ -1112,7 +1111,6 @@ emit_cb_state(struct anv_pipeline *pipeline,
          continue;
       }
 
-      assert(binding->binding == 0);
       const VkPipelineColorBlendAttachmentState *a =
          &info->pAttachments[binding->index];
 

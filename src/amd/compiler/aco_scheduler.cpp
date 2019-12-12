@@ -138,6 +138,11 @@ bool can_move_instr(aco_ptr<Instruction>& instr, Instruction* current, int movin
          case Format::MIMG:
             can_reorder = static_cast<MIMG_instruction*>(current)->can_reorder;
             break;
+         case Format::FLAT:
+         case Format::GLOBAL:
+         case Format::SCRATCH:
+            can_reorder = static_cast<FLAT_instruction*>(current)->can_reorder;
+            break;
          default:
             break;
          }
@@ -172,11 +177,11 @@ bool can_move_instr(aco_ptr<Instruction>& instr, Instruction* current, int movin
    }
 }
 
-bool can_reorder(Instruction* candidate, bool allow_smem)
+bool can_reorder(Instruction* candidate)
 {
    switch (candidate->format) {
    case Format::SMEM:
-      return allow_smem || static_cast<SMEM_instruction*>(candidate)->can_reorder;
+      return static_cast<SMEM_instruction*>(candidate)->can_reorder;
    case Format::MUBUF:
       return static_cast<MUBUF_instruction*>(candidate)->can_reorder;
    case Format::MIMG:
@@ -186,7 +191,7 @@ bool can_reorder(Instruction* candidate, bool allow_smem)
    case Format::FLAT:
    case Format::GLOBAL:
    case Format::SCRATCH:
-      return false;
+      return static_cast<FLAT_instruction*>(candidate)->can_reorder;
    default:
       return true;
    }
@@ -200,7 +205,7 @@ void schedule_SMEM(sched_ctx& ctx, Block* block,
    int window_size = SMEM_WINDOW_SIZE;
    int max_moves = SMEM_MAX_MOVES;
    int16_t k = 0;
-   bool can_reorder_cur = can_reorder(current, false);
+   bool can_reorder_cur = can_reorder(current);
 
    /* don't move s_memtime/s_memrealtime */
    if (current->opcode == aco_opcode::s_memtime || current->opcode == aco_opcode::s_memrealtime)
@@ -224,6 +229,7 @@ void schedule_SMEM(sched_ctx& ctx, Block* block,
    for (int candidate_idx = idx - 1; k < max_moves && candidate_idx > (int) idx - window_size; candidate_idx--) {
       assert(candidate_idx >= 0);
       aco_ptr<Instruction>& candidate = block->instructions[candidate_idx];
+      bool can_reorder_candidate = can_reorder(candidate.get());
 
       /* break if we'd make the previous SMEM instruction stall */
       bool can_stall_prev_smem = idx <= ctx.last_SMEM_dep_idx && candidate_idx < ctx.last_SMEM_dep_idx;
@@ -231,13 +237,15 @@ void schedule_SMEM(sched_ctx& ctx, Block* block,
          break;
 
       /* break when encountering another MEM instruction, logical_start or barriers */
-      if (!can_reorder(candidate.get(), false) && !can_reorder_cur)
+      if (!can_reorder_candidate && !can_reorder_cur)
          break;
       if (candidate->opcode == aco_opcode::p_logical_start)
          break;
       if (candidate->opcode == aco_opcode::p_exit_early_if)
          break;
       if (!can_move_instr(candidate, current, moving_interaction))
+         break;
+      if (candidate->isVMEM())
          break;
       register_pressure.update(register_demand[candidate_idx]);
 
@@ -264,6 +272,7 @@ void schedule_SMEM(sched_ctx& ctx, Block* block,
             if (op.isTemp())
                ctx.depends_on[op.tempId()] = true;
          }
+         can_reorder_cur &= can_reorder_candidate;
          continue;
       }
 
@@ -280,6 +289,7 @@ void schedule_SMEM(sched_ctx& ctx, Block* block,
             if (op.isTemp())
                ctx.depends_on[op.tempId()] = true;
          }
+         can_reorder_cur &= can_reorder_candidate;
          continue;
       }
 
@@ -323,12 +333,14 @@ void schedule_SMEM(sched_ctx& ctx, Block* block,
    insert_idx = idx + 1;
    moving_interaction = barrier_none;
    moving_spill = false;
+   can_reorder_cur = true;
 
    bool found_dependency = false;
    /* second, check if we have instructions after current to move up */
    for (int candidate_idx = idx + 1; k < max_moves && candidate_idx < (int) idx + window_size; candidate_idx++) {
       assert(candidate_idx < (int) block->instructions.size());
       aco_ptr<Instruction>& candidate = block->instructions[candidate_idx];
+      bool can_reorder_candidate = can_reorder(candidate.get());
 
       if (candidate->opcode == aco_opcode::p_logical_end)
          break;
@@ -369,7 +381,7 @@ void schedule_SMEM(sched_ctx& ctx, Block* block,
          }
       }
 
-      if (!can_reorder(candidate.get(), false) && !can_reorder_cur)
+      if (!can_reorder_candidate && !can_reorder_cur)
          break;
 
       if (!found_dependency) {
@@ -380,8 +392,10 @@ void schedule_SMEM(sched_ctx& ctx, Block* block,
       /* update register pressure */
       register_pressure.update(register_demand[candidate_idx - 1]);
 
-      if (is_dependency)
+      if (is_dependency) {
+         can_reorder_cur &= can_reorder_candidate;
          continue;
+      }
       assert(insert_idx != idx);
 
       // TODO: correctly calculate register pressure for this case
@@ -392,6 +406,8 @@ void schedule_SMEM(sched_ctx& ctx, Block* block,
             register_pressure_unknown = true;
       }
       if (register_pressure_unknown) {
+         if (candidate->isVMEM())
+            break;
          for (const Definition& def : candidate->definitions) {
             if (def.isTemp())
                ctx.RAR_dependencies[def.tempId()] = true;
@@ -400,6 +416,7 @@ void schedule_SMEM(sched_ctx& ctx, Block* block,
             if (op.isTemp())
                ctx.RAR_dependencies[op.tempId()] = true;
          }
+         can_reorder_cur &= can_reorder_candidate;
          continue;
       }
 
@@ -440,7 +457,10 @@ void schedule_VMEM(sched_ctx& ctx, Block* block,
    int max_moves = VMEM_MAX_MOVES;
    int clause_max_grab_dist = VMEM_CLAUSE_MAX_GRAB_DIST;
    int16_t k = 0;
-   bool can_reorder_cur = can_reorder(current, false);
+   /* initially true as we don't pull other VMEM instructions
+    * through the current instruction */
+   bool can_reorder_vmem = true;
+   bool can_reorder_smem = true;
 
    /* create the initial set of values which current depends on */
    std::fill(ctx.depends_on.begin(), ctx.depends_on.end(), false);
@@ -467,9 +487,11 @@ void schedule_VMEM(sched_ctx& ctx, Block* block,
    for (int candidate_idx = idx - 1; k < max_moves && candidate_idx > (int) idx - window_size; candidate_idx--) {
       assert(candidate_idx >= 0);
       aco_ptr<Instruction>& candidate = block->instructions[candidate_idx];
+      bool can_reorder_candidate = can_reorder(candidate.get());
+      bool is_vmem = candidate->isVMEM() || candidate->isFlatOrGlobal();
 
       /* break when encountering another VMEM instruction, logical_start or barriers */
-      if (!can_reorder(candidate.get(), true) && !can_reorder_cur)
+      if (!can_reorder_smem && candidate->format == Format::SMEM && !can_reorder_candidate)
          break;
       if (candidate->opcode == aco_opcode::p_logical_start)
          break;
@@ -485,16 +507,19 @@ void schedule_VMEM(sched_ctx& ctx, Block* block,
       register_pressure_indep.update(register_demand[candidate_idx]);
 
       bool part_of_clause = false;
-      if (candidate->isVMEM()) {
-         bool same_resource = candidate->operands[1].tempId() == current->operands[1].tempId();
+      if (current->isVMEM() == candidate->isVMEM()) {
+         bool same_resource = true;
+         if (current->isVMEM())
+            same_resource = candidate->operands[1].tempId() == current->operands[1].tempId();
+         bool can_reorder = can_reorder_vmem || can_reorder_candidate;
          int grab_dist = clause_insert_idx - candidate_idx;
          /* We can't easily tell how much this will decrease the def-to-use
           * distances, so just use how far it will be moved as a heuristic. */
-         part_of_clause = same_resource && grab_dist < clause_max_grab_dist;
+         part_of_clause = can_reorder && same_resource && grab_dist < clause_max_grab_dist;
       }
 
       /* if current depends on candidate, add additional dependencies and continue */
-      bool can_move_down = !candidate->isVMEM() || part_of_clause;
+      bool can_move_down = !is_vmem || part_of_clause;
       bool writes_exec = false;
       for (const Definition& def : candidate->definitions) {
          if (def.isTemp() && ctx.depends_on[def.tempId()])
@@ -522,6 +547,8 @@ void schedule_VMEM(sched_ctx& ctx, Block* block,
             }
          }
          register_pressure_clause.update(register_demand[candidate_idx]);
+         can_reorder_smem &= candidate->format != Format::SMEM || can_reorder_candidate;
+         can_reorder_vmem &= !is_vmem || can_reorder_candidate;
          continue;
       }
 
@@ -555,6 +582,8 @@ void schedule_VMEM(sched_ctx& ctx, Block* block,
             }
          }
          register_pressure_clause.update(register_demand[candidate_idx]);
+         can_reorder_smem &= candidate->format != Format::SMEM || can_reorder_candidate;
+         can_reorder_vmem &= !is_vmem || can_reorder_candidate;
          continue;
       }
 
@@ -605,12 +634,17 @@ void schedule_VMEM(sched_ctx& ctx, Block* block,
    int insert_idx = idx;
    moving_interaction = barrier_none;
    moving_spill = false;
+   // TODO: differentiate between loads and stores (load-load can always reorder)
+   can_reorder_vmem = true;
+   can_reorder_smem = true;
 
    bool found_dependency = false;
    /* second, check if we have instructions after current to move up */
    for (int candidate_idx = idx + 1; k < max_moves && candidate_idx < (int) idx + window_size; candidate_idx++) {
       assert(candidate_idx < (int) block->instructions.size());
       aco_ptr<Instruction>& candidate = block->instructions[candidate_idx];
+      bool can_reorder_candidate = can_reorder(candidate.get());
+      bool is_vmem = candidate->isVMEM() || candidate->isFlatOrGlobal();
 
       if (candidate->opcode == aco_opcode::p_logical_end)
          break;
@@ -623,7 +657,11 @@ void schedule_VMEM(sched_ctx& ctx, Block* block,
          break;
 
       /* check if candidate depends on current */
-      bool is_dependency = !can_reorder(candidate.get(), true) && !can_reorder_cur;
+      bool is_dependency = false;
+      if (candidate->format == Format::SMEM)
+         is_dependency = !can_reorder_smem && !can_reorder_candidate;
+      if (is_vmem)
+         is_dependency = !can_reorder_vmem && !can_reorder_candidate;
       for (const Operand& op : candidate->operands) {
          if (op.isTemp() && ctx.depends_on[op.tempId()]) {
             is_dependency = true;
@@ -645,6 +683,10 @@ void schedule_VMEM(sched_ctx& ctx, Block* block,
             if (op.isTemp())
                ctx.RAR_dependencies[op.tempId()] = true;
          }
+         /* update flag whether we can reorder other memory instructions */
+         can_reorder_smem &= candidate->format != Format::SMEM || can_reorder_candidate;
+         can_reorder_vmem &= !is_vmem || can_reorder_candidate;
+
          if (!found_dependency) {
             insert_idx = candidate_idx;
             found_dependency = true;
@@ -652,7 +694,9 @@ void schedule_VMEM(sched_ctx& ctx, Block* block,
             register_pressure = register_demand[insert_idx - 1];
             continue;
          }
-      } else if (candidate->isVMEM()) {
+
+      } else if (is_vmem) {
+         /* don't move up dependencies of other VMEM instructions */
          for (const Definition& def : candidate->definitions) {
             if (def.isTemp())
                ctx.depends_on[def.tempId()] = true;
@@ -681,6 +725,8 @@ void schedule_VMEM(sched_ctx& ctx, Block* block,
             if (op.isTemp())
                ctx.RAR_dependencies[op.tempId()] = true;
          }
+         can_reorder_smem &= candidate->format != Format::SMEM || can_reorder_candidate;
+         can_reorder_vmem &= !is_vmem || can_reorder_candidate;
          continue;
       }
 
@@ -746,7 +792,7 @@ void schedule_position_export(sched_ctx& ctx, Block* block,
          break;
       if (candidate->opcode == aco_opcode::p_exit_early_if)
          break;
-      if (candidate->isVMEM() || candidate->format == Format::SMEM)
+      if (candidate->isVMEM() || candidate->format == Format::SMEM || candidate->isFlatOrGlobal())
          break;
       if (!can_move_instr(candidate, current, moving_interaction))
          break;
@@ -839,7 +885,7 @@ void schedule_block(sched_ctx& ctx, Program *program, Block* block, live& live_v
       if (current->definitions.empty())
          continue;
 
-      if (current->isVMEM())
+      if (current->isVMEM() || current->isFlatOrGlobal())
          schedule_VMEM(ctx, block, live_vars.register_demand[block->index], current, idx);
       if (current->format == Format::SMEM)
          schedule_SMEM(ctx, block, live_vars.register_demand[block->index], current, idx);

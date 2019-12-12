@@ -31,10 +31,10 @@
 #include "pipe/p_screen.h"
 #include "pipe/p_defines.h"
 #include "util/u_memory.h"
-#include "util/u_format.h"
+#include "util/format/u_format.h"
 #include "util/u_inlines.h"
 #include "util/u_cpu_detect.h"
-#include "util/u_format_s3tc.h"
+#include "util/format/u_format_s3tc.h"
 #include "util/u_string.h"
 #include "util/u_screen.h"
 
@@ -142,7 +142,9 @@ swr_is_format_supported(struct pipe_screen *_screen,
    }
 
    if (format_desc->layout == UTIL_FORMAT_LAYOUT_BPTC ||
-       format_desc->layout == UTIL_FORMAT_LAYOUT_ASTC) {
+       format_desc->layout == UTIL_FORMAT_LAYOUT_ASTC ||
+       format_desc->layout == UTIL_FORMAT_LAYOUT_FXT1)
+   {
       return false;
    }
 
@@ -274,6 +276,7 @@ swr_get_param(struct pipe_screen *screen, enum pipe_cap param)
    case PIPE_CAP_DOUBLES:
    case PIPE_CAP_TEXTURE_QUERY_LOD:
    case PIPE_CAP_COPY_BETWEEN_COMPRESSED_AND_PLAIN_FORMATS:
+   case PIPE_CAP_TGSI_TG4_COMPONENT_IN_SWIZZLE:
       return 1;
 
    /* MSAA support

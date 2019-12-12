@@ -125,6 +125,33 @@ vector_to_scalar_alu(midgard_vector_alu v, midgard_instruction *ins)
         return s;
 }
 
+/* 64-bit swizzles are super easy since there are 2 components of 2 components
+ * in an 8-bit field ... lots of duplication to go around!
+ *
+ * Swizzles of 32-bit vectors accessed from 64-bit instructions are a little
+ * funny -- pack them *as if* they were native 64-bit, using rep_* flags to
+ * flag upper. For instance, xy would become 64-bit XY but that's just xyzw
+ * native. Likewise, zz would become 64-bit XX with rep* so it would be xyxy
+ * with rep. Pretty nifty, huh? */
+
+static unsigned
+mir_pack_swizzle_64(unsigned *swizzle, unsigned max_component)
+{
+        unsigned packed = 0;
+
+        for (unsigned i = 0; i < 2; ++i) {
+                assert(swizzle[i] <= max_component);
+
+                unsigned a = swizzle[i] & 1 ?
+                        (COMPONENT_W << 2) | COMPONENT_Z :
+                        (COMPONENT_Y << 2) | COMPONENT_X;
+
+                packed |= a << (i * 4);
+        }
+
+        return packed;
+}
+
 static void
 mir_pack_swizzle_alu(midgard_instruction *ins)
 {
@@ -136,14 +163,50 @@ mir_pack_swizzle_alu(midgard_instruction *ins)
         for (unsigned i = 0; i < 2; ++i) {
                 unsigned packed = 0;
 
-                /* TODO: non-32-bit, non-vec4 */
-                for (unsigned c = 0; c < 4; ++c) {
-                        unsigned v = ins->swizzle[i][c];
+                if (ins->alu.reg_mode == midgard_reg_mode_64) {
+                        midgard_reg_mode mode = mir_srcsize(ins, i);
+                        unsigned components = 16 / mir_bytes_for_mode(mode);
 
-                        /* Check vec4 */
-                        assert(v <= 3);
+                        packed = mir_pack_swizzle_64(ins->swizzle[i], components);
 
-                        packed |= v << (2 * c);
+                        if (mode == midgard_reg_mode_32) {
+                                src[i].rep_low |= (ins->swizzle[i][0] >= COMPONENT_Z);
+                                src[i].rep_high |= (ins->swizzle[i][1] >= COMPONENT_Z);
+                        } else if (mode < midgard_reg_mode_32) {
+                                unreachable("Cannot encode 8/16 swizzle in 64-bit");
+                        }
+                } else {
+                        /* For 32-bit, swizzle packing is stupid-simple. For 16-bit,
+                         * the strategy is to check whether the nibble we're on is
+                         * upper or lower. We need all components to be on the same
+                         * "side"; that much is enforced by the ISA and should have
+                         * been lowered. TODO: 8-bit packing. TODO: vec8 */
+
+                        unsigned first = ins->mask ? ffs(ins->mask) - 1 : 0;
+                        bool upper = ins->swizzle[i][first] > 3;
+
+                        if (upper && ins->mask)
+                                assert(mir_srcsize(ins, i) <= midgard_reg_mode_16);
+
+                        for (unsigned c = 0; c < 4; ++c) {
+                                unsigned v = ins->swizzle[i][c];
+
+                                bool t_upper = v > 3;
+
+                                /* Ensure we're doing something sane */
+
+                                if (ins->mask & (1 << c)) {
+                                        assert(t_upper == upper);
+                                        assert(v <= 7);
+                                }
+
+                                /* Use the non upper part */
+                                v &= 0x3;
+
+                                packed |= v << (2 * c);
+                        }
+
+                        src[i].rep_high = upper;
                 }
 
                 src[i].swizzle = packed;
@@ -195,6 +258,35 @@ mir_pack_swizzle_tex(midgard_instruction *ins)
         /* TODO: bias component */
 }
 
+/* Load store masks are 4-bits. Load/store ops pack for that. vec4 is the
+ * natural mask width; vec8 is constrained to be in pairs, vec2 is duplicated. TODO: 8-bit?
+ */
+
+static void
+mir_pack_ldst_mask(midgard_instruction *ins)
+{
+        midgard_reg_mode mode = mir_typesize(ins);
+        unsigned packed = ins->mask;
+
+        if (mode == midgard_reg_mode_64) {
+                packed = ((ins->mask & 0x2) ? (0x8 | 0x4) : 0) |
+                         ((ins->mask & 0x1) ? (0x2 | 0x1) : 0);
+        } else if (mode == midgard_reg_mode_16) {
+                packed = 0;
+
+                for (unsigned i = 0; i < 4; ++i) {
+                        /* Make sure we're duplicated */
+                        bool u = (ins->mask & (1 << (2*i + 0))) != 0;
+                        bool v = (ins->mask & (1 << (2*i + 1))) != 0;
+                        assert(u == v);
+
+                        packed |= (u << i);
+                }
+        }
+
+        ins->load_store.mask = packed;
+}
+
 static void
 emit_alu_bundle(compiler_context *ctx,
                 midgard_bundle *bundle,
@@ -229,8 +321,10 @@ emit_alu_bundle(compiler_context *ctx,
                 midgard_scalar_alu scalarized;
 
                 if (ins->unit & UNITS_ANY_VECTOR) {
-                        if (ins->alu.reg_mode == midgard_reg_mode_32)
-                                ins->alu.mask = expand_writemask_32(ins->mask);
+                        if (ins->alu.reg_mode == midgard_reg_mode_64)
+                                ins->alu.mask = expand_writemask(ins->mask, 2);
+                        else if (ins->alu.reg_mode == midgard_reg_mode_32)
+                                ins->alu.mask = expand_writemask(ins->mask, 4);
                         else
                                 ins->alu.mask = ins->mask;
 
@@ -265,6 +359,19 @@ emit_alu_bundle(compiler_context *ctx,
         }
 }
 
+/* Shift applied to the immediate used as an offset. Probably this is papering
+ * over some other semantic distinction else well, but it unifies things in the
+ * compiler so I don't mind. */
+
+static unsigned
+mir_ldst_imm_shift(midgard_load_store_op op)
+{
+        if (OP_IS_UBO_READ(op))
+                return 3;
+        else
+                return 1;
+}
+
 /* After everything is scheduled, emit whole bundles at a time */
 
 void
@@ -291,10 +398,20 @@ emit_binary_bundle(compiler_context *ctx,
                 /* Copy masks */
 
                 for (unsigned i = 0; i < bundle->instruction_count; ++i) {
-                        bundle->instructions[i]->load_store.mask =
-                                bundle->instructions[i]->mask;
+                        mir_pack_ldst_mask(bundle->instructions[i]);
 
                         mir_pack_swizzle_ldst(bundle->instructions[i]);
+
+                        /* Apply a constant offset */
+                        unsigned offset = bundle->instructions[i]->constants[0];
+
+                        if (offset) {
+                                unsigned shift = mir_ldst_imm_shift(bundle->instructions[i]->load_store.op);
+                                unsigned upper_shift = 10 - shift;
+
+                                bundle->instructions[i]->load_store.varying_parameters |= (offset & ((1 << upper_shift) - 1)) << shift;
+                                bundle->instructions[i]->load_store.address |= (offset >> upper_shift);
+                        }
                 }
 
                 memcpy(&current64, &bundle->instructions[0]->load_store, sizeof(current64));
@@ -329,7 +446,7 @@ emit_binary_bundle(compiler_context *ctx,
 
                 ctx->texture_op_count--;
 
-                if (mir_op_computes_derivatives(ins->texture.op)) {
+                if (mir_op_computes_derivatives(ctx->stage, ins->texture.op)) {
                         bool continues = ctx->texture_op_count > 0;
 
                         /* Control flow complicates helper invocation

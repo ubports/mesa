@@ -48,6 +48,7 @@
 #include "midgard_ops.h"
 #include "helpers.h"
 #include "compiler.h"
+#include "midgard_quirks.h"
 
 #include "disassemble.h"
 
@@ -345,6 +346,17 @@ midgard_sysval_for_ssbo(nir_intrinsic_instr *instr)
 }
 
 static int
+midgard_sysval_for_sampler(nir_intrinsic_instr *instr)
+{
+        /* TODO: indirect samplers !!! */
+        nir_src index = instr->src[0];
+        assert(nir_src_is_const(index));
+        uint32_t uindex = nir_src_as_uint(index);
+
+        return PAN_SYSVAL(SAMPLER, uindex);
+}
+
+static int
 midgard_nir_sysval_for_intrinsic(nir_intrinsic_instr *instr)
 {
         switch (instr->intrinsic) {
@@ -357,6 +369,8 @@ midgard_nir_sysval_for_intrinsic(nir_intrinsic_instr *instr)
         case nir_intrinsic_load_ssbo: 
         case nir_intrinsic_store_ssbo: 
                 return midgard_sysval_for_ssbo(instr);
+        case nir_intrinsic_load_sampler_lod_parameters_pan:
+                return midgard_sysval_for_sampler(instr);
         default:
                 return ~0;
         }
@@ -471,7 +485,7 @@ midgard_nir_lower_fdot2(nir_shader *shader)
 /* Flushes undefined values to zero */
 
 static void
-optimise_nir(nir_shader *nir)
+optimise_nir(nir_shader *nir, unsigned quirks)
 {
         bool progress;
         unsigned lower_flrp =
@@ -485,10 +499,17 @@ optimise_nir(nir_shader *nir)
 
         nir_lower_tex_options lower_tex_options = {
                 .lower_txs_lod = true,
-                .lower_txp = ~0
+                .lower_txp = ~0,
+                .lower_tex_without_implicit_lod =
+                        (quirks & MIDGARD_EXPLICIT_LOD),
         };
 
         NIR_PASS(progress, nir, nir_lower_tex, &lower_tex_options);
+
+        /* T720 is broken. */
+
+        if (quirks & MIDGARD_BROKEN_LOD)
+                NIR_PASS_V(nir, midgard_nir_lod_errata);
 
         do {
                 progress = false;
@@ -826,6 +847,7 @@ emit_alu(compiler_context *ctx, nir_alu_instr *instr)
         case nir_op_i2i8:
         case nir_op_i2i16:
         case nir_op_i2i32:
+        case nir_op_i2i64:
                 /* If we end up upscale, we'll need a sign-extend on the
                  * operand (the second argument) */
 
@@ -833,7 +855,8 @@ emit_alu(compiler_context *ctx, nir_alu_instr *instr)
                 /* fallthrough */
         case nir_op_u2u8:
         case nir_op_u2u16:
-        case nir_op_u2u32: {
+        case nir_op_u2u32:
+        case nir_op_u2u64: {
                 op = midgard_alu_op_imov;
 
                 if (dst_bitsize == (src_bitsize * 2)) {
@@ -1102,15 +1125,27 @@ emit_alu(compiler_context *ctx, nir_alu_instr *instr)
 
 #undef ALU_CASE
 
-static unsigned
-mir_mask_for_intr(nir_instr *instr, bool is_read)
+static void
+mir_set_intr_mask(nir_instr *instr, midgard_instruction *ins, bool is_read)
 {
         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+        unsigned nir_mask = 0;
+        unsigned dsize = 0;
 
-        if (is_read)
-                return mask_of(nir_intrinsic_dest_components(intr));
-        else
-                return nir_intrinsic_write_mask(intr);
+        if (is_read) {
+                nir_mask = mask_of(nir_intrinsic_dest_components(intr));
+                dsize = nir_dest_bit_size(intr->dest);
+        } else {
+                nir_mask = nir_intrinsic_write_mask(intr);
+                dsize = 32;
+        }
+
+        /* Once we have the NIR mask, we need to normalize to work in 32-bit space */
+        unsigned bytemask = mir_to_bytemask(mir_mode_for_destsize(dsize), nir_mask);
+        mir_set_bytemask(ins, bytemask);
+
+        if (dsize == 64)
+                ins->load_64 = true;
 }
 
 /* Uniforms and UBOs use a shared code path, as uniforms are just (slightly
@@ -1127,15 +1162,9 @@ emit_ubo_read(
 {
         /* TODO: half-floats */
 
-        midgard_instruction ins = m_ld_ubo_int4(dest, offset);
-
-        assert((offset & 0xF) == 0);
-        offset /= 16;
-
-        /* TODO: Don't split */
-        ins.load_store.varying_parameters = (offset & 7) << 7;
-        ins.load_store.address = offset >> 3;
-        ins.mask = mir_mask_for_intr(instr, true);
+        midgard_instruction ins = m_ld_ubo_int4(dest, 0);
+        ins.constants[0] = offset;
+        mir_set_intr_mask(instr, &ins, true);
 
         if (indirect_offset) {
                 ins.src[2] = nir_src_index(ctx, indirect_offset);
@@ -1205,7 +1234,7 @@ emit_ssbo_access(
 
         ins.load_store.varying_parameters = (offset & 0x1FF) << 1;
         ins.load_store.address = (offset >> 9);
-        ins.mask = mir_mask_for_intr(instr, is_read);
+        mir_set_intr_mask(instr, &ins, is_read);
 
         emit_mir_instruction(ctx, ins);
 }
@@ -1477,10 +1506,30 @@ emit_intrinsic(compiler_context *ctx, nir_intrinsic_instr *instr)
         /* Reads 128-bit value raw off the tilebuffer during blending, tasty */
 
         case nir_intrinsic_load_raw_output_pan:
+        case nir_intrinsic_load_output_u8_as_fp16_pan:
                 reg = nir_dest_index(ctx, &instr->dest);
                 assert(ctx->is_blend);
 
+                /* T720 and below use different blend opcodes with slightly
+                 * different semantics than T760 and up */
+
                 midgard_instruction ld = m_ld_color_buffer_8(reg, 0);
+                bool old_blend = ctx->quirks & MIDGARD_OLD_BLEND;
+
+                if (instr->intrinsic == nir_intrinsic_load_output_u8_as_fp16_pan) {
+                        ld.load_store.op = old_blend ?
+                                midgard_op_ld_color_buffer_u8_as_fp16_old :
+                                midgard_op_ld_color_buffer_u8_as_fp16;
+
+                        if (old_blend) {
+                                ld.load_store.address = 1;
+                                ld.load_store.arg_2 = 0x1E;
+                        }
+
+                        for (unsigned c = 2; c < 16; ++c)
+                                ld.swizzle[0][c] = 0;
+                }
+
                 emit_mir_instruction(ctx, ld);
                 break;
 
@@ -1541,7 +1590,26 @@ emit_intrinsic(compiler_context *ctx, nir_intrinsic_instr *instr)
         case nir_intrinsic_store_raw_output_pan:
                 assert (ctx->stage == MESA_SHADER_FRAGMENT);
                 reg = nir_src_index(ctx, &instr->src[0]);
-                emit_fragment_store(ctx, reg, 0);
+
+                if (ctx->quirks & MIDGARD_OLD_BLEND) {
+                        /* Suppose reg = qr0.xyzw. That means 4 8-bit ---> 1 32-bit. So
+                         * reg = r0.x. We want to splatter. So we can do a 32-bit move
+                         * of:
+                         *
+                         * imov r0.xyzw, r0.xxxx
+                         */
+
+                        unsigned expanded = make_compiler_temp(ctx);
+
+                        midgard_instruction splatter = v_mov(reg, expanded);
+
+                        for (unsigned c = 0; c < 16; ++c)
+                                splatter.swizzle[1][c] = 0;
+
+                        emit_mir_instruction(ctx, splatter);
+                        emit_fragment_store(ctx, expanded, 0);
+                } else
+                        emit_fragment_store(ctx, reg, 0);
 
                 break;
 
@@ -1562,6 +1630,7 @@ emit_intrinsic(compiler_context *ctx, nir_intrinsic_instr *instr)
         case nir_intrinsic_load_viewport_scale:
         case nir_intrinsic_load_viewport_offset:
         case nir_intrinsic_load_num_work_groups:
+        case nir_intrinsic_load_sampler_lod_parameters_pan:
                 emit_sysval_read(ctx, &instr->instr, ~0, 3);
                 break;
 
@@ -1781,14 +1850,6 @@ emit_texop_native(compiler_context *ctx, nir_tex_instr *instr,
 static void
 emit_tex(compiler_context *ctx, nir_tex_instr *instr)
 {
-        /* Fixup op, since only textureLod is permitted in VS but NIR can give
-         * generic tex in some cases (which confuses the hardware) */
-
-        bool is_vertex = ctx->stage == MESA_SHADER_VERTEX;
-
-        if (is_vertex && instr->op == nir_texop_tex)
-                instr->op = nir_texop_txl;
-
         switch (instr->op) {
         case nir_texop_tex:
         case nir_texop_txb:
@@ -2359,10 +2420,10 @@ midgard_get_first_tag_from_block(compiler_context *ctx, unsigned block_idx)
         unsigned first_tag = 0;
 
         mir_foreach_block_from(ctx, initial_block, v) {
-                midgard_bundle *initial_bundle =
-                        util_dynarray_element(&v->bundles, midgard_bundle, 0);
+                if (v->quadword_count) {
+                        midgard_bundle *initial_bundle =
+                                util_dynarray_element(&v->bundles, midgard_bundle, 0);
 
-                if (initial_bundle) {
                         first_tag = initial_bundle->tag;
                         break;
                 }
@@ -2372,7 +2433,7 @@ midgard_get_first_tag_from_block(compiler_context *ctx, unsigned block_idx)
 }
 
 int
-midgard_compile_shader_nir(struct midgard_screen *screen, nir_shader *nir, midgard_program *program, bool is_blend)
+midgard_compile_shader_nir(nir_shader *nir, midgard_program *program, bool is_blend, unsigned gpu_id)
 {
         struct util_dynarray *compiled = &program->compiled;
 
@@ -2382,10 +2443,10 @@ midgard_compile_shader_nir(struct midgard_screen *screen, nir_shader *nir, midga
         compiler_context *ctx = rzalloc(NULL, compiler_context);
 
         ctx->nir = nir;
-        ctx->screen = screen;
         ctx->stage = nir->info.stage;
         ctx->is_blend = is_blend;
         ctx->alpha_ref = program->alpha_ref;
+        ctx->quirks = midgard_get_quirks(gpu_id);
 
         /* Start off with a safe cutoff, allowing usage of all 16 work
          * registers. Later, we'll promote uniform reads to uniform registers
@@ -2437,7 +2498,7 @@ midgard_compile_shader_nir(struct midgard_screen *screen, nir_shader *nir, midga
 
         /* Optimisation passes */
 
-        optimise_nir(nir);
+        optimise_nir(nir, ctx->quirks);
 
         if (midgard_debug & MIDGARD_DBG_SHADERS) {
                 nir_print_shader(nir, stdout);
@@ -2525,6 +2586,7 @@ midgard_compile_shader_nir(struct midgard_screen *screen, nir_shader *nir, midga
 
         /* Schedule! */
         schedule_program(ctx);
+        mir_ra(ctx);
 
         /* Now that all the bundles are scheduled and we can calculate block
          * sizes, emit actual branch instructions rather than placeholders */
@@ -2696,7 +2758,7 @@ midgard_compile_shader_nir(struct midgard_screen *screen, nir_shader *nir, midga
         program->tls_size = ctx->tls_size;
 
         if (midgard_debug & MIDGARD_DBG_SHADERS)
-                disassemble_midgard(program->compiled.data, program->compiled.size);
+                disassemble_midgard(program->compiled.data, program->compiled.size, gpu_id, ctx->stage);
 
         if (midgard_debug & MIDGARD_DBG_SHADERDB) {
                 unsigned nr_bundles = 0, nr_ins = 0;

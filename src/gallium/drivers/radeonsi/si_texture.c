@@ -25,7 +25,7 @@
 
 #include "si_pipe.h"
 #include "si_query.h"
-#include "util/u_format.h"
+#include "util/format/u_format.h"
 #include "util/u_log.h"
 #include "util/u_memory.h"
 #include "util/u_pack_color.h"
@@ -199,7 +199,8 @@ static unsigned si_texture_get_offset(struct si_screen *sscreen,
 
 		/* Each texture is an array of slices. Each slice is an array
 		 * of mipmap levels. */
-		return box->z * tex->surface.u.gfx9.surf_slice_size +
+		return tex->surface.u.gfx9.surf_offset +
+		       box->z * tex->surface.u.gfx9.surf_slice_size +
 		       tex->surface.u.gfx9.offset[level] +
 		       (box->y / tex->surface.blk_h *
 			tex->surface.u.gfx9.surf_pitch +
@@ -619,6 +620,7 @@ static void si_reallocate_texture_inplace(struct si_context *sctx,
 	tex->can_sample_s = new_tex->can_sample_s;
 
 	tex->separate_dcc_dirty = new_tex->separate_dcc_dirty;
+	tex->displayable_dcc_dirty = new_tex->displayable_dcc_dirty;
 	tex->dcc_gather_statistics = new_tex->dcc_gather_statistics;
 	si_resource_reference(&tex->dcc_separate_buffer,
 				new_tex->dcc_separate_buffer);
@@ -1721,10 +1723,12 @@ struct pipe_resource *si_texture_create(struct pipe_screen *screen,
 		tex->plane_index = i;
 		tex->num_planes = num_planes;
 
-		if (!last_plane)
+		if (!plane0) {
 			plane0 = last_plane = tex;
-		else
+		} else {
 			last_plane->buffer.b.b.next = &tex->buffer.b.b;
+			last_plane = tex;
+		}
 	}
 
 	return (struct pipe_resource *)plane0;

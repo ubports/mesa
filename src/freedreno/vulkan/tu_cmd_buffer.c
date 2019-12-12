@@ -36,6 +36,8 @@
 #include "tu_cs.h"
 #include "tu_blit.h"
 
+#define OVERFLOW_FLAG_REG REG_A6XX_CP_SCRATCH_REG(0)
+
 void
 tu_bo_list_init(struct tu_bo_list *list)
 {
@@ -62,6 +64,8 @@ static uint32_t
 tu_bo_list_add_info(struct tu_bo_list *list,
                     const struct drm_msm_gem_submit_bo *bo_info)
 {
+   assert(bo_info->handle != 0);
+
    for (uint32_t i = 0; i < list->count; ++i) {
       if (list->bo_infos[i].handle == bo_info->handle) {
          assert(list->bo_infos[i].presumed == bo_info->presumed);
@@ -217,8 +221,8 @@ tu_tiling_config_update_pipes(struct tu_tiling_config *tiling,
    const uint32_t used_pipe_count =
       tiling->pipe_count.width * tiling->pipe_count.height;
    const VkExtent2D last_pipe = {
-      .width = tiling->tile_count.width % tiling->pipe0.width,
-      .height = tiling->tile_count.height % tiling->pipe0.height,
+      .width = (tiling->tile_count.width - 1) % tiling->pipe0.width + 1,
+      .height = (tiling->tile_count.height - 1) % tiling->pipe0.height + 1,
    };
 
    assert(used_pipe_count <= max_pipe_count);
@@ -353,18 +357,23 @@ tu6_emit_marker(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
    tu_cs_emit_write_reg(cs, cmd->marker_reg, ++cmd->marker_seqno);
 }
 
-void
+unsigned
 tu6_emit_event_write(struct tu_cmd_buffer *cmd,
                      struct tu_cs *cs,
                      enum vgt_event_type event,
                      bool need_seqno)
 {
+   unsigned seqno = 0;
+
    tu_cs_emit_pkt7(cs, CP_EVENT_WRITE, need_seqno ? 4 : 1);
    tu_cs_emit(cs, CP_EVENT_WRITE_0_EVENT(event));
    if (need_seqno) {
       tu_cs_emit_qw(cs, cmd->scratch_bo.iova);
-      tu_cs_emit(cs, ++cmd->scratch_seqno);
+      seqno = ++cmd->scratch_seqno;
+      tu_cs_emit(cs, seqno);
    }
+
+   return seqno;
 }
 
 static void
@@ -385,6 +394,22 @@ tu6_emit_wfi(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
    if (cmd->wait_for_idle) {
       tu_cs_emit_wfi(cs);
       cmd->wait_for_idle = false;
+   }
+}
+
+static void
+tu6_emit_flag_buffer(struct tu_cs *cs, const struct tu_image_view *iview)
+{
+   uint64_t va = tu_image_ubwc_base(iview->image, iview->base_mip, iview->base_layer);
+   uint32_t pitch = tu_image_ubwc_pitch(iview->image, iview->base_mip);
+   uint32_t size = tu_image_ubwc_size(iview->image, iview->base_mip);
+   if (iview->image->layout.ubwc_size) {
+      tu_cs_emit_qw(cs, va);
+      tu_cs_emit(cs, A6XX_RB_DEPTH_FLAG_BUFFER_PITCH_PITCH(pitch) |
+                     A6XX_RB_DEPTH_FLAG_BUFFER_PITCH_ARRAY_PITCH(size >> 2));
+   } else {
+      tu_cs_emit_qw(cs, 0);
+      tu_cs_emit(cs, 0);
    }
 }
 
@@ -422,29 +447,21 @@ tu6_emit_zs(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
       return;
    }
 
-   uint32_t gmem_index = 0;
-   for (uint32_t i = 0; i < subpass->color_count; ++i) {
-      uint32_t a = subpass->color_attachments[i].attachment;
-      if (a != VK_ATTACHMENT_UNUSED)
-         gmem_index++;
-   }
-
    const struct tu_image_view *iview = fb->attachments[a].attachment;
-   const struct tu_image_level *slice = &iview->image->levels[iview->base_mip];
    enum a6xx_depth_format fmt = tu6_pipe2depth(iview->vk_format);
-
-   uint32_t offset = slice->offset + slice->size * iview->base_layer;
-   uint32_t stride = slice->pitch * iview->image->cpp;
 
    tu_cs_emit_pkt4(cs, REG_A6XX_RB_DEPTH_BUFFER_INFO, 6);
    tu_cs_emit(cs, A6XX_RB_DEPTH_BUFFER_INFO_DEPTH_FORMAT(fmt));
-   tu_cs_emit(cs, A6XX_RB_DEPTH_BUFFER_PITCH(stride));
-   tu_cs_emit(cs, A6XX_RB_DEPTH_BUFFER_ARRAY_PITCH(slice->size));
-   tu_cs_emit_qw(cs, iview->image->bo->iova + iview->image->bo_offset + offset);
-   tu_cs_emit(cs, tiling->gmem_offsets[gmem_index]);
+   tu_cs_emit(cs, A6XX_RB_DEPTH_BUFFER_PITCH(tu_image_stride(iview->image, iview->base_mip)));
+   tu_cs_emit(cs, A6XX_RB_DEPTH_BUFFER_ARRAY_PITCH(iview->image->layout.layer_size));
+   tu_cs_emit_qw(cs, tu_image_base(iview->image, iview->base_mip, iview->base_layer));
+   tu_cs_emit(cs, tiling->gmem_offsets[subpass->color_count]);
 
    tu_cs_emit_pkt4(cs, REG_A6XX_GRAS_SU_DEPTH_BUFFER_INFO, 1);
    tu_cs_emit(cs, A6XX_GRAS_SU_DEPTH_BUFFER_INFO_DEPTH_FORMAT(fmt));
+
+   tu_cs_emit_pkt4(cs, REG_A6XX_RB_DEPTH_FLAG_BUFFER_BASE_LO, 3);
+   tu6_emit_flag_buffer(cs, iview);
 
    tu_cs_emit_pkt4(cs, REG_A6XX_GRAS_LRZ_BUFFER_BASE_LO, 5);
    tu_cs_emit(cs, 0x00000000); /* RB_DEPTH_FLAG_BUFFER_BASE_LO */
@@ -468,19 +485,14 @@ tu6_emit_mrt(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
    unsigned char mrt_comp[MAX_RTS] = { 0 };
    unsigned srgb_cntl = 0;
 
-   uint32_t gmem_index = 0;
    for (uint32_t i = 0; i < subpass->color_count; ++i) {
       uint32_t a = subpass->color_attachments[i].attachment;
       if (a == VK_ATTACHMENT_UNUSED)
          continue;
 
       const struct tu_image_view *iview = fb->attachments[a].attachment;
-      const struct tu_image_level *slice =
-         &iview->image->levels[iview->base_mip];
       const enum a6xx_tile_mode tile_mode =
          tu6_get_image_tile_mode(iview->image, iview->base_mip);
-      uint32_t stride = 0;
-      uint32_t offset = 0;
 
       mrt_comp[i] = 0xf;
 
@@ -491,33 +503,23 @@ tu6_emit_mrt(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
          tu6_get_native_format(iview->vk_format);
       assert(format && format->rb >= 0);
 
-      offset = slice->offset + slice->size * iview->base_layer;
-      stride = slice->pitch * iview->image->cpp;
-
       tu_cs_emit_pkt4(cs, REG_A6XX_RB_MRT_BUF_INFO(i), 6);
       tu_cs_emit(cs, A6XX_RB_MRT_BUF_INFO_COLOR_FORMAT(format->rb) |
                         A6XX_RB_MRT_BUF_INFO_COLOR_TILE_MODE(tile_mode) |
                         A6XX_RB_MRT_BUF_INFO_COLOR_SWAP(format->swap));
-      tu_cs_emit(cs, A6XX_RB_MRT_PITCH(stride));
-      tu_cs_emit(cs, A6XX_RB_MRT_ARRAY_PITCH(slice->size));
-      tu_cs_emit_qw(cs, iview->image->bo->iova + iview->image->bo_offset +
-                           offset); /* BASE_LO/HI */
+      tu_cs_emit(cs, A6XX_RB_MRT_PITCH(tu_image_stride(iview->image, iview->base_mip)));
+      tu_cs_emit(cs, A6XX_RB_MRT_ARRAY_PITCH(iview->image->layout.layer_size));
+      tu_cs_emit_qw(cs, tu_image_base(iview->image, iview->base_mip, iview->base_layer));
       tu_cs_emit(
-         cs, tiling->gmem_offsets[gmem_index++]); /* RB_MRT[i].BASE_GMEM */
+         cs, tiling->gmem_offsets[i]); /* RB_MRT[i].BASE_GMEM */
 
       tu_cs_emit_pkt4(cs, REG_A6XX_SP_FS_MRT_REG(i), 1);
-      tu_cs_emit(cs, A6XX_SP_FS_MRT_REG_COLOR_FORMAT(format->rb));
+      tu_cs_emit(cs, A6XX_SP_FS_MRT_REG_COLOR_FORMAT(format->rb) |
+                     COND(vk_format_is_sint(iview->vk_format), A6XX_SP_FS_MRT_REG_COLOR_SINT) |
+                     COND(vk_format_is_uint(iview->vk_format), A6XX_SP_FS_MRT_REG_COLOR_UINT));
 
-#if 0
-      /* when we support UBWC, these would be the system memory
-       * addr/pitch/etc:
-       */
-      tu_cs_emit_pkt4(cs, REG_A6XX_RB_MRT_FLAG_BUFFER(i), 4);
-      tu_cs_emit(cs, 0x00000000);    /* RB_MRT_FLAG_BUFFER[i].ADDR_LO */
-      tu_cs_emit(cs, 0x00000000);    /* RB_MRT_FLAG_BUFFER[i].ADDR_HI */
-      tu_cs_emit(cs, A6XX_RB_MRT_FLAG_BUFFER_PITCH(0));
-      tu_cs_emit(cs, A6XX_RB_MRT_FLAG_BUFFER_ARRAY_PITCH(0));
-#endif
+      tu_cs_emit_pkt4(cs, REG_A6XX_RB_MRT_FLAG_BUFFER(i), 3);
+      tu6_emit_flag_buffer(cs, iview);
    }
 
    tu_cs_emit_pkt4(cs, REG_A6XX_RB_SRGB_CNTL, 1);
@@ -633,11 +635,6 @@ tu6_emit_blit_info(struct tu_cmd_buffer *cmd,
                    uint32_t gmem_offset,
                    uint32_t blit_info)
 {
-   const struct tu_image_level *slice =
-      &iview->image->levels[iview->base_mip];
-   const uint32_t offset = slice->offset + slice->size * iview->base_layer;
-   const uint32_t stride = slice->pitch * iview->image->cpp;
-
    tu_cs_emit_pkt4(cs, REG_A6XX_RB_BLIT_INFO, 1);
    tu_cs_emit(cs, blit_info);
 
@@ -651,11 +648,17 @@ tu6_emit_blit_info(struct tu_cmd_buffer *cmd,
    tu_cs_emit(cs, A6XX_RB_BLIT_DST_INFO_TILE_MODE(tile_mode) |
                      A6XX_RB_BLIT_DST_INFO_SAMPLES(tu_msaa_samples(iview->image->samples)) |
                      A6XX_RB_BLIT_DST_INFO_COLOR_FORMAT(format->rb) |
-                     A6XX_RB_BLIT_DST_INFO_COLOR_SWAP(format->swap));
-   tu_cs_emit_qw(cs,
-                 iview->image->bo->iova + iview->image->bo_offset + offset);
-   tu_cs_emit(cs, A6XX_RB_BLIT_DST_PITCH(stride));
-   tu_cs_emit(cs, A6XX_RB_BLIT_DST_ARRAY_PITCH(slice->size));
+                     A6XX_RB_BLIT_DST_INFO_COLOR_SWAP(format->swap) |
+                     COND(iview->image->layout.ubwc_size,
+                          A6XX_RB_BLIT_DST_INFO_FLAGS));
+   tu_cs_emit_qw(cs, tu_image_base(iview->image, iview->base_mip, iview->base_layer));
+   tu_cs_emit(cs, A6XX_RB_BLIT_DST_PITCH(tu_image_stride(iview->image, iview->base_mip)));
+   tu_cs_emit(cs, A6XX_RB_BLIT_DST_ARRAY_PITCH(iview->image->layout.layer_size));
+
+   if (iview->image->layout.ubwc_size) {
+      tu_cs_emit_pkt4(cs, REG_A6XX_RB_BLIT_FLAG_DST_LO, 3);
+      tu6_emit_flag_buffer(cs, iview);
+   }
 
    tu_cs_emit_pkt4(cs, REG_A6XX_RB_BLIT_BASE_GMEM, 1);
    tu_cs_emit(cs, gmem_offset);
@@ -671,14 +674,9 @@ tu6_emit_blit_clear(struct tu_cmd_buffer *cmd,
    const struct tu_native_format *format =
       tu6_get_native_format(iview->vk_format);
    assert(format && format->rb >= 0);
-   /* must be WZYX; other values are ignored */
-   const enum a3xx_color_swap swap = WZYX;
 
    tu_cs_emit_pkt4(cs, REG_A6XX_RB_BLIT_DST_INFO, 1);
-   tu_cs_emit(cs, A6XX_RB_BLIT_DST_INFO_TILE_MODE(TILE6_LINEAR) |
-                     A6XX_RB_BLIT_DST_INFO_SAMPLES(tu_msaa_samples(iview->image->samples)) |
-                     A6XX_RB_BLIT_DST_INFO_COLOR_FORMAT(format->rb) |
-                     A6XX_RB_BLIT_DST_INFO_COLOR_SWAP(swap));
+   tu_cs_emit(cs, A6XX_RB_BLIT_DST_INFO_COLOR_FORMAT(format->rb));
 
    tu_cs_emit_pkt4(cs, REG_A6XX_RB_BLIT_INFO, 1);
    tu_cs_emit(cs, A6XX_RB_BLIT_INFO_GMEM | A6XX_RB_BLIT_INFO_CLEAR_MASK(0xf));
@@ -689,7 +687,6 @@ tu6_emit_blit_clear(struct tu_cmd_buffer *cmd,
    tu_cs_emit_pkt4(cs, REG_A6XX_RB_UNKNOWN_88D0, 1);
    tu_cs_emit(cs, 0);
 
-   /* pack clear_value into WZYX order */
    uint32_t clear_vals[4] = { 0 };
    tu_pack_clear_value(clear_value, iview->vk_format, clear_vals);
 
@@ -750,6 +747,17 @@ tu6_emit_window_offset(struct tu_cmd_buffer *cmd,
       cs, A6XX_SP_TP_WINDOW_OFFSET_X(x1) | A6XX_SP_TP_WINDOW_OFFSET_Y(y1));
 }
 
+static bool
+use_hw_binning(struct tu_cmd_buffer *cmd)
+{
+   const struct tu_tiling_config *tiling = &cmd->state.tiling_config;
+
+   if (unlikely(cmd->device->physical_device->instance->debug_flags & TU_DEBUG_NOBIN))
+      return false;
+
+   return (tiling->tile_count.width * tiling->tile_count.height) > 2;
+}
+
 static void
 tu6_emit_tile_select(struct tu_cmd_buffer *cmd,
                      struct tu_cs *cs,
@@ -773,8 +781,50 @@ tu6_emit_tile_select(struct tu_cmd_buffer *cmd,
    tu_cs_emit_pkt4(cs, REG_A6XX_VPC_SO_OVERRIDE, 1);
    tu_cs_emit(cs, A6XX_VPC_SO_OVERRIDE_SO_DISABLE);
 
-   if (false) {
-      /* hw binning? */
+   if (use_hw_binning(cmd)) {
+      tu_cs_emit_pkt7(cs, CP_WAIT_FOR_ME, 0);
+
+      tu_cs_emit_pkt7(cs, CP_SET_MODE, 1);
+      tu_cs_emit(cs, 0x0);
+
+      tu_cs_emit_pkt7(cs, CP_REG_TEST, 1);
+      tu_cs_emit(cs, A6XX_CP_REG_TEST_0_REG(OVERFLOW_FLAG_REG) |
+                     A6XX_CP_REG_TEST_0_BIT(0) |
+                     A6XX_CP_REG_TEST_0_UNK25);
+
+      tu_cs_emit_pkt7(cs, CP_COND_REG_EXEC, 2);
+      tu_cs_emit(cs, 0x10000000);
+      tu_cs_emit(cs, 11); /* conditionally execute next 11 dwords */
+
+      /* if (no overflow) */ {
+         tu_cs_emit_pkt7(cs, CP_SET_BIN_DATA5, 7);
+         tu_cs_emit(cs, cmd->state.tiling_config.pipe_sizes[tile->pipe] |
+                        CP_SET_BIN_DATA5_0_VSC_N(tile->slot));
+         tu_cs_emit_qw(cs, cmd->vsc_data.iova + tile->pipe * cmd->vsc_data_pitch);
+         tu_cs_emit_qw(cs, cmd->vsc_data.iova + (tile->pipe * 4) + (32 * cmd->vsc_data_pitch));
+         tu_cs_emit_qw(cs, cmd->vsc_data2.iova + (tile->pipe * cmd->vsc_data2_pitch));
+
+         tu_cs_emit_pkt7(cs, CP_SET_VISIBILITY_OVERRIDE, 1);
+         tu_cs_emit(cs, 0x0);
+
+         /* use a NOP packet to skip over the 'else' side: */
+         tu_cs_emit_pkt7(cs, CP_NOP, 2);
+      } /* else */ {
+         tu_cs_emit_pkt7(cs, CP_SET_VISIBILITY_OVERRIDE, 1);
+         tu_cs_emit(cs, 0x1);
+      }
+
+      tu_cs_emit_pkt7(cs, CP_SET_MODE, 1);
+      tu_cs_emit(cs, 0x0);
+
+      tu_cs_emit_pkt4(cs, REG_A6XX_RB_UNKNOWN_8804, 1);
+      tu_cs_emit(cs, 0x0);
+
+      tu_cs_emit_pkt4(cs, REG_A6XX_SP_TP_UNKNOWN_B304, 1);
+      tu_cs_emit(cs, 0x0);
+
+      tu_cs_emit_pkt4(cs, REG_A6XX_GRAS_UNKNOWN_80A4, 1);
+      tu_cs_emit(cs, 0x0);
    } else {
       tu_cs_emit_pkt7(cs, CP_SET_VISIBILITY_OVERRIDE, 1);
       tu_cs_emit(cs, 0x1);
@@ -816,27 +866,38 @@ tu6_emit_tile_load(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
 
    tu6_emit_blit_scissor(cmd, cs);
 
-   uint32_t gmem_index = 0;
    for (uint32_t i = 0; i < subpass->color_count; ++i) {
       const uint32_t a = subpass->color_attachments[i].attachment;
       if (a != VK_ATTACHMENT_UNUSED)
-         tu6_emit_tile_load_attachment(cmd, cs, a, gmem_index++);
+         tu6_emit_tile_load_attachment(cmd, cs, a, i);
    }
 
    const uint32_t a = subpass->depth_stencil_attachment.attachment;
    if (a != VK_ATTACHMENT_UNUSED)
-      tu6_emit_tile_load_attachment(cmd, cs, a, gmem_index);
+      tu6_emit_tile_load_attachment(cmd, cs, a, subpass->color_count);
+}
+
+static void
+tu6_emit_store_attachment(struct tu_cmd_buffer *cmd,
+                          struct tu_cs *cs,
+                          uint32_t a,
+                          uint32_t gmem_index)
+{
+   const struct tu_framebuffer *fb = cmd->state.framebuffer;
+   const struct tu_tiling_config *tiling = &cmd->state.tiling_config;
+
+   if (a == VK_ATTACHMENT_UNUSED)
+      return;
+
+   tu6_emit_blit_info(cmd, cs, fb->attachments[a].attachment,
+                      tiling->gmem_offsets[gmem_index], 0);
+   tu6_emit_blit(cmd, cs);
 }
 
 static void
 tu6_emit_tile_store(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
 {
-   const struct tu_framebuffer *fb = cmd->state.framebuffer;
-   const struct tu_tiling_config *tiling = &cmd->state.tiling_config;
-
-   if (false) {
-      /* hw binning? */
-   }
+   const struct tu_subpass *subpass = cmd->state.subpass;
 
    tu_cs_emit_pkt7(cs, CP_SET_DRAW_STATE, 3);
    tu_cs_emit(cs, CP_SET_DRAW_STATE__0_COUNT(0) |
@@ -855,25 +916,20 @@ tu6_emit_tile_store(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
 
    tu6_emit_blit_scissor(cmd, cs);
 
-   uint32_t gmem_index = 0;
-   for (uint32_t i = 0; i < cmd->state.subpass->color_count; ++i) {
-      uint32_t a = cmd->state.subpass->color_attachments[i].attachment;
-      if (a == VK_ATTACHMENT_UNUSED)
-         continue;
-
-      const struct tu_image_view *iview = fb->attachments[a].attachment;
-      tu6_emit_blit_info(cmd, cs, iview, tiling->gmem_offsets[gmem_index++],
-                         0);
-      tu6_emit_blit(cmd, cs);
+   for (uint32_t i = 0; i < subpass->color_count; ++i) {
+      tu6_emit_store_attachment(cmd, cs,
+                                subpass->color_attachments[i].attachment,
+                                i);
+      if (subpass->resolve_attachments) {
+         tu6_emit_store_attachment(cmd, cs,
+                                   subpass->resolve_attachments[i].attachment,
+                                   i);
+      }
    }
 
-   const uint32_t a = cmd->state.subpass->depth_stencil_attachment.attachment;
-   if (a != VK_ATTACHMENT_UNUSED) {
-      const struct tu_image_view *iview = fb->attachments[a].attachment;
-      tu6_emit_blit_info(cmd, cs, iview, tiling->gmem_offsets[gmem_index],
-                         0);
-      tu6_emit_blit(cmd, cs);
-   }
+   tu6_emit_store_attachment(cmd, cs,
+                             subpass->depth_stencil_attachment.attachment,
+                             subpass->color_count);
 }
 
 static void
@@ -1055,9 +1111,228 @@ tu6_init_hw(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
 }
 
 static void
+tu6_cache_flush(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
+{
+   unsigned seqno;
+
+   seqno = tu6_emit_event_write(cmd, cs, CACHE_FLUSH_AND_INV_EVENT, true);
+
+   tu_cs_emit_pkt7(cs, CP_WAIT_REG_MEM, 6);
+   tu_cs_emit(cs, 0x00000013);
+   tu_cs_emit_qw(cs, cmd->scratch_bo.iova);
+   tu_cs_emit(cs, seqno);
+   tu_cs_emit(cs, 0xffffffff);
+   tu_cs_emit(cs, 0x00000010);
+
+   seqno = tu6_emit_event_write(cmd, cs, CACHE_FLUSH_TS, true);
+
+   tu_cs_emit_pkt7(cs, CP_UNK_A6XX_14, 4);
+   tu_cs_emit(cs, 0x00000000);
+   tu_cs_emit_qw(cs, cmd->scratch_bo.iova);
+   tu_cs_emit(cs, seqno);
+}
+
+static void
+update_vsc_pipe(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
+{
+   const struct tu_tiling_config *tiling = &cmd->state.tiling_config;
+
+   tu_cs_emit_pkt4(cs, REG_A6XX_VSC_BIN_SIZE, 3);
+   tu_cs_emit(cs, A6XX_VSC_BIN_SIZE_WIDTH(tiling->tile0.extent.width) |
+                  A6XX_VSC_BIN_SIZE_HEIGHT(tiling->tile0.extent.height));
+   tu_cs_emit_qw(cs, cmd->vsc_data.iova + 32 * cmd->vsc_data_pitch); /* VSC_SIZE_ADDRESS_LO/HI */
+
+   tu_cs_emit_pkt4(cs, REG_A6XX_VSC_BIN_COUNT, 1);
+   tu_cs_emit(cs, A6XX_VSC_BIN_COUNT_NX(tiling->tile_count.width) |
+                  A6XX_VSC_BIN_COUNT_NY(tiling->tile_count.height));
+
+   tu_cs_emit_pkt4(cs, REG_A6XX_VSC_PIPE_CONFIG_REG(0), 32);
+   for (unsigned i = 0; i < 32; i++)
+      tu_cs_emit(cs, tiling->pipe_config[i]);
+
+   tu_cs_emit_pkt4(cs, REG_A6XX_VSC_PIPE_DATA2_ADDRESS_LO, 4);
+   tu_cs_emit_qw(cs, cmd->vsc_data2.iova);
+   tu_cs_emit(cs, cmd->vsc_data2_pitch);
+   tu_cs_emit(cs, cmd->vsc_data2.size);
+
+   tu_cs_emit_pkt4(cs, REG_A6XX_VSC_PIPE_DATA_ADDRESS_LO, 4);
+   tu_cs_emit_qw(cs, cmd->vsc_data.iova);
+   tu_cs_emit(cs, cmd->vsc_data_pitch);
+   tu_cs_emit(cs, cmd->vsc_data.size);
+}
+
+static void
+emit_vsc_overflow_test(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
+{
+   const struct tu_tiling_config *tiling = &cmd->state.tiling_config;
+   const uint32_t used_pipe_count =
+      tiling->pipe_count.width * tiling->pipe_count.height;
+
+   /* Clear vsc_scratch: */
+   tu_cs_emit_pkt7(cs, CP_MEM_WRITE, 3);
+   tu_cs_emit_qw(cs, cmd->scratch_bo.iova + VSC_SCRATCH);
+   tu_cs_emit(cs, 0x0);
+
+   /* Check for overflow, write vsc_scratch if detected: */
+   for (int i = 0; i < used_pipe_count; i++) {
+      tu_cs_emit_pkt7(cs, CP_COND_WRITE5, 8);
+      tu_cs_emit(cs, CP_COND_WRITE5_0_FUNCTION(WRITE_GE) |
+            CP_COND_WRITE5_0_WRITE_MEMORY);
+      tu_cs_emit(cs, CP_COND_WRITE5_1_POLL_ADDR_LO(REG_A6XX_VSC_SIZE_REG(i)));
+      tu_cs_emit(cs, CP_COND_WRITE5_2_POLL_ADDR_HI(0));
+      tu_cs_emit(cs, CP_COND_WRITE5_3_REF(cmd->vsc_data_pitch));
+      tu_cs_emit(cs, CP_COND_WRITE5_4_MASK(~0));
+      tu_cs_emit_qw(cs, cmd->scratch_bo.iova + VSC_SCRATCH);
+      tu_cs_emit(cs, CP_COND_WRITE5_7_WRITE_DATA(1 + cmd->vsc_data_pitch));
+
+      tu_cs_emit_pkt7(cs, CP_COND_WRITE5, 8);
+      tu_cs_emit(cs, CP_COND_WRITE5_0_FUNCTION(WRITE_GE) |
+            CP_COND_WRITE5_0_WRITE_MEMORY);
+      tu_cs_emit(cs, CP_COND_WRITE5_1_POLL_ADDR_LO(REG_A6XX_VSC_SIZE2_REG(i)));
+      tu_cs_emit(cs, CP_COND_WRITE5_2_POLL_ADDR_HI(0));
+      tu_cs_emit(cs, CP_COND_WRITE5_3_REF(cmd->vsc_data2_pitch));
+      tu_cs_emit(cs, CP_COND_WRITE5_4_MASK(~0));
+      tu_cs_emit_qw(cs, cmd->scratch_bo.iova + VSC_SCRATCH);
+      tu_cs_emit(cs, CP_COND_WRITE5_7_WRITE_DATA(3 + cmd->vsc_data2_pitch));
+   }
+
+   tu_cs_emit_pkt7(cs, CP_WAIT_MEM_WRITES, 0);
+
+   tu_cs_emit_pkt7(cs, CP_WAIT_FOR_ME, 0);
+
+   tu_cs_emit_pkt7(cs, CP_MEM_TO_REG, 3);
+   tu_cs_emit(cs, CP_MEM_TO_REG_0_REG(OVERFLOW_FLAG_REG) |
+         CP_MEM_TO_REG_0_CNT(1 - 1));
+   tu_cs_emit_qw(cs, cmd->scratch_bo.iova + VSC_SCRATCH);
+
+   /*
+    * This is a bit awkward, we really want a way to invert the
+    * CP_REG_TEST/CP_COND_REG_EXEC logic, so that we can conditionally
+    * execute cmds to use hwbinning when a bit is *not* set.  This
+    * dance is to invert OVERFLOW_FLAG_REG
+    *
+    * A CP_NOP packet is used to skip executing the 'else' clause
+    * if (b0 set)..
+    */
+
+   /* b0 will be set if VSC_DATA or VSC_DATA2 overflow: */
+   tu_cs_emit_pkt7(cs, CP_REG_TEST, 1);
+   tu_cs_emit(cs, A6XX_CP_REG_TEST_0_REG(OVERFLOW_FLAG_REG) |
+         A6XX_CP_REG_TEST_0_BIT(0) |
+         A6XX_CP_REG_TEST_0_UNK25);
+
+   tu_cs_emit_pkt7(cs, CP_COND_REG_EXEC, 2);
+   tu_cs_emit(cs, 0x10000000);
+   tu_cs_emit(cs, 7);  /* conditionally execute next 7 dwords */
+
+   /* if (b0 set) */ {
+      /*
+       * On overflow, mirror the value to control->vsc_overflow
+       * which CPU is checking to detect overflow (see
+       * check_vsc_overflow())
+       */
+      tu_cs_emit_pkt7(cs, CP_REG_TO_MEM, 3);
+      tu_cs_emit(cs, CP_REG_TO_MEM_0_REG(OVERFLOW_FLAG_REG) |
+            CP_REG_TO_MEM_0_CNT(1 - 1));
+      tu_cs_emit_qw(cs, cmd->scratch_bo.iova + VSC_OVERFLOW);
+
+      tu_cs_emit_pkt4(cs, OVERFLOW_FLAG_REG, 1);
+      tu_cs_emit(cs, 0x0);
+
+      tu_cs_emit_pkt7(cs, CP_NOP, 2);  /* skip 'else' when 'if' is taken */
+   } /* else */ {
+      tu_cs_emit_pkt4(cs, OVERFLOW_FLAG_REG, 1);
+      tu_cs_emit(cs, 0x1);
+   }
+}
+
+static void
+tu6_emit_binning_pass(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
+{
+   const struct tu_tiling_config *tiling = &cmd->state.tiling_config;
+
+   uint32_t x1 = tiling->tile0.offset.x;
+   uint32_t y1 = tiling->tile0.offset.y;
+   uint32_t x2 = tiling->render_area.offset.x + tiling->render_area.extent.width - 1;
+   uint32_t y2 = tiling->render_area.offset.x + tiling->render_area.extent.height - 1;
+
+   tu6_emit_window_scissor(cmd, cs, x1, y1, x2, y2);
+
+   tu6_emit_marker(cmd, cs);
+   tu_cs_emit_pkt7(cs, CP_SET_MARKER, 1);
+   tu_cs_emit(cs, A6XX_CP_SET_MARKER_0_MODE(RM6_BINNING));
+   tu6_emit_marker(cmd, cs);
+
+   tu_cs_emit_pkt7(cs, CP_SET_VISIBILITY_OVERRIDE, 1);
+   tu_cs_emit(cs, 0x1);
+
+   tu_cs_emit_pkt7(cs, CP_SET_MODE, 1);
+   tu_cs_emit(cs, 0x1);
+
+   tu_cs_emit_wfi(cs);
+
+   tu_cs_emit_pkt4(cs, REG_A6XX_VFD_MODE_CNTL, 1);
+   tu_cs_emit(cs, A6XX_VFD_MODE_CNTL_BINNING_PASS);
+
+   update_vsc_pipe(cmd, cs);
+
+   tu_cs_emit_pkt4(cs, REG_A6XX_PC_UNKNOWN_9805, 1);
+   tu_cs_emit(cs, 0x1);
+
+   tu_cs_emit_pkt4(cs, REG_A6XX_SP_UNKNOWN_A0F8, 1);
+   tu_cs_emit(cs, 0x1);
+
+   tu_cs_emit_pkt7(cs, CP_EVENT_WRITE, 1);
+   tu_cs_emit(cs, UNK_2C);
+
+   tu_cs_emit_pkt4(cs, REG_A6XX_RB_WINDOW_OFFSET, 1);
+   tu_cs_emit(cs, A6XX_RB_WINDOW_OFFSET_X(0) |
+                  A6XX_RB_WINDOW_OFFSET_Y(0));
+
+   tu_cs_emit_pkt4(cs, REG_A6XX_SP_TP_WINDOW_OFFSET, 1);
+   tu_cs_emit(cs, A6XX_SP_TP_WINDOW_OFFSET_X(0) |
+                  A6XX_SP_TP_WINDOW_OFFSET_Y(0));
+
+   /* emit IB to binning drawcmds: */
+   tu_cs_emit_call(cs, &cmd->draw_cs);
+
+   tu_cs_emit_pkt7(cs, CP_SET_DRAW_STATE, 3);
+   tu_cs_emit(cs, CP_SET_DRAW_STATE__0_COUNT(0) |
+                  CP_SET_DRAW_STATE__0_DISABLE_ALL_GROUPS |
+                  CP_SET_DRAW_STATE__0_GROUP_ID(0));
+   tu_cs_emit(cs, CP_SET_DRAW_STATE__1_ADDR_LO(0));
+   tu_cs_emit(cs, CP_SET_DRAW_STATE__2_ADDR_HI(0));
+
+   tu_cs_emit_pkt7(cs, CP_EVENT_WRITE, 1);
+   tu_cs_emit(cs, UNK_2D);
+
+   tu6_emit_event_write(cmd, cs, CACHE_INVALIDATE, false);
+   tu6_cache_flush(cmd, cs);
+
+   tu_cs_emit_wfi(cs);
+
+   tu_cs_emit_pkt7(cs, CP_WAIT_FOR_ME, 0);
+
+   emit_vsc_overflow_test(cmd, cs);
+
+   tu_cs_emit_pkt7(cs, CP_SET_VISIBILITY_OVERRIDE, 1);
+   tu_cs_emit(cs, 0x0);
+
+   tu_cs_emit_pkt7(cs, CP_SET_MODE, 1);
+   tu_cs_emit(cs, 0x0);
+
+   tu_cs_emit_wfi(cs);
+
+   tu_cs_emit_pkt4(cs, REG_A6XX_RB_CCU_CNTL, 1);
+   tu_cs_emit(cs, 0x7c400004);
+
+   cmd->wait_for_idle = false;
+}
+
+static void
 tu6_render_begin(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
 {
-   VkResult result = tu_cs_reserve_space(cmd->device, cs, 256);
+   VkResult result = tu_cs_reserve_space(cmd->device, cs, 1024);
    if (result != VK_SUCCESS) {
       cmd->record_result = result;
       return;
@@ -1081,11 +1356,28 @@ tu6_render_begin(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
    tu6_emit_mrt(cmd, cs);
    tu6_emit_msaa(cmd, cs);
 
-   if (false) {
-      /* hw binning? */
+   if (use_hw_binning(cmd)) {
+      tu6_emit_bin_size(cmd, cs, A6XX_RB_BIN_CONTROL_BINNING_PASS | 0x6000000);
+
+      tu6_emit_render_cntl(cmd, cs, true);
+
+      tu6_emit_binning_pass(cmd, cs);
+
+      tu6_emit_bin_size(cmd, cs, A6XX_RB_BIN_CONTROL_USE_VIZ | 0x6000000);
+
+      tu_cs_emit_pkt4(cs, REG_A6XX_VFD_MODE_CNTL, 1);
+      tu_cs_emit(cs, 0x0);
+
+      tu_cs_emit_pkt4(cs, REG_A6XX_PC_UNKNOWN_9805, 1);
+      tu_cs_emit(cs, 0x1);
+
+      tu_cs_emit_pkt4(cs, REG_A6XX_SP_UNKNOWN_A0F8, 1);
+      tu_cs_emit(cs, 0x1);
+
+      tu_cs_emit_pkt7(cs, CP_SKIP_IB2_ENABLE_GLOBAL, 1);
+      tu_cs_emit(cs, 0x1);
    } else {
       tu6_emit_bin_size(cmd, cs, 0x6000000);
-      /* no draws */
    }
 
    tu6_emit_render_cntl(cmd, cs, false);
@@ -1098,7 +1390,7 @@ tu6_render_tile(struct tu_cmd_buffer *cmd,
                 struct tu_cs *cs,
                 const struct tu_tile *tile)
 {
-   const uint32_t render_tile_space = 64 + tu_cs_get_call_size(&cmd->draw_cs);
+   const uint32_t render_tile_space = 256 + tu_cs_get_call_size(&cmd->draw_cs);
    VkResult result = tu_cs_reserve_space(cmd->device, cs, render_tile_space);
    if (result != VK_SUCCESS) {
       cmd->record_result = result;
@@ -1111,6 +1403,22 @@ tu6_render_tile(struct tu_cmd_buffer *cmd,
    tu_cs_emit_call(cs, &cmd->draw_cs);
    cmd->wait_for_idle = true;
 
+   if (use_hw_binning(cmd)) {
+      tu_cs_emit_pkt7(cs, CP_REG_TEST, 1);
+      tu_cs_emit(cs, A6XX_CP_REG_TEST_0_REG(OVERFLOW_FLAG_REG) |
+                     A6XX_CP_REG_TEST_0_BIT(0) |
+                     A6XX_CP_REG_TEST_0_UNK25);
+
+      tu_cs_emit_pkt7(cs, CP_COND_REG_EXEC, 2);
+      tu_cs_emit(cs, 0x10000000);
+      tu_cs_emit(cs, 2);  /* conditionally execute next 2 dwords */
+
+      /* if (no overflow) */ {
+         tu_cs_emit_pkt7(cs, CP_SET_MARKER, 1);
+         tu_cs_emit(cs, A6XX_CP_SET_MARKER_0_MODE(0x5) | 0x10);
+      }
+   }
+
    tu_cs_emit_ib(cs, &cmd->state.tile_store_ib);
 
    tu_cs_sanity_check(cs);
@@ -1119,9 +1427,6 @@ tu6_render_tile(struct tu_cmd_buffer *cmd,
 static void
 tu6_render_end(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
 {
-   const struct tu_subpass *subpass = cmd->state.subpass;
-   const struct tu_framebuffer *fb = cmd->state.framebuffer;
-
    VkResult result = tu_cs_reserve_space(cmd->device, cs, 16);
    if (result != VK_SUCCESS) {
       cmd->record_result = result;
@@ -1134,31 +1439,6 @@ tu6_render_end(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
    tu6_emit_lrz_flush(cmd, cs);
 
    tu6_emit_event_write(cmd, cs, CACHE_FLUSH_TS, true);
-
-   if (subpass->has_resolve) {
-      for (uint32_t i = 0; i < subpass->color_count; ++i) {
-         struct tu_subpass_attachment src_att = subpass->color_attachments[i];
-         struct tu_subpass_attachment dst_att = subpass->resolve_attachments[i];
-
-         if (dst_att.attachment == VK_ATTACHMENT_UNUSED)
-            continue;
-
-         struct tu_image *src_img = fb->attachments[src_att.attachment].attachment->image;
-         struct tu_image *dst_img = fb->attachments[dst_att.attachment].attachment->image;
-
-         assert(src_img->extent.width == dst_img->extent.width);
-         assert(src_img->extent.height == dst_img->extent.height);
-
-         tu_bo_list_add(&cmd->bo_list, src_img->bo, MSM_SUBMIT_BO_READ);
-         tu_bo_list_add(&cmd->bo_list, dst_img->bo, MSM_SUBMIT_BO_WRITE);
-
-         tu_blit(cmd, &(struct tu_blit) {
-            .dst = tu_blit_surf_whole(dst_img),
-            .src = tu_blit_surf_whole(src_img),
-            .layers = 1,
-         }, false);
-      }
-   }
 
    tu_cs_sanity_check(cs);
 }
@@ -1241,8 +1521,10 @@ tu_cmd_update_tiling_config(struct tu_cmd_buffer *cmd,
 
    for (uint32_t i = 0; i < subpass->color_count; ++i) {
       const uint32_t a = subpass->color_attachments[i].attachment;
-      if (a == VK_ATTACHMENT_UNUSED)
+      if (a == VK_ATTACHMENT_UNUSED) {
+         buffer_cpp[buffer_count++] = 0;
          continue;
+      }
 
       const struct tu_render_pass_attachment *att = &pass->attachments[a];
       buffer_cpp[buffer_count++] =
@@ -1451,13 +1733,36 @@ tu_create_cmd_buffer(struct tu_device *device,
    if (result != VK_SUCCESS)
       return result;
 
+#define VSC_DATA_SIZE(pitch)  ((pitch) * 32 + 0x100)  /* extra size to store VSC_SIZE */
+#define VSC_DATA2_SIZE(pitch) ((pitch) * 32)
+
+   /* TODO: resize on overflow or compute a max size from # of vertices in renderpass?? */
+   cmd_buffer->vsc_data_pitch = 0x440 * 4;
+   cmd_buffer->vsc_data2_pitch = 0x1040 * 4;
+
+   result = tu_bo_init_new(device, &cmd_buffer->vsc_data, VSC_DATA_SIZE(cmd_buffer->vsc_data_pitch));
+   if (result != VK_SUCCESS)
+      goto fail_vsc_data;
+
+   result = tu_bo_init_new(device, &cmd_buffer->vsc_data2, VSC_DATA2_SIZE(cmd_buffer->vsc_data2_pitch));
+   if (result != VK_SUCCESS)
+      goto fail_vsc_data2;
+
    return VK_SUCCESS;
+
+fail_vsc_data2:
+   tu_bo_finish(cmd_buffer->device, &cmd_buffer->vsc_data);
+fail_vsc_data:
+   tu_bo_finish(cmd_buffer->device, &cmd_buffer->scratch_bo);
+   return result;
 }
 
 static void
 tu_cmd_buffer_destroy(struct tu_cmd_buffer *cmd_buffer)
 {
    tu_bo_finish(cmd_buffer->device, &cmd_buffer->scratch_bo);
+   tu_bo_finish(cmd_buffer->device, &cmd_buffer->vsc_data);
+   tu_bo_finish(cmd_buffer->device, &cmd_buffer->vsc_data2);
 
    list_del(&cmd_buffer->pool_link);
 
@@ -1664,6 +1969,7 @@ tu_BeginCommandBuffer(VkCommandBuffer commandBuffer,
    cmd_buffer->usage_flags = pBeginInfo->flags;
 
    tu_cs_begin(&cmd_buffer->cs);
+   tu_cs_begin(&cmd_buffer->draw_cs);
 
    cmd_buffer->marker_seqno = 0;
    cmd_buffer->scratch_seqno = 0;
@@ -1796,6 +2102,13 @@ tu_EndCommandBuffer(VkCommandBuffer commandBuffer)
                      MSM_SUBMIT_BO_WRITE);
    }
 
+   if (cmd_buffer->use_vsc_data) {
+      tu_bo_list_add(&cmd_buffer->bo_list, &cmd_buffer->vsc_data,
+                     MSM_SUBMIT_BO_READ | MSM_SUBMIT_BO_WRITE);
+      tu_bo_list_add(&cmd_buffer->bo_list, &cmd_buffer->vsc_data2,
+                     MSM_SUBMIT_BO_READ | MSM_SUBMIT_BO_WRITE);
+   }
+
    for (uint32_t i = 0; i < cmd_buffer->draw_cs.bo_count; i++) {
       tu_bo_list_add(&cmd_buffer->bo_list, cmd_buffer->draw_cs.bos[i],
                      MSM_SUBMIT_BO_READ | MSM_SUBMIT_BO_DUMP);
@@ -1812,6 +2125,7 @@ tu_EndCommandBuffer(VkCommandBuffer commandBuffer)
    }
 
    tu_cs_end(&cmd_buffer->cs);
+   tu_cs_end(&cmd_buffer->draw_cs);
 
    assert(!cmd_buffer->state.attachments);
 
@@ -1834,11 +2148,19 @@ tu_CmdBindPipeline(VkCommandBuffer commandBuffer,
       cmd->state.dirty |= TU_CMD_DIRTY_PIPELINE;
       break;
    case VK_PIPELINE_BIND_POINT_COMPUTE:
-      tu_finishme("binding compute pipeline");
+      cmd->state.compute_pipeline = pipeline;
+      cmd->state.dirty |= TU_CMD_DIRTY_COMPUTE_PIPELINE;
       break;
    default:
       unreachable("unrecognized pipeline bind point");
       break;
+   }
+
+   tu_bo_list_add(&cmd->bo_list, &pipeline->program.binary_bo,
+                  MSM_SUBMIT_BO_READ | MSM_SUBMIT_BO_DUMP);
+   for (uint32_t i = 0; i < pipeline->cs.bo_count; i++) {
+      tu_bo_list_add(&cmd->bo_list, pipeline->cs.bos[i],
+                     MSM_SUBMIT_BO_READ | MSM_SUBMIT_BO_DUMP);
    }
 }
 
@@ -2109,9 +2431,9 @@ tu_CmdBeginRenderPass(VkCommandBuffer commandBuffer,
    tu_cmd_prepare_tile_load_ib(cmd_buffer);
    tu_cmd_prepare_tile_store_ib(cmd_buffer);
 
-   /* draw_cs should contain entries only for this render pass */
-   assert(!cmd_buffer->draw_cs.entry_count);
-   tu_cs_begin(&cmd_buffer->draw_cs);
+   /* note: use_hw_binning only checks tiling config */
+   if (use_hw_binning(cmd_buffer))
+      cmd_buffer->use_vsc_data = true;
 }
 
 void
@@ -2205,6 +2527,7 @@ enum tu_draw_state_group_id
    TU_DRAW_STATE_FS_CONST,
    TU_DRAW_STATE_VS_TEX,
    TU_DRAW_STATE_FS_TEX,
+   TU_DRAW_STATE_FS_IBO,
 
    TU_DRAW_STATE_COUNT,
 };
@@ -2430,41 +2753,67 @@ tu6_emit_consts(struct tu_cmd_buffer *cmd,
    return tu_cs_end_sub_stream(&cmd->draw_state, &cs);
 }
 
-static struct tu_cs_entry
-tu6_emit_textures(struct tu_device *device, struct tu_cs *draw_state,
-                  const struct tu_pipeline *pipeline,
-                  struct tu_descriptor_state *descriptors_state,
-                  gl_shader_stage type, bool *needs_border)
+static VkResult
+tu6_emit_textures(struct tu_cmd_buffer *cmd,
+                  gl_shader_stage type,
+                  struct tu_cs_entry *entry,
+                  bool *needs_border)
 {
+   struct tu_device *device = cmd->device;
+   struct tu_cs *draw_state = &cmd->draw_state;
+   struct tu_descriptor_state *descriptors_state =
+      &cmd->descriptors[VK_PIPELINE_BIND_POINT_GRAPHICS];
    const struct tu_program_descriptor_linkage *link =
-      &pipeline->program.link[type];
+      &cmd->state.pipeline->program.link[type];
+   VkResult result;
 
-   uint32_t size = link->texture_map.num * A6XX_TEX_CONST_DWORDS +
-                   link->sampler_map.num * A6XX_TEX_SAMP_DWORDS;
-   if (!size)
-      return (struct tu_cs_entry) {};
+   if (link->texture_map.num == 0 && link->sampler_map.num == 0) {
+      *entry = (struct tu_cs_entry) {};
+      return VK_SUCCESS;
+   }
 
-   unsigned opcode, tex_samp_reg, tex_const_reg, tex_count_reg;
+   /* allocate and fill texture state */
+   struct ts_cs_memory tex_const;
+   result = tu_cs_alloc(device, draw_state, link->texture_map.num, A6XX_TEX_CONST_DWORDS, &tex_const);
+   if (result != VK_SUCCESS)
+      return result;
+
+   for (unsigned i = 0; i < link->texture_map.num; i++) {
+      memcpy(&tex_const.map[A6XX_TEX_CONST_DWORDS*i],
+             texture_ptr(descriptors_state, &link->texture_map, i),
+             A6XX_TEX_CONST_DWORDS*4);
+   }
+
+   /* allocate and fill sampler state */
+   struct ts_cs_memory tex_samp;
+   result = tu_cs_alloc(device, draw_state, link->sampler_map.num, A6XX_TEX_SAMP_DWORDS, &tex_samp);
+   if (result != VK_SUCCESS)
+      return result;
+
+   for (unsigned i = 0; i < link->sampler_map.num; i++) {
+      struct tu_sampler *sampler = sampler_ptr(descriptors_state, &link->sampler_map, i);
+      memcpy(&tex_samp.map[A6XX_TEX_SAMP_DWORDS*i], sampler->state, sizeof(sampler->state));
+      *needs_border |= sampler->needs_border;
+   }
+
+   unsigned tex_samp_reg, tex_const_reg, tex_count_reg;
    enum a6xx_state_block sb;
 
    switch (type) {
    case MESA_SHADER_VERTEX:
       sb = SB6_VS_TEX;
-      opcode = CP_LOAD_STATE6_GEOM;
       tex_samp_reg = REG_A6XX_SP_VS_TEX_SAMP_LO;
       tex_const_reg = REG_A6XX_SP_VS_TEX_CONST_LO;
       tex_count_reg = REG_A6XX_SP_VS_TEX_COUNT;
       break;
    case MESA_SHADER_FRAGMENT:
       sb = SB6_FS_TEX;
-      opcode = CP_LOAD_STATE6_FRAG;
       tex_samp_reg = REG_A6XX_SP_FS_TEX_SAMP_LO;
       tex_const_reg = REG_A6XX_SP_FS_TEX_CONST_LO;
       tex_count_reg = REG_A6XX_SP_FS_TEX_COUNT;
       break;
    case MESA_SHADER_COMPUTE:
       sb = SB6_CS_TEX;
-      opcode = CP_LOAD_STATE6_FRAG;
       tex_samp_reg = REG_A6XX_SP_CS_TEX_SAMP_LO;
       tex_const_reg = REG_A6XX_SP_CS_TEX_CONST_LO;
       tex_count_reg = REG_A6XX_SP_CS_TEX_COUNT;
@@ -2474,87 +2823,202 @@ tu6_emit_textures(struct tu_device *device, struct tu_cs *draw_state,
    }
 
    struct tu_cs cs;
-   tu_cs_begin_sub_stream(device, draw_state, size, &cs);
-
-   for (unsigned i = 0; i < link->texture_map.num; i++) {
-      uint32_t *ptr = texture_ptr(descriptors_state, &link->texture_map, i);
-
-      for (unsigned j = 0; j < A6XX_TEX_CONST_DWORDS; j++)
-         tu_cs_emit(&cs, ptr[j]);
-   }
-
-   for (unsigned i = 0; i < link->sampler_map.num; i++) {
-      struct tu_sampler *sampler = sampler_ptr(descriptors_state, &link->sampler_map, i);
-
-      for (unsigned j = 0; j < A6XX_TEX_SAMP_DWORDS; j++)
-         tu_cs_emit(&cs, sampler->state[j]);
-
-      *needs_border |= sampler->needs_border;
-   }
-
-   struct tu_cs_entry entry = tu_cs_end_sub_stream(draw_state, &cs);
-
-   uint64_t tex_addr = entry.bo->iova + entry.offset;
-   uint64_t samp_addr = tex_addr + link->texture_map.num * A6XX_TEX_CONST_DWORDS*4;
-
-   tu_cs_begin_sub_stream(device, draw_state, 64, &cs);
+   result = tu_cs_begin_sub_stream(device, draw_state, 16, &cs);
+   if (result != VK_SUCCESS)
+      return result;
 
    /* output sampler state: */
-   tu_cs_emit_pkt7(&cs, opcode, 3);
+   tu_cs_emit_pkt7(&cs, tu6_stage2opcode(type), 3);
    tu_cs_emit(&cs, CP_LOAD_STATE6_0_DST_OFF(0) |
       CP_LOAD_STATE6_0_STATE_TYPE(ST6_SHADER) |
       CP_LOAD_STATE6_0_STATE_SRC(SS6_INDIRECT) |
       CP_LOAD_STATE6_0_STATE_BLOCK(sb) |
       CP_LOAD_STATE6_0_NUM_UNIT(link->sampler_map.num));
-   tu_cs_emit_qw(&cs, samp_addr); /* SRC_ADDR_LO/HI */
+   tu_cs_emit_qw(&cs, tex_samp.iova); /* SRC_ADDR_LO/HI */
 
    tu_cs_emit_pkt4(&cs, tex_samp_reg, 2);
-   tu_cs_emit_qw(&cs, samp_addr); /* SRC_ADDR_LO/HI */
+   tu_cs_emit_qw(&cs, tex_samp.iova); /* SRC_ADDR_LO/HI */
 
    /* emit texture state: */
-   tu_cs_emit_pkt7(&cs, opcode, 3);
+   tu_cs_emit_pkt7(&cs, tu6_stage2opcode(type), 3);
    tu_cs_emit(&cs, CP_LOAD_STATE6_0_DST_OFF(0) |
       CP_LOAD_STATE6_0_STATE_TYPE(ST6_CONSTANTS) |
       CP_LOAD_STATE6_0_STATE_SRC(SS6_INDIRECT) |
       CP_LOAD_STATE6_0_STATE_BLOCK(sb) |
       CP_LOAD_STATE6_0_NUM_UNIT(link->texture_map.num));
-   tu_cs_emit_qw(&cs, tex_addr); /* SRC_ADDR_LO/HI */
+   tu_cs_emit_qw(&cs, tex_const.iova); /* SRC_ADDR_LO/HI */
 
    tu_cs_emit_pkt4(&cs, tex_const_reg, 2);
-   tu_cs_emit_qw(&cs, tex_addr); /* SRC_ADDR_LO/HI */
+   tu_cs_emit_qw(&cs, tex_const.iova); /* SRC_ADDR_LO/HI */
 
    tu_cs_emit_pkt4(&cs, tex_count_reg, 1);
    tu_cs_emit(&cs, link->texture_map.num);
 
+   *entry = tu_cs_end_sub_stream(draw_state, &cs);
+   return VK_SUCCESS;
+}
+
+static struct tu_cs_entry
+tu6_emit_ibo(struct tu_device *device, struct tu_cs *draw_state,
+             const struct tu_pipeline *pipeline,
+             struct tu_descriptor_state *descriptors_state,
+             gl_shader_stage type)
+{
+   const struct tu_program_descriptor_linkage *link =
+      &pipeline->program.link[type];
+
+   uint32_t size = link->image_mapping.num_ibo * A6XX_TEX_CONST_DWORDS;
+   if (!size)
+      return (struct tu_cs_entry) {};
+
+   struct tu_cs cs;
+   tu_cs_begin_sub_stream(device, draw_state, size, &cs);
+
+   for (unsigned i = 0; i < link->image_mapping.num_ibo; i++) {
+      unsigned idx = link->image_mapping.ibo_to_image[i];
+
+      if (idx & IBO_SSBO) {
+         idx &= ~IBO_SSBO;
+
+         uint64_t va = buffer_ptr(descriptors_state, &link->ssbo_map, idx);
+         /* We don't expose robustBufferAccess, so leave the size unlimited. */
+         uint32_t sz = MAX_STORAGE_BUFFER_RANGE / 4;
+
+         tu_cs_emit(&cs, A6XX_IBO_0_FMT(TFMT6_32_UINT));
+         tu_cs_emit(&cs,
+                    A6XX_IBO_1_WIDTH(sz & MASK(15)) |
+                    A6XX_IBO_1_HEIGHT(sz >> 15));
+         tu_cs_emit(&cs,
+                    A6XX_IBO_2_UNK4 |
+                    A6XX_IBO_2_UNK31 |
+                    A6XX_IBO_2_TYPE(A6XX_TEX_1D));
+         tu_cs_emit(&cs, 0);
+         tu_cs_emit_qw(&cs, va);
+         for (int i = 6; i < A6XX_TEX_CONST_DWORDS; i++)
+            tu_cs_emit(&cs, 0);
+      } else {
+         tu_finishme("Emit images");
+      }
+   }
+
+   struct tu_cs_entry entry = tu_cs_end_sub_stream(draw_state, &cs);
+
+   uint64_t ibo_addr = entry.bo->iova + entry.offset;
+
+   tu_cs_begin_sub_stream(device, draw_state, 64, &cs);
+
+   /* emit texture state: */
+   tu_cs_emit_pkt7(&cs, CP_LOAD_STATE6, 3);
+   tu_cs_emit(&cs, CP_LOAD_STATE6_0_DST_OFF(0) |
+              CP_LOAD_STATE6_0_STATE_TYPE(type == MESA_SHADER_COMPUTE ?
+                                          ST6_IBO : ST6_SHADER) |
+              CP_LOAD_STATE6_0_STATE_SRC(SS6_INDIRECT) |
+              CP_LOAD_STATE6_0_STATE_BLOCK(type == MESA_SHADER_COMPUTE ?
+                                           SB6_CS_SHADER : SB6_IBO) |
+              CP_LOAD_STATE6_0_NUM_UNIT(link->image_mapping.num_ibo));
+   tu_cs_emit_qw(&cs, ibo_addr); /* SRC_ADDR_LO/HI */
+
+   tu_cs_emit_pkt4(&cs,
+                   type == MESA_SHADER_COMPUTE ?
+                   REG_A6XX_SP_IBO_LO : REG_A6XX_SP_CS_IBO_LO, 2);
+   tu_cs_emit_qw(&cs, ibo_addr); /* SRC_ADDR_LO/HI */
+
    return tu_cs_end_sub_stream(draw_state, &cs);
 }
 
-static void
+struct PACKED bcolor_entry {
+   uint32_t fp32[4];
+   uint16_t ui16[4];
+   int16_t  si16[4];
+   uint16_t fp16[4];
+   uint16_t rgb565;
+   uint16_t rgb5a1;
+   uint16_t rgba4;
+   uint8_t __pad0[2];
+   uint8_t  ui8[4];
+   int8_t   si8[4];
+   uint32_t rgb10a2;
+   uint32_t z24; /* also s8? */
+   uint16_t srgb[4];      /* appears to duplicate fp16[], but clamped, used for srgb */
+   uint8_t  __pad1[56];
+} border_color[] = {
+   [VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK] = {},
+   [VK_BORDER_COLOR_INT_TRANSPARENT_BLACK] = {},
+   [VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK] = {
+      .fp32[3] = 0x3f800000,
+      .ui16[3] = 0xffff,
+      .si16[3] = 0x7fff,
+      .fp16[3] = 0x3c00,
+      .rgb5a1 = 0x8000,
+      .rgba4 = 0xf000,
+      .ui8[3] = 0xff,
+      .si8[3] = 0x7f,
+      .rgb10a2 = 0xc0000000,
+      .srgb[3] = 0x3c00,
+   },
+   [VK_BORDER_COLOR_INT_OPAQUE_BLACK] = {
+      .fp32[3] = 1,
+      .fp16[3] = 1,
+   },
+   [VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE] = {
+      .fp32[0 ... 3] = 0x3f800000,
+      .ui16[0 ... 3] = 0xffff,
+      .si16[0 ... 3] = 0x7fff,
+      .fp16[0 ... 3] = 0x3c00,
+      .rgb565 = 0xffff,
+      .rgb5a1 = 0xffff,
+      .rgba4 = 0xffff,
+      .ui8[0 ... 3] = 0xff,
+      .si8[0 ... 3] = 0x7f,
+      .rgb10a2 = 0xffffffff,
+      .z24 = 0xffffff,
+      .srgb[0 ... 3] = 0x3c00,
+   },
+   [VK_BORDER_COLOR_INT_OPAQUE_WHITE] = {
+      .fp32[0 ... 3] = 1,
+      .fp16[0 ... 3] = 1,
+   },
+};
+
+static VkResult
 tu6_emit_border_color(struct tu_cmd_buffer *cmd,
                       struct tu_cs *cs)
 {
+   STATIC_ASSERT(sizeof(struct bcolor_entry) == 128);
+
    const struct tu_pipeline *pipeline = cmd->state.pipeline;
+   struct tu_descriptor_state *descriptors_state =
+      &cmd->descriptors[VK_PIPELINE_BIND_POINT_GRAPHICS];
+   const struct tu_descriptor_map *vs_sampler =
+      &pipeline->program.link[MESA_SHADER_VERTEX].sampler_map;
+   const struct tu_descriptor_map *fs_sampler =
+      &pipeline->program.link[MESA_SHADER_FRAGMENT].sampler_map;
+   struct ts_cs_memory ptr;
 
-#define A6XX_BORDER_COLOR_DWORDS (128/4)
-   uint32_t size = A6XX_BORDER_COLOR_DWORDS *
-      (pipeline->program.link[MESA_SHADER_VERTEX].sampler_map.num +
-       pipeline->program.link[MESA_SHADER_FRAGMENT].sampler_map.num) +
-      A6XX_BORDER_COLOR_DWORDS - 1; /* room for alignment */
+   VkResult result = tu_cs_alloc(cmd->device, &cmd->draw_state,
+                                 vs_sampler->num + fs_sampler->num, 128 / 4,
+                                 &ptr);
+   if (result != VK_SUCCESS)
+      return result;
 
-   struct tu_cs border_cs;
-   tu_cs_begin_sub_stream(cmd->device, &cmd->draw_state, size, &border_cs);
+   for (unsigned i = 0; i < vs_sampler->num; i++) {
+      struct tu_sampler *sampler = sampler_ptr(descriptors_state, vs_sampler, i);
+      memcpy(ptr.map, &border_color[sampler->border], 128);
+      ptr.map += 128 / 4;
+   }
 
-   /* TODO: actually fill with border color */
-   for (unsigned i = 0; i < size; i++)
-      tu_cs_emit(&border_cs, 0);
-
-   struct tu_cs_entry entry = tu_cs_end_sub_stream(&cmd->draw_state, &border_cs);
+   for (unsigned i = 0; i < fs_sampler->num; i++) {
+      struct tu_sampler *sampler = sampler_ptr(descriptors_state, fs_sampler, i);
+      memcpy(ptr.map, &border_color[sampler->border], 128);
+      ptr.map += 128 / 4;
+   }
 
    tu_cs_emit_pkt4(cs, REG_A6XX_SP_TP_BORDER_COLOR_BASE_ADDR_LO, 2);
-	tu_cs_emit_qw(cs, align(entry.bo->iova + entry.offset, 128));
+   tu_cs_emit_qw(cs, ptr.iova);
+   return VK_SUCCESS;
 }
 
-static void
+static VkResult
 tu6_bind_draw_states(struct tu_cmd_buffer *cmd,
                      struct tu_cs *cs,
                      const struct tu_draw_info *draw)
@@ -2568,10 +3032,8 @@ tu6_bind_draw_states(struct tu_cmd_buffer *cmd,
       &cmd->descriptors[VK_PIPELINE_BIND_POINT_GRAPHICS];
 
    VkResult result = tu_cs_reserve_space(cmd->device, cs, 256);
-   if (result != VK_SUCCESS) {
-      cmd->record_result = result;
-      return;
-   }
+   if (result != VK_SUCCESS)
+      return result;
 
    /* TODO lrz */
 
@@ -2684,6 +3146,15 @@ tu6_bind_draw_states(struct tu_cmd_buffer *cmd,
    if (cmd->state.dirty &
          (TU_CMD_DIRTY_PIPELINE | TU_CMD_DIRTY_DESCRIPTOR_SETS)) {
       bool needs_border = false;
+      struct tu_cs_entry vs_tex, fs_tex;
+
+      result = tu6_emit_textures(cmd, MESA_SHADER_VERTEX, &vs_tex, &needs_border);
+      if (result != VK_SUCCESS)
+         return result;
+
+      result = tu6_emit_textures(cmd, MESA_SHADER_FRAGMENT, &fs_tex, &needs_border);
+      if (result != VK_SUCCESS)
+         return result;
 
       draw_state_groups[draw_state_group_count++] =
          (struct tu_draw_state_group) {
@@ -2701,21 +3172,27 @@ tu6_bind_draw_states(struct tu_cmd_buffer *cmd,
          (struct tu_draw_state_group) {
             .id = TU_DRAW_STATE_VS_TEX,
             .enable_mask = 0x7,
-            .ib = tu6_emit_textures(cmd->device, &cmd->draw_state, pipeline,
-                                    descriptors_state, MESA_SHADER_VERTEX,
-                                    &needs_border)
+            .ib = vs_tex,
          };
       draw_state_groups[draw_state_group_count++] =
          (struct tu_draw_state_group) {
             .id = TU_DRAW_STATE_FS_TEX,
             .enable_mask = 0x6,
-            .ib = tu6_emit_textures(cmd->device, &cmd->draw_state, pipeline,
-                                    descriptors_state, MESA_SHADER_FRAGMENT,
-                                    &needs_border)
+            .ib = fs_tex,
+         };
+      draw_state_groups[draw_state_group_count++] =
+         (struct tu_draw_state_group) {
+            .id = TU_DRAW_STATE_FS_IBO,
+            .enable_mask = 0x6,
+            .ib = tu6_emit_ibo(cmd->device, &cmd->draw_state, pipeline,
+                               descriptors_state, MESA_SHADER_FRAGMENT)
          };
 
-      if (needs_border)
-         tu6_emit_border_color(cmd, cs);
+      if (needs_border) {
+         result = tu6_emit_border_color(cmd, cs);
+         if (result != VK_SUCCESS)
+            return result;
+      }
    }
 
    tu_cs_emit_pkt7(cs, CP_SET_DRAW_STATE, 3 * draw_state_group_count);
@@ -2741,14 +3218,6 @@ tu6_bind_draw_states(struct tu_cmd_buffer *cmd,
    tu_cs_sanity_check(cs);
 
    /* track BOs */
-   if (cmd->state.dirty & TU_CMD_DIRTY_PIPELINE) {
-      tu_bo_list_add(&cmd->bo_list, &pipeline->program.binary_bo,
-                     MSM_SUBMIT_BO_READ | MSM_SUBMIT_BO_DUMP);
-      for (uint32_t i = 0; i < pipeline->cs.bo_count; i++) {
-         tu_bo_list_add(&cmd->bo_list, pipeline->cs.bos[i],
-                        MSM_SUBMIT_BO_READ | MSM_SUBMIT_BO_DUMP);
-      }
-   }
    if (cmd->state.dirty & TU_CMD_DIRTY_VERTEX_BUFFERS) {
       for (uint32_t i = 0; i < MAX_VBS; i++) {
          const struct tu_buffer *buf = cmd->state.vb.buffers[i];
@@ -2767,7 +3236,12 @@ tu6_bind_draw_states(struct tu_cmd_buffer *cmd,
             }
       }
    }
-   cmd->state.dirty = 0;
+
+   /* Fragment shader state overwrites compute shader state, so flag the
+    * compute pipeline for re-emit.
+    */
+   cmd->state.dirty = TU_CMD_DIRTY_COMPUTE_PIPELINE;
+   return VK_SUCCESS;
 }
 
 static void
@@ -2797,7 +3271,7 @@ tu6_emit_draw_direct(struct tu_cmd_buffer *cmd,
          CP_DRAW_INDX_OFFSET_0_PRIM_TYPE(primtype) |
          CP_DRAW_INDX_OFFSET_0_SOURCE_SELECT(DI_SRC_SEL_DMA) |
          CP_DRAW_INDX_OFFSET_0_INDEX_SIZE(index_size) |
-         CP_DRAW_INDX_OFFSET_0_VIS_CULL(IGNORE_VISIBILITY) | 0x2000;
+         CP_DRAW_INDX_OFFSET_0_VIS_CULL(USE_VISIBILITY) | 0x2000;
 
       tu_cs_emit_pkt7(cs, CP_DRAW_INDX_OFFSET, 7);
       tu_cs_emit(cs, cp_draw_indx);
@@ -2810,7 +3284,7 @@ tu6_emit_draw_direct(struct tu_cmd_buffer *cmd,
       const uint32_t cp_draw_indx =
          CP_DRAW_INDX_OFFSET_0_PRIM_TYPE(primtype) |
          CP_DRAW_INDX_OFFSET_0_SOURCE_SELECT(DI_SRC_SEL_AUTO_INDEX) |
-         CP_DRAW_INDX_OFFSET_0_VIS_CULL(IGNORE_VISIBILITY) | 0x2000;
+         CP_DRAW_INDX_OFFSET_0_VIS_CULL(USE_VISIBILITY) | 0x2000;
 
       tu_cs_emit_pkt7(cs, CP_DRAW_INDX_OFFSET, 3);
       tu_cs_emit(cs, cp_draw_indx);
@@ -2823,10 +3297,15 @@ static void
 tu_draw(struct tu_cmd_buffer *cmd, const struct tu_draw_info *draw)
 {
    struct tu_cs *cs = &cmd->draw_cs;
+   VkResult result;
 
-   tu6_bind_draw_states(cmd, cs, draw);
+   result = tu6_bind_draw_states(cmd, cs, draw);
+   if (result != VK_SUCCESS) {
+      cmd->record_result = result;
+      return;
+   }
 
-   VkResult result = tu_cs_reserve_space(cmd->device, cs, 32);
+   result = tu_cs_reserve_space(cmd->device, cs, 32);
    if (result != VK_SUCCESS) {
       cmd->record_result = result;
       return;
@@ -2838,6 +3317,7 @@ tu_draw(struct tu_cmd_buffer *cmd, const struct tu_draw_info *draw)
    }
 
    /* TODO tu6_emit_marker should pick different regs depending on cs */
+
    tu6_emit_marker(cmd, cs);
    tu6_emit_draw_direct(cmd, cs, draw);
    tu6_emit_marker(cmd, cs);
@@ -2950,9 +3430,159 @@ struct tu_dispatch_info
 };
 
 static void
-tu_dispatch(struct tu_cmd_buffer *cmd_buffer,
+tu_emit_compute_driver_params(struct tu_cs *cs, struct tu_pipeline *pipeline,
+                              const struct tu_dispatch_info *info)
+{
+   gl_shader_stage type = MESA_SHADER_COMPUTE;
+   const struct tu_program_descriptor_linkage *link =
+      &pipeline->program.link[type];
+   const struct ir3_const_state *const_state = &link->const_state;
+   uint32_t offset_dwords = const_state->offsets.driver_param;
+
+   if (link->constlen <= offset_dwords)
+      return;
+
+   if (!info->indirect) {
+      uint32_t driver_params[] = {
+         info->blocks[0],
+         info->blocks[1],
+         info->blocks[2],
+         pipeline->compute.local_size[0],
+         pipeline->compute.local_size[1],
+         pipeline->compute.local_size[2],
+      };
+      uint32_t num_consts = MIN2(const_state->num_driver_params,
+                                 link->constlen - offset_dwords);
+      uint32_t align_size = align(num_consts, 4);
+
+      /* push constants */
+      tu_cs_emit_pkt7(cs, tu6_stage2opcode(type), 3 + align_size);
+      tu_cs_emit(cs, CP_LOAD_STATE6_0_DST_OFF(offset_dwords / 4) |
+                 CP_LOAD_STATE6_0_STATE_TYPE(ST6_CONSTANTS) |
+                 CP_LOAD_STATE6_0_STATE_SRC(SS6_DIRECT) |
+                 CP_LOAD_STATE6_0_STATE_BLOCK(tu6_stage2shadersb(type)) |
+                 CP_LOAD_STATE6_0_NUM_UNIT(align_size / 4));
+      tu_cs_emit(cs, 0);
+      tu_cs_emit(cs, 0);
+      uint32_t i;
+      for (i = 0; i < num_consts; i++)
+         tu_cs_emit(cs, driver_params[i]);
+      for (; i < align_size; i++)
+         tu_cs_emit(cs, 0);
+   } else {
+      tu_finishme("Indirect driver params");
+   }
+}
+
+static void
+tu_dispatch(struct tu_cmd_buffer *cmd,
             const struct tu_dispatch_info *info)
 {
+   struct tu_cs *cs = &cmd->cs;
+   struct tu_pipeline *pipeline = cmd->state.compute_pipeline;
+   struct tu_descriptor_state *descriptors_state =
+      &cmd->descriptors[VK_PIPELINE_BIND_POINT_COMPUTE];
+
+   VkResult result = tu_cs_reserve_space(cmd->device, cs, 256);
+   if (result != VK_SUCCESS) {
+      cmd->record_result = result;
+      return;
+   }
+
+   if (cmd->state.dirty & TU_CMD_DIRTY_COMPUTE_PIPELINE)
+      tu_cs_emit_ib(cs, &pipeline->program.state_ib);
+
+   struct tu_cs_entry ib;
+
+   ib = tu6_emit_consts(cmd, pipeline, descriptors_state, MESA_SHADER_COMPUTE);
+   if (ib.size)
+      tu_cs_emit_ib(cs, &ib);
+
+   tu_emit_compute_driver_params(cs, pipeline, info);
+
+   bool needs_border;
+   result = tu6_emit_textures(cmd, MESA_SHADER_COMPUTE, &ib, &needs_border);
+   if (result != VK_SUCCESS) {
+      cmd->record_result = result;
+      return;
+   }
+
+   if (ib.size)
+      tu_cs_emit_ib(cs, &ib);
+
+   if (needs_border)
+      tu6_emit_border_color(cmd, cs);
+
+   ib = tu6_emit_ibo(cmd->device, &cmd->draw_state, pipeline,
+                     descriptors_state, MESA_SHADER_COMPUTE);
+   if (ib.size)
+      tu_cs_emit_ib(cs, &ib);
+
+   /* track BOs */
+   if (cmd->state.dirty & TU_CMD_DIRTY_DESCRIPTOR_SETS) {
+      unsigned i;
+      for_each_bit(i, descriptors_state->valid) {
+         struct tu_descriptor_set *set = descriptors_state->sets[i];
+         for (unsigned j = 0; j < set->layout->buffer_count; ++j)
+            if (set->descriptors[j]) {
+               tu_bo_list_add(&cmd->bo_list, set->descriptors[j],
+                              MSM_SUBMIT_BO_READ | MSM_SUBMIT_BO_WRITE);
+            }
+      }
+   }
+
+   /* Compute shader state overwrites fragment shader state, so we flag the
+    * graphics pipeline for re-emit.
+    */
+   cmd->state.dirty = TU_CMD_DIRTY_PIPELINE;
+
+   tu_cs_emit_pkt7(cs, CP_SET_MARKER, 1);
+   tu_cs_emit(cs, A6XX_CP_SET_MARKER_0_MODE(0x8));
+
+   const uint32_t *local_size = pipeline->compute.local_size;
+   const uint32_t *num_groups = info->blocks;
+   tu_cs_emit_pkt4(cs, REG_A6XX_HLSQ_CS_NDRANGE_0, 7);
+   tu_cs_emit(cs,
+              A6XX_HLSQ_CS_NDRANGE_0_KERNELDIM(3) |
+              A6XX_HLSQ_CS_NDRANGE_0_LOCALSIZEX(local_size[0] - 1) |
+              A6XX_HLSQ_CS_NDRANGE_0_LOCALSIZEY(local_size[1] - 1) |
+              A6XX_HLSQ_CS_NDRANGE_0_LOCALSIZEZ(local_size[2] - 1));
+   tu_cs_emit(cs, A6XX_HLSQ_CS_NDRANGE_1_GLOBALSIZE_X(local_size[0] * num_groups[0]));
+   tu_cs_emit(cs, 0);            /* HLSQ_CS_NDRANGE_2_GLOBALOFF_X */
+   tu_cs_emit(cs, A6XX_HLSQ_CS_NDRANGE_3_GLOBALSIZE_Y(local_size[1] * num_groups[1]));
+   tu_cs_emit(cs, 0);            /* HLSQ_CS_NDRANGE_4_GLOBALOFF_Y */
+   tu_cs_emit(cs, A6XX_HLSQ_CS_NDRANGE_5_GLOBALSIZE_Z(local_size[2] * num_groups[2]));
+   tu_cs_emit(cs, 0);            /* HLSQ_CS_NDRANGE_6_GLOBALOFF_Z */
+
+   tu_cs_emit_pkt4(cs, REG_A6XX_HLSQ_CS_KERNEL_GROUP_X, 3);
+   tu_cs_emit(cs, 1);            /* HLSQ_CS_KERNEL_GROUP_X */
+   tu_cs_emit(cs, 1);            /* HLSQ_CS_KERNEL_GROUP_Y */
+   tu_cs_emit(cs, 1);            /* HLSQ_CS_KERNEL_GROUP_Z */
+
+   if (info->indirect) {
+      uint64_t iova = tu_buffer_iova(info->indirect) + info->indirect_offset;
+
+      tu_bo_list_add(&cmd->bo_list, info->indirect->bo,
+                     MSM_SUBMIT_BO_READ | MSM_SUBMIT_BO_WRITE);
+
+      tu_cs_emit_pkt7(cs, CP_EXEC_CS_INDIRECT, 4);
+      tu_cs_emit(cs, 0x00000000);
+      tu_cs_emit_qw(cs, iova);
+      tu_cs_emit(cs,
+                 A5XX_CP_EXEC_CS_INDIRECT_3_LOCALSIZEX(local_size[0] - 1) |
+                 A5XX_CP_EXEC_CS_INDIRECT_3_LOCALSIZEY(local_size[1] - 1) |
+                 A5XX_CP_EXEC_CS_INDIRECT_3_LOCALSIZEZ(local_size[2] - 1));
+   } else {
+      tu_cs_emit_pkt7(cs, CP_EXEC_CS, 4);
+      tu_cs_emit(cs, 0x00000000);
+      tu_cs_emit(cs, CP_EXEC_CS_1_NGROUPS_X(info->blocks[0]));
+      tu_cs_emit(cs, CP_EXEC_CS_2_NGROUPS_Y(info->blocks[1]));
+      tu_cs_emit(cs, CP_EXEC_CS_3_NGROUPS_Z(info->blocks[2]));
+   }
+
+   tu_cs_emit_wfi(cs);
+
+   tu6_emit_cache_flush(cmd, cs);
 }
 
 void
@@ -3012,6 +3642,7 @@ tu_CmdEndRenderPass(VkCommandBuffer commandBuffer)
 
    /* discard draw_cs entries now that the tiles are rendered */
    tu_cs_discard_entries(&cmd_buffer->draw_cs);
+   tu_cs_begin(&cmd_buffer->draw_cs);
 
    vk_free(&cmd_buffer->pool->alloc, cmd_buffer->state.attachments);
    cmd_buffer->state.attachments = NULL;

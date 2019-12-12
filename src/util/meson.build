@@ -20,6 +20,7 @@
 
 inc_util = include_directories('.')
 
+subdir('format')
 subdir('xmlpool')
 
 files_mesa_util = files(
@@ -105,6 +106,8 @@ files_mesa_util = files(
   'u_vector.h',
   'u_math.c',
   'u_math.h',
+  'u_mm.c',
+  'u_mm.h',
   'u_debug.c',
   'u_debug.h',
   'u_cpu_detect.c',
@@ -149,6 +152,7 @@ deps_for_libmesa_util = [
   dep_atomic,
   dep_m,
   dep_valgrind,
+  dep_zstd,
 ]
 
 if with_platform_android
@@ -160,6 +164,7 @@ _libmesa_util = static_library(
   [files_mesa_util, format_srgb],
   include_directories : inc_common,
   dependencies : deps_for_libmesa_util,
+  link_with: libmesa_format,
   c_args : [c_msvc_compat_args, c_vis_args],
   build_by_default : false
 )
