@@ -49,6 +49,7 @@ struct vc4_bo;
 #define VC4_DEBUG_NIR       0x0200
 #define VC4_DEBUG_DUMP      0x0400
 #define VC4_DEBUG_SURFACE   0x0800
+#define VC4_DEBUG_NO_TILING 0x1000
 
 #define VC4_MAX_MIP_LEVELS 12
 #define VC4_MAX_TEXTURE_SAMPLERS 16

@@ -66,6 +66,8 @@ static const struct debug_named_value debug_options[] = {
           "Flush after each draw call" },
         { "always_sync", VC4_DEBUG_ALWAYS_SYNC,
           "Wait for finish after each flush" },
+        { "notiling", VC4_DEBUG_NO_TILING,
+          "don't use tiled buffers" },
 #ifdef USE_VC4_SIMULATOR
         { "dump", VC4_DEBUG_DUMP,
           "Write a GPU command stream trace file" },

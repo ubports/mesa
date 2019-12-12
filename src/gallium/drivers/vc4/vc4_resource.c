@@ -490,7 +490,7 @@ vc4_resource_create_with_modifiers(struct pipe_screen *pscreen,
         struct pipe_resource *prsc = &rsc->base;
         bool linear_ok = drm_find_modifier(DRM_FORMAT_MOD_LINEAR, modifiers, count);
         /* Use a tiled layout if we can, for better 3D performance. */
-        bool should_tile = true;
+        bool should_tile = vc4_debug & VC4_DEBUG_NO_TILING ? false : true;
 
         /* VBOs/PBOs are untiled (and 1 height). */
         if (tmpl->target == PIPE_BUFFER)
