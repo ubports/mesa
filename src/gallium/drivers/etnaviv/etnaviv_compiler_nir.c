@@ -96,10 +96,10 @@ etna_lower_io(nir_shader *shader, struct etna_shader_variant *v)
                                                  ssa->parent_instr);
                } break;
                case nir_intrinsic_store_deref: {
+                  nir_deref_instr *deref = nir_src_as_deref(intr->src[0]);
                   if (shader->info.stage != MESA_SHADER_FRAGMENT || !v->key.frag_rb_swap)
                      break;
 
-                  nir_deref_instr *deref = nir_src_as_deref(intr->src[0]);
                   assert(deref->deref_type == nir_deref_type_var);
 
                   if (deref->var->data.location != FRAG_RESULT_COLOR &&
@@ -752,6 +752,9 @@ etna_compile_shader_nir(struct etna_shader_variant *v)
    etna_optimize_loop(s);
 
    OPT_V(s, etna_lower_io, v);
+
+   if (v->shader->specs->vs_need_z_div)
+      NIR_PASS_V(s, nir_lower_clip_halfz);
 
    /* lower pre-halti2 to float (halti0 has integers, but only scalar..) */
    if (c->specs->halti < 2) {

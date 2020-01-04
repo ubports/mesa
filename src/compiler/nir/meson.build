@@ -123,6 +123,7 @@ files_libnir = files(
   'nir_lower_clamp_color_outputs.c',
   'nir_lower_clip.c',
   'nir_lower_clip_cull_distance_arrays.c',
+  'nir_lower_clip_halfz.c',
   'nir_lower_constant_initializers.c',
   'nir_lower_double_ops.c',
   'nir_lower_drawpixels.c',
@@ -343,6 +344,18 @@ if with_tests
     executable(
       'load_store_vectorizer',
       files('tests/load_store_vectorizer_tests.cpp'),
+      cpp_args : [cpp_vis_args, cpp_msvc_compat_args],
+      include_directories : [inc_common],
+      dependencies : [dep_thread, idep_gtest, idep_nir, idep_mesautil],
+    ),
+    suite : ['compiler', 'nir'],
+  )
+
+  test(
+    'nir_serialize_test',
+    executable(
+      'nir_serialize_test',
+      files('tests/serialize_tests.cpp'),
       cpp_args : [cpp_vis_args, cpp_msvc_compat_args],
       include_directories : [inc_common],
       dependencies : [dep_thread, idep_gtest, idep_nir, idep_mesautil],

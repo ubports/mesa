@@ -332,6 +332,8 @@ struct si_texture {
 	 * for a possible future enablement.
 	 */
 	bool				separate_dcc_dirty:1;
+	bool				displayable_dcc_dirty:1;
+
 	/* Statistics gathering for the DCC enablement heuristic. */
 	bool				dcc_gather_statistics:1;
 	/* Counter that should be non-zero if the texture is bound to a
@@ -670,6 +672,7 @@ struct si_framebuffer {
 	ubyte				nr_color_samples; /* at most 8xAA */
 	ubyte				compressed_cb_mask;
 	ubyte				uncompressed_cb_mask;
+	ubyte				displayable_dcc_cb_mask;
 	ubyte				color_is_int8;
 	ubyte				color_is_int10;
 	ubyte				dirty_cbufs;
@@ -787,7 +790,7 @@ union si_vgt_param_key {
 	uint32_t index;
 };
 
-#define SI_NUM_VGT_STAGES_KEY_BITS 4
+#define SI_NUM_VGT_STAGES_KEY_BITS 5
 #define SI_NUM_VGT_STAGES_STATES (1 << SI_NUM_VGT_STAGES_KEY_BITS)
 
 /* The VGT_SHADER_STAGES key used to index the table of precomputed values.
@@ -798,6 +801,7 @@ union si_vgt_stages_key {
 #if UTIL_ARCH_LITTLE_ENDIAN
 		unsigned tess:1;
 		unsigned gs:1;
+		unsigned ngg_passthrough:1;
 		unsigned ngg:1; /* gfx10+ */
 		unsigned streamout:1; /* only used with NGG */
 		unsigned _pad:32 - SI_NUM_VGT_STAGES_KEY_BITS;
@@ -805,6 +809,7 @@ union si_vgt_stages_key {
 		unsigned _pad:32 - SI_NUM_VGT_STAGES_KEY_BITS;
 		unsigned streamout:1;
 		unsigned ngg:1;
+		unsigned ngg_passthrough:1;
 		unsigned gs:1;
 		unsigned tess:1;
 #endif
@@ -894,6 +899,7 @@ struct si_context {
 	void				*cs_copy_image_1d_array;
 	void				*cs_clear_render_target;
 	void				*cs_clear_render_target_1d_array;
+	void				*cs_clear_12bytes_buffer;
 	void				*cs_dcc_retile;
 	void				*cs_fmask_expand[3][2]; /* [log2(samples)-1][is_array] */
 	struct si_screen		*screen;
@@ -1450,6 +1456,7 @@ void *si_create_copy_image_compute_shader(struct pipe_context *ctx);
 void *si_create_copy_image_compute_shader_1d_array(struct pipe_context *ctx);
 void *si_clear_render_target_shader(struct pipe_context *ctx);
 void *si_clear_render_target_shader_1d_array(struct pipe_context *ctx);
+void *si_clear_12bytes_buffer_shader(struct pipe_context *ctx);
 void *si_create_dcc_retile_cs(struct pipe_context *ctx);
 void *si_create_fmask_expand_cs(struct pipe_context *ctx, unsigned num_samples,
 				bool is_array);

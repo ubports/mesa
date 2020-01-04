@@ -1115,10 +1115,10 @@ dri2_query_image_by_resource_handle(__DRIimage *image, int attrib, int *value)
       return false;
    }
 
+   usage = PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE;
+
    if (image->use & __DRI_IMAGE_USE_BACKBUFFER)
-      usage = PIPE_HANDLE_USAGE_EXPLICIT_FLUSH;
-   else
-      usage = PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE;
+      usage |= PIPE_HANDLE_USAGE_EXPLICIT_FLUSH;
 
    if (!pscreen->resource_get_handle(pscreen, NULL, image->texture,
                                      &whandle, usage))
@@ -1201,10 +1201,10 @@ dri2_query_image_by_resource_param(__DRIimage *image, int attrib, int *value)
       return false;
    }
 
+   handle_usage = PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE;
+
    if (image->use & __DRI_IMAGE_USE_BACKBUFFER)
-      handle_usage = PIPE_HANDLE_USAGE_EXPLICIT_FLUSH;
-   else
-      handle_usage = PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE;
+      handle_usage |= PIPE_HANDLE_USAGE_EXPLICIT_FLUSH;
 
    if (!dri2_resource_get_param(image, param, handle_usage, &res_param))
       return false;
@@ -1524,11 +1524,11 @@ dri2_blit_image(__DRIcontext *context, __DRIimage *dst, __DRIimage *src,
 
    if (flush_flag == __BLIT_FLAG_FLUSH) {
       pipe->flush_resource(pipe, dst->texture);
-      ctx->st->flush(ctx->st, 0, NULL);
+      ctx->st->flush(ctx->st, 0, NULL, NULL, NULL);
    } else if (flush_flag == __BLIT_FLAG_FINISH) {
       screen = dri_screen(ctx->sPriv)->base.screen;
       pipe->flush_resource(pipe, dst->texture);
-      ctx->st->flush(ctx->st, 0, &fence);
+      ctx->st->flush(ctx->st, 0, &fence, NULL, NULL);
       (void) screen->fence_finish(screen, NULL, fence, PIPE_TIMEOUT_INFINITE);
       screen->fence_reference(screen, &fence, NULL);
    }

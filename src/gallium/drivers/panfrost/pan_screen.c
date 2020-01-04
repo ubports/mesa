@@ -59,6 +59,8 @@ static const struct debug_named_value debug_options[] = {
         {"trace",     PAN_DBG_TRACE,    "Trace the command stream"},
         {"deqp",      PAN_DBG_DEQP,     "Hacks for dEQP"},
         {"afbc",      PAN_DBG_AFBC,     "Enable non-conformant AFBC impl"},
+        {"sync",      PAN_DBG_SYNC,     "Wait for each job's completion and check for any GPU fault"},
+        {"precompile", PAN_DBG_PRECOMPILE, "Precompile shaders for shader-db"},
         DEBUG_NAMED_VALUE_END
 };
 
@@ -69,13 +71,13 @@ int pan_debug = 0;
 static const char *
 panfrost_get_name(struct pipe_screen *screen)
 {
-        return "panfrost";
+        return panfrost_model_name(pan_screen(screen)->gpu_id);
 }
 
 static const char *
 panfrost_get_vendor(struct pipe_screen *screen)
 {
-        return "panfrost";
+        return "Panfrost";
 }
 
 static const char *
@@ -115,6 +117,10 @@ panfrost_get_param(struct pipe_screen *screen, enum pipe_cap param)
                 return 0;
 
         case PIPE_CAP_TEXTURE_SWIZZLE:
+                return 1;
+
+        case PIPE_CAP_TEXTURE_MIRROR_CLAMP:
+        case PIPE_CAP_TEXTURE_MIRROR_CLAMP_TO_EDGE:
                 return 1;
 
         case PIPE_CAP_TGSI_INSTANCEID:
@@ -246,6 +252,9 @@ panfrost_get_param(struct pipe_screen *screen, enum pipe_cap param)
                 return 16;
 
         case PIPE_CAP_ALPHA_TEST:
+        case PIPE_CAP_FLATSHADE:
+        case PIPE_CAP_TWO_SIDED_COLOR:
+        case PIPE_CAP_CLIP_PLANES:
                 return 0;
 
         default:
@@ -280,7 +289,7 @@ panfrost_get_shader_param(struct pipe_screen *screen,
                 return 16;
 
         case PIPE_SHADER_CAP_MAX_OUTPUTS:
-                return shader == PIPE_SHADER_FRAGMENT ? 4 : 8;
+                return shader == PIPE_SHADER_FRAGMENT ? 4 : 16;
 
         case PIPE_SHADER_CAP_MAX_TEMPS:
                 return 256; /* GL_MAX_PROGRAM_TEMPORARIES_ARB */
@@ -669,19 +678,6 @@ panfrost_screen_get_compiler_options(struct pipe_screen *pscreen,
         return &midgard_nir_options;
 }
 
-static unsigned
-panfrost_query_gpu_version(struct panfrost_screen *screen)
-{
-        struct drm_panfrost_get_param get_param = {0,};
-        ASSERTED int ret;
-
-        get_param.param = DRM_PANFROST_PARAM_GPU_PROD_ID;
-        ret = drmIoctl(screen->fd, DRM_IOCTL_PANFROST_GET_PARAM, &get_param);
-        assert(!ret);
-
-        return get_param.value;
-}
-
 static uint32_t
 panfrost_active_bos_hash(const void *key)
 {
@@ -732,7 +728,9 @@ panfrost_create_screen(int fd, struct renderonly *ro)
 
         screen->fd = fd;
 
-        screen->gpu_id = panfrost_query_gpu_version(screen);
+        screen->gpu_id = panfrost_query_gpu_version(screen->fd);
+        screen->core_count = panfrost_query_core_count(screen->fd);
+        screen->thread_tls_alloc = panfrost_query_thread_tls_alloc(screen->fd);
         screen->quirks = panfrost_get_quirks(screen->gpu_id);
         screen->kernel_version = drmGetVersion(fd);
 

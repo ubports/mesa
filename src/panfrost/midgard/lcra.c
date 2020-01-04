@@ -69,6 +69,9 @@ lcra_alloc_equations(
 void
 lcra_free(struct lcra_state *l)
 {
+        if (!l)
+                return;
+
         free(l->alignment);
         free(l->linear);
         free(l->modulus);
@@ -98,7 +101,7 @@ lcra_set_disjoint_class(struct lcra_state *l, unsigned c1, unsigned c2)
 void
 lcra_restrict_range(struct lcra_state *l, unsigned node, unsigned len)
 {
-        if (l->alignment[node])
+        if (node < l->node_count && l->alignment[node])
                 l->modulus[node] = DIV_ROUND_UP(l->bound - len + 1, 1 << (l->alignment[node] - 1));
 }
 
@@ -197,7 +200,8 @@ lcra_solve(struct lcra_state *l)
 void
 lcra_set_node_spill_cost(struct lcra_state *l, unsigned node, signed cost)
 {
-        l->spill_cost[node] = cost;
+        if (node < l->node_count)
+                l->spill_cost[node] = cost;
 }
 
 /* Count along the lower triangle */

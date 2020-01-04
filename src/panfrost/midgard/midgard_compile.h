@@ -57,6 +57,15 @@ enum {
 #define PAN_SYSVAL_ID_TO_TXS_DIM(id)            (((id) >> 7) & 0x3)
 #define PAN_SYSVAL_ID_TO_TXS_IS_ARRAY(id)       !!((id) & (1 << 9))
 
+/* Special attribute slots for vertex builtins. Sort of arbitrary but let's be
+ * consistent with the blob so we can compare traces easier. */
+
+enum {
+        PAN_VERTEX_ID   = 16,
+        PAN_INSTANCE_ID = 17,
+        PAN_MAX_ATTRIBUTE
+} pan_special_attributes;
+
 typedef struct {
         int work_register_count;
         int uniform_count;
@@ -69,6 +78,7 @@ typedef struct {
         unsigned sysvals[MAX_SYSVAL_COUNT];
 
         unsigned varyings[32];
+        enum mali_format varying_type[32];
 
         /* Boolean properties of the program */
         bool writes_point_size;
@@ -91,7 +101,7 @@ typedef struct {
 } midgard_program;
 
 int
-midgard_compile_shader_nir(nir_shader *nir, midgard_program *program, bool is_blend, unsigned gpu_id);
+midgard_compile_shader_nir(nir_shader *nir, midgard_program *program, bool is_blend, unsigned blend_rt, unsigned gpu_id, bool shaderdb);
 
 /* NIR options are shared between the standalone compiler and the online
  * compiler. Defining it here is the simplest, though maybe not the Right
@@ -118,14 +128,27 @@ static const nir_shader_compiler_options midgard_nir_options = {
          * eventually */
         .lower_fsign = true,
 
-        .vertex_id_zero_based = true,
         .lower_extract_byte = true,
         .lower_extract_word = true,
         .lower_rotate = true,
 
+        .lower_pack_half_2x16 = true,
+        .lower_pack_half_2x16_split = true,
+        .lower_pack_unorm_2x16 = true,
+        .lower_pack_snorm_2x16 = true,
+        .lower_pack_unorm_4x8 = true,
+        .lower_pack_snorm_4x8 = true,
+        .lower_unpack_half_2x16 = true,
+        .lower_unpack_half_2x16_split = true,
+        .lower_unpack_unorm_2x16 = true,
+        .lower_unpack_snorm_2x16 = true,
+        .lower_unpack_unorm_4x8 = true,
+        .lower_unpack_snorm_4x8 = true,
+
         .lower_doubles_options = nir_lower_dmod,
 
         .vectorize_io = true,
+        .use_interpolated_input_intrinsics = true
 };
 
 #endif

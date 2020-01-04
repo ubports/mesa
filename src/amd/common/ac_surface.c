@@ -85,7 +85,6 @@ ADDR_HANDLE amdgpu_addr_create(const struct radeon_info *info,
 
 	if (addrCreateInput.chipFamily >= FAMILY_AI) {
 		addrCreateInput.chipEngine = CIASICIDGFXENGINE_ARCTICISLAND;
-		regValue.blockVarSizeLog2 = 0;
 	} else {
 		regValue.noOfBanks = amdinfo->mc_arb_ramcfg & 0x3;
 		regValue.noOfRanks = (amdinfo->mc_arb_ramcfg & 0x4) >> 2;
@@ -205,6 +204,17 @@ static int gfx6_compute_level(ADDR_HANDLE addrlib,
 		unsigned alignment = 256 / (AddrSurfInfoIn->bpp / 8);
 
 		AddrSurfInfoIn->width = align(AddrSurfInfoIn->width, alignment);
+	}
+
+	/* addrlib assumes the bytes/pixel is a divisor of 64, which is not
+	 * true for r32g32b32 formats. */
+	if (AddrSurfInfoIn->bpp == 96) {
+		assert(config->info.levels == 1);
+		assert(AddrSurfInfoIn->tileMode == ADDR_TM_LINEAR_ALIGNED);
+
+		/* The least common multiple of 64 bytes and 12 bytes/pixel is
+		 * 192 bytes, or 16 pixels. */
+		AddrSurfInfoIn->width = align(AddrSurfInfoIn->width, 16);
 	}
 
 	if (config->is_3d)
@@ -344,7 +354,7 @@ static int gfx6_compute_level(ADDR_HANDLE addrlib,
 	    surf_level->mode == RADEON_SURF_MODE_2D &&
 	    level == 0 &&
 	    !(surf->flags & RADEON_SURF_NO_HTILE)) {
-		AddrHtileIn->flags.tcCompatible = AddrSurfInfoIn->flags.tcCompatible;
+		AddrHtileIn->flags.tcCompatible = AddrSurfInfoOut->tcCompatible;
 		AddrHtileIn->pitch = AddrSurfInfoOut->pitch;
 		AddrHtileIn->height = AddrSurfInfoOut->height;
 		AddrHtileIn->numSlices = AddrSurfInfoOut->depth;
@@ -779,19 +789,12 @@ static int gfx6_compute_surface(ADDR_HANDLE addrlib,
 			if (level > 0)
 				continue;
 
-			/* Check that we actually got a TC-compatible HTILE if
-			 * we requested it (only for level 0, since we're not
-			 * supporting HTILE on higher mip levels anyway). */
-			assert(AddrSurfInfoOut.tcCompatible ||
-			       !AddrSurfInfoIn.flags.tcCompatible ||
-			       AddrSurfInfoIn.flags.matchStencilTileCfg);
+			if (!AddrSurfInfoOut.tcCompatible) {
+				AddrSurfInfoIn.flags.tcCompatible = 0;
+				surf->flags &= ~RADEON_SURF_TC_COMPATIBLE_HTILE;
+			}
 
 			if (AddrSurfInfoIn.flags.matchStencilTileCfg) {
-				if (!AddrSurfInfoOut.tcCompatible) {
-					AddrSurfInfoIn.flags.tcCompatible = 0;
-					surf->flags &= ~RADEON_SURF_TC_COMPATIBLE_HTILE;
-				}
-
 				AddrSurfInfoIn.flags.matchStencilTileCfg = 0;
 				AddrSurfInfoIn.tileIndex = AddrSurfInfoOut.tileIndex;
 				stencil_tile_idx = AddrSurfInfoOut.stencilTileIdx;
@@ -1058,9 +1061,9 @@ static int gfx9_compute_miptree(ADDR_HANDLE addrlib,
 	surf->surf_size = out.surfSize;
 	surf->surf_alignment = out.baseAlign;
 
-	if (in->swizzleMode == ADDR_SW_LINEAR) {
-		for (unsigned i = 0; i < in->numMipLevels; i++)
-			surf->u.gfx9.offset[i] = mip_info[i].offset;
+	for (unsigned i = 0; i < in->numMipLevels; i++) {
+		surf->u.gfx9.offset[i] = mip_info[i].offset;
+		surf->u.gfx9.pitch[i] = mip_info[i].pitch;
 	}
 
 	if (in->flags.depth) {
@@ -1360,6 +1363,7 @@ static int gfx9_compute_miptree(ADDR_HANDLE addrlib,
 
 		/* CMASK -- on GFX10 only for FMASK */
 		if (in->swizzleMode != ADDR_SW_LINEAR &&
+		    in->resourceType == ADDR_RSRC_TEX_2D &&
 		    ((info->chip_class <= GFX9 && in->numSamples == 1) ||
 		     (surf->fmask_size && in->numSamples >= 2))) {
 			ADDR2_COMPUTE_CMASK_INFO_INPUT cin = {0};
@@ -1606,11 +1610,9 @@ static int gfx9_compute_surface(ADDR_HANDLE addrlib,
 		case ADDR_SW_256B_S:
 		case ADDR_SW_4KB_S:
 		case ADDR_SW_64KB_S:
-		case ADDR_SW_VAR_S:
 		case ADDR_SW_64KB_S_T:
 		case ADDR_SW_4KB_S_X:
 		case ADDR_SW_64KB_S_X:
-		case ADDR_SW_VAR_S_X:
 			surf->micro_tile_mode = RADEON_MICRO_MODE_THIN;
 			break;
 
@@ -1619,11 +1621,9 @@ static int gfx9_compute_surface(ADDR_HANDLE addrlib,
 		case ADDR_SW_256B_D:
 		case ADDR_SW_4KB_D:
 		case ADDR_SW_64KB_D:
-		case ADDR_SW_VAR_D:
 		case ADDR_SW_64KB_D_T:
 		case ADDR_SW_4KB_D_X:
 		case ADDR_SW_64KB_D_X:
-		case ADDR_SW_VAR_D_X:
 			surf->micro_tile_mode = RADEON_MICRO_MODE_DISPLAY;
 			break;
 
@@ -1631,7 +1631,6 @@ static int gfx9_compute_surface(ADDR_HANDLE addrlib,
 		case ADDR_SW_256B_R:
 		case ADDR_SW_4KB_R:
 		case ADDR_SW_64KB_R:
-		case ADDR_SW_VAR_R:
 		case ADDR_SW_64KB_R_T:
 		case ADDR_SW_4KB_R_X:
 		case ADDR_SW_64KB_R_X:
@@ -1648,7 +1647,6 @@ static int gfx9_compute_surface(ADDR_HANDLE addrlib,
 		/* Z = depth. */
 		case ADDR_SW_4KB_Z:
 		case ADDR_SW_64KB_Z:
-		case ADDR_SW_VAR_Z:
 		case ADDR_SW_64KB_Z_T:
 		case ADDR_SW_4KB_Z_X:
 		case ADDR_SW_64KB_Z_X:

@@ -181,7 +181,7 @@ struct si_shader_context {
 	struct ac_arg es2gs_offset;
 	/* HW GS */
 	/* On gfx10:
-	 *  - bits 0..10: ordered_wave_id
+	 *  - bits 0..11: ordered_wave_id
 	 *  - bits 12..20: number of vertices in group
 	 *  - bits 22..30: number of primitives in group
 	 */
@@ -375,6 +375,8 @@ bool si_nir_build_llvm(struct si_shader_context *ctx, struct nir_shader *nir);
 LLVMValueRef si_unpack_param(struct si_shader_context *ctx,
 			     struct ac_arg param, unsigned rshift,
 			     unsigned bitwidth);
+LLVMValueRef si_is_es_thread(struct si_shader_context *ctx);
+LLVMValueRef si_is_gs_thread(struct si_shader_context *ctx);
 
 void gfx10_emit_ngg_epilogue(struct ac_shader_abi *abi,
 			     unsigned max_outputs,

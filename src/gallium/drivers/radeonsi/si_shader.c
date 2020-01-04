@@ -1033,7 +1033,7 @@ static LLVMValueRef get_tess_ring_descriptor(struct si_shader_context *ctx,
 
 	if (ctx->screen->info.chip_class >= GFX10)
 		rsrc3 |= S_008F0C_FORMAT(V_008F0C_IMG_FORMAT_32_FLOAT) |
-			 S_008F0C_OOB_SELECT(3) |
+			 S_008F0C_OOB_SELECT(V_008F0C_OOB_SELECT_RAW) |
 			 S_008F0C_RESOURCE_LEVEL(1);
 	else
 		rsrc3 |= S_008F0C_NUM_FORMAT(V_008F0C_BUF_NUM_FORMAT_FLOAT) |
@@ -2240,7 +2240,7 @@ static LLVMValueRef load_const_buffer_desc_fast_path(struct si_shader_context *c
 
 	if (ctx->screen->info.chip_class >= GFX10)
 		rsrc3 |= S_008F0C_FORMAT(V_008F0C_IMG_FORMAT_32_FLOAT) |
-			 S_008F0C_OOB_SELECT(3) |
+			 S_008F0C_OOB_SELECT(V_008F0C_OOB_SELECT_RAW) |
 			 S_008F0C_RESOURCE_LEVEL(1);
 	else
 		rsrc3 |= S_008F0C_NUM_FORMAT(V_008F0C_BUF_NUM_FORMAT_FLOAT) |
@@ -4515,9 +4515,12 @@ static void declare_vs_input_vgprs(struct si_shader_context *ctx,
 
 	if (!shader->is_gs_copy_shader) {
 		/* Vertex load indices. */
-		ac_add_arg(&ctx->args, AC_ARG_VGPR, 1, AC_ARG_INT, &ctx->vertex_index0);
-		for (unsigned i = 1; i < shader->selector->info.num_inputs; i++)
-			ac_add_arg(&ctx->args, AC_ARG_VGPR, 1, AC_ARG_INT, NULL);
+		if (shader->selector->info.num_inputs) {
+			ac_add_arg(&ctx->args, AC_ARG_VGPR, 1, AC_ARG_INT,
+				   &ctx->vertex_index0);
+			for (unsigned i = 1; i < shader->selector->info.num_inputs; i++)
+				ac_add_arg(&ctx->args, AC_ARG_VGPR, 1, AC_ARG_INT, NULL);
+		}
 		*num_prolog_vgprs += shader->selector->info.num_inputs;
 	}
 }
@@ -5090,7 +5093,7 @@ static void preload_ring_buffers(struct si_shader_context *ctx)
 
 			if (ctx->ac.chip_class >= GFX10) {
 				rsrc3 |= S_008F0C_FORMAT(V_008F0C_IMG_FORMAT_32_FLOAT) |
-					 S_008F0C_OOB_SELECT(2) |
+					 S_008F0C_OOB_SELECT(V_008F0C_OOB_SELECT_DISABLED) |
 					 S_008F0C_RESOURCE_LEVEL(1);
 			} else {
 				rsrc3 |= S_008F0C_NUM_FORMAT(V_008F0C_BUF_NUM_FORMAT_FLOAT) |
@@ -5990,7 +5993,25 @@ static bool si_vs_needs_prolog(const struct si_shader_selector *sel,
 {
 	/* VGPR initialization fixup for Vega10 and Raven is always done in the
 	 * VS prolog. */
-	return sel->vs_needs_prolog || key->ls_vgpr_fix;
+	return sel->vs_needs_prolog ||
+	       key->ls_vgpr_fix ||
+	       key->unpack_instance_id_from_vertex_id;
+}
+
+LLVMValueRef si_is_es_thread(struct si_shader_context *ctx)
+{
+	/* Return true if the current thread should execute an ES thread. */
+	return LLVMBuildICmp(ctx->ac.builder, LLVMIntULT,
+			     ac_get_thread_id(&ctx->ac),
+			     si_unpack_param(ctx, ctx->merged_wave_info, 0, 8), "");
+}
+
+LLVMValueRef si_is_gs_thread(struct si_shader_context *ctx)
+{
+	/* Return true if the current thread should execute a GS thread. */
+	return LLVMBuildICmp(ctx->ac.builder, LLVMIntULT,
+			     ac_get_thread_id(&ctx->ac),
+			     si_unpack_param(ctx, ctx->merged_wave_info, 8, 8), "");
 }
 
 static bool si_compile_tgsi_main(struct si_shader_context *ctx,
@@ -6120,16 +6141,19 @@ static bool si_compile_tgsi_main(struct si_shader_context *ctx,
 		 * Add an extra dword per vertex to ensure an odd stride, which
 		 * avoids bank conflicts for SoA accesses.
 		 */
-		declare_esgs_ring(ctx);
+		if (!gfx10_is_ngg_passthrough(shader))
+			declare_esgs_ring(ctx);
 
 		/* This is really only needed when streamout and / or vertex
 		 * compaction is enabled.
 		 */
-		LLVMTypeRef asi32 = LLVMArrayType(ctx->i32, 8);
-		ctx->gs_ngg_scratch = LLVMAddGlobalInAddressSpace(ctx->ac.module,
-			asi32, "ngg_scratch", AC_ADDR_SPACE_LDS);
-		LLVMSetInitializer(ctx->gs_ngg_scratch, LLVMGetUndef(asi32));
-		LLVMSetAlignment(ctx->gs_ngg_scratch, 4);
+		if (sel->so.num_outputs && !ctx->gs_ngg_scratch) {
+			LLVMTypeRef asi32 = LLVMArrayType(ctx->i32, 8);
+			ctx->gs_ngg_scratch = LLVMAddGlobalInAddressSpace(ctx->ac.module,
+				asi32, "ngg_scratch", AC_ADDR_SPACE_LDS);
+			LLVMSetInitializer(ctx->gs_ngg_scratch, LLVMGetUndef(asi32));
+			LLVMSetAlignment(ctx->gs_ngg_scratch, 4);
+		}
 	}
 
 	/* For GFX9 merged shaders:
@@ -6160,7 +6184,7 @@ static bool si_compile_tgsi_main(struct si_shader_context *ctx,
 		} else if (ctx->type == PIPE_SHADER_TESS_CTRL ||
 			   ctx->type == PIPE_SHADER_GEOMETRY ||
 			   (shader->key.as_ngg && !shader->key.as_es)) {
-			LLVMValueRef num_threads;
+			LLVMValueRef thread_enabled;
 			bool nested_barrier;
 
 			if (!shader->is_monolithic ||
@@ -6177,21 +6201,15 @@ static bool si_compile_tgsi_main(struct si_shader_context *ctx,
 					nested_barrier = true;
 				}
 
-				/* Number of patches / primitives */
-				num_threads = si_unpack_param(ctx, ctx->merged_wave_info, 8, 8);
+				thread_enabled = si_is_gs_thread(ctx);
 			} else {
-				/* Number of vertices */
-				num_threads = si_unpack_param(ctx, ctx->merged_wave_info, 0, 8);
+				thread_enabled = si_is_es_thread(ctx);
 				nested_barrier = false;
 			}
 
-			LLVMValueRef ena =
-				LLVMBuildICmp(ctx->ac.builder, LLVMIntULT,
-					    ac_get_thread_id(&ctx->ac), num_threads, "");
-
 			ctx->merged_wrap_if_entry_block = LLVMGetInsertBlock(ctx->ac.builder);
 			ctx->merged_wrap_if_label = 11500;
-			ac_build_ifcc(&ctx->ac, ena, ctx->merged_wrap_if_label);
+			ac_build_ifcc(&ctx->ac, thread_enabled, ctx->merged_wrap_if_label);
 
 			if (nested_barrier) {
 				/* Execute a barrier before the second shader in
@@ -6261,7 +6279,7 @@ static void si_get_vs_prolog_key(const struct tgsi_shader_info *info,
 	memset(key, 0, sizeof(*key));
 	key->vs_prolog.states = *prolog_key;
 	key->vs_prolog.num_input_sgprs = num_input_sgprs;
-	key->vs_prolog.last_input = MAX2(1, info->num_inputs) - 1;
+	key->vs_prolog.num_inputs = info->num_inputs;
 	key->vs_prolog.as_ls = shader_out->key.as_ls;
 	key->vs_prolog.as_es = shader_out->key.as_es;
 	key->vs_prolog.as_ngg = shader_out->key.as_ngg;
@@ -6919,7 +6937,7 @@ int si_compile_tgsi_shader(struct si_screen *sscreen,
 
 	if (shader->is_monolithic && ctx.type == PIPE_SHADER_VERTEX) {
 		LLVMValueRef parts[2];
-		bool need_prolog = sel->vs_needs_prolog;
+		bool need_prolog = si_vs_needs_prolog(sel, &shader->key.part.vs.prolog);
 
 		parts[1] = ctx.main_fn;
 
@@ -6929,6 +6947,7 @@ int si_compile_tgsi_shader(struct si_screen *sscreen,
 					     shader->info.num_input_sgprs,
 					     &shader->key.part.vs.prolog,
 					     shader, &prolog_key);
+			prolog_key.vs_prolog.is_monolithic = true;
 			si_build_vs_prolog_function(&ctx, &prolog_key);
 			parts[0] = ctx.main_fn;
 		}
@@ -7041,7 +7060,8 @@ int si_compile_tgsi_shader(struct si_screen *sscreen,
 			es_main = ctx.main_fn;
 
 			/* ES prolog */
-			if (es->vs_needs_prolog) {
+			if (es->type == PIPE_SHADER_VERTEX &&
+			    si_vs_needs_prolog(es, &shader->key.part.gs.vs_prolog)) {
 				union si_shader_part_key vs_prolog_key;
 				si_get_vs_prolog_key(&es->info,
 						     shader_es.info.num_input_sgprs,
@@ -7323,7 +7343,7 @@ static void si_build_vs_prolog_function(struct si_shader_context *ctx,
 	memset(&ctx->args, 0, sizeof(ctx->args));
 
 	/* 4 preloaded VGPRs + vertex load indices as prolog outputs */
-	returns = alloca((num_all_input_regs + key->vs_prolog.last_input + 1) *
+	returns = alloca((num_all_input_regs + key->vs_prolog.num_inputs) *
 			 sizeof(LLVMTypeRef));
 	num_returns = 0;
 
@@ -7343,7 +7363,7 @@ static void si_build_vs_prolog_function(struct si_shader_context *ctx,
 	}
 
 	/* Vertex load indices. */
-	for (i = 0; i <= key->vs_prolog.last_input; i++)
+	for (i = 0; i < key->vs_prolog.num_inputs; i++)
 		returns[num_returns++] = ctx->f32;
 
 	/* Create the function. */
@@ -7418,22 +7438,6 @@ static void si_build_vs_prolog_function(struct si_shader_context *ctx,
 					   key->vs_prolog.num_input_sgprs + i, "");
 	}
 
-	LLVMValueRef original_ret = ret;
-	bool wrapped = false;
-	LLVMBasicBlockRef if_entry_block = NULL;
-
-	if (key->vs_prolog.is_monolithic && key->vs_prolog.as_ngg) {
-		LLVMValueRef num_threads;
-		LLVMValueRef ena;
-
-		num_threads = si_unpack_param(ctx, merged_wave_info, 0, 8);
-		ena = LLVMBuildICmp(ctx->ac.builder, LLVMIntULT,
-					ac_get_thread_id(&ctx->ac), num_threads, "");
-		if_entry_block = LLVMGetInsertBlock(ctx->ac.builder);
-		ac_build_ifcc(&ctx->ac, ena, 11501);
-		wrapped = true;
-	}
-
 	/* Compute vertex load indices from instance divisors. */
 	LLVMValueRef instance_divisor_constbuf = NULL;
 
@@ -7445,7 +7449,7 @@ static void si_build_vs_prolog_function(struct si_shader_context *ctx,
 			ac_build_load_to_sgpr(&ctx->ac, list, buf_index);
 	}
 
-	for (i = 0; i <= key->vs_prolog.last_input; i++) {
+	for (i = 0; i < key->vs_prolog.num_inputs; i++) {
 		bool divisor_is_one =
 			key->vs_prolog.states.instance_divisor_is_one & (1u << i);
 		bool divisor_is_fetched =
@@ -7487,20 +7491,6 @@ static void si_build_vs_prolog_function(struct si_shader_context *ctx,
 		index = ac_to_float(&ctx->ac, index);
 		ret = LLVMBuildInsertValue(ctx->ac.builder, ret, index,
 					   ctx->args.arg_count + i, "");
-	}
-
-	if (wrapped) {
-		LLVMBasicBlockRef bbs[2] = {
-			LLVMGetInsertBlock(ctx->ac.builder),
-			if_entry_block,
-		};
-		ac_build_endif(&ctx->ac, 11501);
-
-		LLVMValueRef values[2] = {
-			ret,
-			original_ret
-		};
-		ret = ac_build_phi(&ctx->ac, LLVMTypeOf(ret), 2, values, bbs);
 	}
 
 	si_llvm_build_ret(ctx, ret);

@@ -194,6 +194,46 @@ panfrost_sfbd_set_zsbuf(
                 unreachable("Unsupported depth/stencil format.");
 }
 
+
+static struct mali_single_framebuffer
+panfrost_emit_sfbd(struct panfrost_batch *batch, unsigned vertex_count)
+{
+        struct panfrost_context *ctx = batch->ctx;
+        struct pipe_context *gallium = (struct pipe_context *) ctx;
+        struct panfrost_screen *screen = pan_screen(gallium->screen);
+
+        unsigned width = batch->key.width;
+        unsigned height = batch->key.height;
+
+        /* TODO: Why do we need to make the stack bigger than other platforms? */
+        unsigned shift = panfrost_get_stack_shift(MAX2(batch->stack_size, 512));
+
+        /* TODO: where do we specify the shift? */
+
+        struct mali_single_framebuffer framebuffer = {
+                .width = MALI_POSITIVE(width),
+                .height = MALI_POSITIVE(height),
+                .unknown2 = 0x1f,
+                .format = {
+                        .unk3 = 0x3,
+                },
+                .clear_flags = 0x1000,
+                .scratchpad = panfrost_batch_get_scratchpad(batch, shift, screen->thread_tls_alloc, screen->core_count)->gpu,
+                .tiler = panfrost_emit_midg_tiler(batch, vertex_count),
+        };
+
+        return framebuffer;
+}
+
+void
+panfrost_attach_sfbd(struct panfrost_batch *batch, unsigned vertex_count)
+{
+        struct mali_single_framebuffer sfbd =
+                panfrost_emit_sfbd(batch, vertex_count);
+
+        memcpy(batch->framebuffer.cpu, &sfbd, sizeof(sfbd));
+}
+
 /* Creates an SFBD for the FRAGMENT section of the bound framebuffer */
 
 mali_ptr
@@ -229,5 +269,5 @@ panfrost_sfbd_fragment(struct panfrost_batch *batch, bool has_draws)
                 fb.format.unk2 |= MALI_SFBD_FORMAT_MSAA_B;
         }
 
-        return panfrost_upload_transient(batch, &fb, sizeof(fb)) | MALI_SFBD;
+        return panfrost_upload_transient(batch, &fb, sizeof(fb));
 }

@@ -463,7 +463,7 @@ union si_shader_part_key {
 		unsigned	num_input_sgprs:6;
 		/* For merged stages such as LS-HS, HS input VGPRs are first. */
 		unsigned	num_merged_next_stage_vgprs:3;
-		unsigned	last_input:4;
+		unsigned	num_inputs:5;
 		unsigned	as_ls:1;
 		unsigned	as_es:1;
 		unsigned	as_ngg:1;
@@ -783,6 +783,18 @@ si_get_main_shader_part(struct si_shader_selector *sel,
 	if (key->as_ngg)
 		return &sel->main_shader_part_ngg;
 	return &sel->main_shader_part;
+}
+
+static inline bool
+gfx10_is_ngg_passthrough(struct si_shader *shader)
+{
+	struct si_shader_selector *sel = shader->selector;
+
+	return sel->type != PIPE_SHADER_GEOMETRY &&
+	       !sel->so.num_outputs &&
+	       !sel->info.writes_edgeflag &&
+	       (sel->type != PIPE_SHADER_VERTEX ||
+		!shader->key.mono.u.vs_export_prim_id);
 }
 
 static inline bool

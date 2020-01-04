@@ -1202,7 +1202,8 @@ static void gfx10_shader_ngg(struct si_screen *sscreen, struct si_shader *shader
 
 	shader->ctx_reg.ngg.vgt_primitiveid_en =
 		S_028A84_PRIMITIVEID_EN(es_enable_prim_id) |
-		S_028A84_NGG_DISABLE_PROVOK_REUSE(es_enable_prim_id);
+		S_028A84_NGG_DISABLE_PROVOK_REUSE(shader->key.mono.u.vs_export_prim_id ||
+						  gs_sel->info.writes_primid);
 
 	if (gs_type == PIPE_SHADER_GEOMETRY) {
 		shader->ctx_reg.ngg.vgt_esgs_ring_itemsize = es_sel->esgs_itemsize / 4;
@@ -1240,7 +1241,7 @@ static void gfx10_shader_ngg(struct si_screen *sscreen, struct si_shader *shader
 
 	shader->ge_cntl =
 		S_03096C_PRIM_GRP_SIZE(shader->ngg.max_gsprims) |
-		S_03096C_VERT_GRP_SIZE(shader->ngg.hw_max_esverts) |
+		S_03096C_VERT_GRP_SIZE(256) | /* 256 = disable vertex grouping */
 		S_03096C_BREAK_WAVE_AT_EOI(break_wave_at_eoi);
 
 	/* Bug workaround for a possible hang with non-tessellation cases.
@@ -2793,9 +2794,7 @@ static void *si_create_shader_selector(struct pipe_context *ctx,
 
 		/* EN_MAX_VERT_OUT_PER_GS_INSTANCE does not work with tesselation. */
 		sel->tess_turns_off_ngg =
-			(sscreen->info.family == CHIP_NAVI10 ||
-			 sscreen->info.family == CHIP_NAVI12 ||
-			 sscreen->info.family == CHIP_NAVI14) &&
+			sscreen->info.chip_class == GFX10 &&
 			sel->gs_num_invocations * sel->gs_max_out_vertices > 256;
 		break;
 
@@ -3874,9 +3873,9 @@ static struct si_pm4_state *si_build_vgt_shader_config(struct si_screen *screen,
 	}
 
 	if (key.u.ngg) {
-		stages |= S_028B54_PRIMGEN_EN(1);
-		if (key.u.streamout)
-			stages |= S_028B54_NGG_WAVE_ID_EN(1);
+		stages |= S_028B54_PRIMGEN_EN(1) |
+			  S_028B54_NGG_WAVE_ID_EN(key.u.streamout) |
+			  S_028B54_PRIMGEN_PASSTHRU_EN(key.u.ngg_passthrough);
 	} else if (key.u.gs)
 		stages |= S_028B54_VS_EN(V_028B54_VS_STAGE_COPY_SHADER);
 
@@ -4028,6 +4027,10 @@ bool si_update_shaders(struct si_context *sctx)
 			si_pm4_bind_state(sctx, es, sctx->vs_shader.current->pm4);
 		}
 	}
+
+	/* This must be done after the shader variant is selected. */
+	if (sctx->ngg)
+		key.u.ngg_passthrough = gfx10_is_ngg_passthrough(si_get_vs(sctx)->current);
 
 	si_update_vgt_shader_config(sctx, key);
 

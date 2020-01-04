@@ -346,9 +346,10 @@ stream_state(struct iris_batch *batch,
    struct iris_bo *bo = iris_resource_bo(*out_res);
    iris_use_pinned_bo(batch, bo, false);
 
-   *out_offset += iris_bo_offset_from_base_address(bo);
+   iris_record_state_size(batch->state_sizes,
+                          bo->gtt_offset + *out_offset, size);
 
-   iris_record_state_size(batch->state_sizes, *out_offset, size);
+   *out_offset += iris_bo_offset_from_base_address(bo);
 
    return ptr;
 }
@@ -931,6 +932,14 @@ iris_init_render_context(struct iris_batch *batch)
 #endif
 
 #if GEN_GEN == 11
+      iris_pack_state(GENX(TCCNTLREG), &reg_val, reg) {
+         reg.L3DataPartialWriteMergingEnable = true;
+         reg.ColorZPartialWriteMergingEnable = true;
+         reg.URBPartialWriteMergingEnable = true;
+         reg.TCDisable = true;
+      }
+      iris_emit_lri(batch, TCCNTLREG, reg_val);
+
       iris_pack_state(GENX(SAMPLER_MODE), &reg_val, reg) {
          reg.HeaderlessMessageforPreemptableContexts = 1;
          reg.HeaderlessMessageforPreemptableContextsMask = 1;
@@ -1980,10 +1989,12 @@ iris_upload_sampler_states(struct iris_context *ice, gl_shader_stage stage)
       return;
 
    struct pipe_resource *res = shs->sampler_table.res;
-   shs->sampler_table.offset +=
-      iris_bo_offset_from_base_address(iris_resource_bo(res));
+   struct iris_bo *bo = iris_resource_bo(res);
 
-   iris_record_state_size(ice->state.sizes, shs->sampler_table.offset, size);
+   iris_record_state_size(ice->state.sizes,
+                          bo->gtt_offset + shs->sampler_table.offset, size);
+
+   shs->sampler_table.offset += iris_bo_offset_from_base_address(bo);
 
    /* Make sure all land in the same BO */
    iris_border_color_pool_reserve(ice, IRIS_MAX_TEXTURE_SAMPLERS);
@@ -3997,14 +4008,14 @@ static void
 iris_populate_vs_key(const struct iris_context *ice,
                      const struct shader_info *info,
                      gl_shader_stage last_stage,
-                     struct brw_vs_prog_key *key)
+                     struct iris_vs_prog_key *key)
 {
    const struct iris_rasterizer_state *cso_rast = ice->state.cso_rast;
 
    if (info->clip_distance_array_size == 0 &&
        (info->outputs_written & (VARYING_BIT_POS | VARYING_BIT_CLIP_VERTEX)) &&
        last_stage == MESA_SHADER_VERTEX)
-      key->nr_userclip_plane_consts = cso_rast->num_clip_plane_consts;
+      key->vue.nr_userclip_plane_consts = cso_rast->num_clip_plane_consts;
 }
 
 /**
@@ -4012,7 +4023,7 @@ iris_populate_vs_key(const struct iris_context *ice,
  */
 static void
 iris_populate_tcs_key(const struct iris_context *ice,
-                      struct brw_tcs_prog_key *key)
+                      struct iris_tcs_prog_key *key)
 {
 }
 
@@ -4023,14 +4034,14 @@ static void
 iris_populate_tes_key(const struct iris_context *ice,
                       const struct shader_info *info,
                       gl_shader_stage last_stage,
-                      struct brw_tes_prog_key *key)
+                      struct iris_tes_prog_key *key)
 {
    const struct iris_rasterizer_state *cso_rast = ice->state.cso_rast;
 
    if (info->clip_distance_array_size == 0 &&
        (info->outputs_written & (VARYING_BIT_POS | VARYING_BIT_CLIP_VERTEX)) &&
        last_stage == MESA_SHADER_TESS_EVAL)
-      key->nr_userclip_plane_consts = cso_rast->num_clip_plane_consts;
+      key->vue.nr_userclip_plane_consts = cso_rast->num_clip_plane_consts;
 }
 
 /**
@@ -4040,14 +4051,14 @@ static void
 iris_populate_gs_key(const struct iris_context *ice,
                      const struct shader_info *info,
                      gl_shader_stage last_stage,
-                     struct brw_gs_prog_key *key)
+                     struct iris_gs_prog_key *key)
 {
    const struct iris_rasterizer_state *cso_rast = ice->state.cso_rast;
 
    if (info->clip_distance_array_size == 0 &&
        (info->outputs_written & (VARYING_BIT_POS | VARYING_BIT_CLIP_VERTEX)) &&
        last_stage == MESA_SHADER_GEOMETRY)
-      key->nr_userclip_plane_consts = cso_rast->num_clip_plane_consts;
+      key->vue.nr_userclip_plane_consts = cso_rast->num_clip_plane_consts;
 }
 
 /**
@@ -4056,7 +4067,7 @@ iris_populate_gs_key(const struct iris_context *ice,
 static void
 iris_populate_fs_key(const struct iris_context *ice,
                      const struct shader_info *info,
-                     struct brw_wm_prog_key *key)
+                     struct iris_fs_prog_key *key)
 {
    struct iris_screen *screen = (void *) ice->ctx.screen;
    const struct pipe_framebuffer_state *fb = &ice->state.framebuffer;
@@ -4089,7 +4100,7 @@ iris_populate_fs_key(const struct iris_context *ice,
 
 static void
 iris_populate_cs_key(const struct iris_context *ice,
-                     struct brw_cs_prog_key *key)
+                     struct iris_cs_prog_key *key)
 {
 }
 
@@ -4100,17 +4111,9 @@ KSP(const struct iris_compiled_shader *shader)
    return iris_bo_offset_from_base_address(res->bo) + shader->assembly.offset;
 }
 
-/* Gen11 workaround table #2056 WABTPPrefetchDisable suggests to disable
- * prefetching of binding tables in A0 and B0 steppings.  XXX: Revisit
- * this WA on C0 stepping.
- *
- * TODO: Fill out SamplerCount for prefetching?
- */
-
 #define INIT_THREAD_DISPATCH_FIELDS(pkt, prefix, stage)                   \
    pkt.KernelStartPointer = KSP(shader);                                  \
-   pkt.BindingTableEntryCount = GEN_GEN == 11 ? 0 :                       \
-      shader->bt.size_bytes / 4;                                          \
+   pkt.BindingTableEntryCount = shader->bt.size_bytes / 4;                \
    pkt.FloatingPointMode = prog_data->use_alt_mode;                       \
                                                                           \
    pkt.DispatchGRFStartRegisterForURBData =                               \
@@ -4277,9 +4280,7 @@ iris_store_fs_state(struct iris_context *ice,
 
    iris_pack_command(GENX(3DSTATE_PS), ps_state, ps) {
       ps.VectorMaskEnable = true;
-      // XXX: WABTPPrefetchDisable, see above, drop at C0
-      ps.BindingTableEntryCount = GEN_GEN == 11 ? 0 :
-         shader->bt.size_bytes / 4;
+      ps.BindingTableEntryCount = shader->bt.size_bytes / 4;
       ps.FloatingPointMode = prog_data->use_alt_mode;
       ps.MaximumNumberofThreadsPerPSD = 64 - (GEN_GEN == 8 ? 2 : 1);
 
@@ -5401,12 +5402,23 @@ iris_upload_dirty_render_state(struct iris_context *ice,
       }
    }
 
+   /* GEN:BUG:1604061319
+    *
+    *    3DSTATE_CONSTANT_* needs to be programmed before BTP_*
+    *
+    * Testing shows that all the 3DSTATE_CONSTANT_XS need to be emitted if
+    * any stage has a dirty binding table.
+    */
+   const bool emit_const_wa = GEN_GEN >= 11 &&
+      (dirty & IRIS_ALL_DIRTY_BINDINGS) != 0;
+
 #if GEN_GEN >= 12
    uint32_t nobuffer_stages = 0;
 #endif
 
    for (int stage = 0; stage <= MESA_SHADER_FRAGMENT; stage++) {
-      if (!(dirty & (IRIS_DIRTY_CONSTANTS_VS << stage)))
+      if (!(dirty & (IRIS_DIRTY_CONSTANTS_VS << stage)) &&
+          !emit_const_wa)
          continue;
 
       struct iris_shader_state *shs = &ice->state.shaders[stage];

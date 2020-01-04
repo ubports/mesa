@@ -62,6 +62,8 @@ files_mesa_util = files(
   'os_file.c',
   'os_misc.c',
   'os_misc.h',
+  'os_socket.c',
+  'os_socket.h',
   'u_process.c',
   'u_process.h',
   'sha1/sha1.c',
@@ -285,4 +287,5 @@ if with_tests
   subdir('tests/vma')
   subdir('tests/set')
   subdir('tests/sparse_array')
+  subdir('tests/format')
 endif

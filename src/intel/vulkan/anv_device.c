@@ -1101,7 +1101,15 @@ void anv_GetPhysicalDeviceFeatures2(
             (VkPhysicalDeviceLineRasterizationFeaturesEXT *)ext;
          features->rectangularLines = true;
          features->bresenhamLines = true;
-         features->smoothLines = true;
+         /* Support for Smooth lines with MSAA was removed on gen11.  From the
+          * BSpec section "Multisample ModesState" table for "AA Line Support
+          * Requirements":
+          *
+          *    GEN10:BUG:######## 	NUM_MULTISAMPLES == 1
+          *
+          * Fortunately, this isn't a case most people care about.
+          */
+         features->smoothLines = pdevice->info.gen < 10;
          features->stippledRectangularLines = false;
          features->stippledBresenhamLines = true;
          features->stippledSmoothLines = false;
@@ -1400,7 +1408,7 @@ void anv_GetPhysicalDeviceProperties(
       .framebufferNoAttachmentsSampleCounts     = sample_counts,
       .maxColorAttachments                      = MAX_RTS,
       .sampledImageColorSampleCounts            = sample_counts,
-      .sampledImageIntegerSampleCounts          = VK_SAMPLE_COUNT_1_BIT,
+      .sampledImageIntegerSampleCounts          = sample_counts,
       .sampledImageDepthSampleCounts            = sample_counts,
       .sampledImageStencilSampleCounts          = sample_counts,
       .storageImageSampleCounts                 = VK_SAMPLE_COUNT_1_BIT,
@@ -1660,7 +1668,7 @@ void anv_GetPhysicalDeviceProperties2(
          VkPhysicalDeviceSamplerFilterMinmaxPropertiesEXT *properties =
             (VkPhysicalDeviceSamplerFilterMinmaxPropertiesEXT *)ext;
          properties->filterMinmaxImageComponentMapping = pdevice->info.gen >= 9;
-         properties->filterMinmaxSingleComponentFormats = true;
+         properties->filterMinmaxSingleComponentFormats = pdevice->info.gen >= 9;
          break;
       }
 
@@ -2972,6 +2980,14 @@ bool
 anv_vma_alloc(struct anv_device *device, struct anv_bo *bo,
               uint64_t client_address)
 {
+   const struct anv_physical_device *pdevice = &device->instance->physicalDevice;
+   const struct gen_device_info *devinfo = &pdevice->info;
+   /* Gen12 CCS surface addresses need to be 64K aligned. We have no way of
+    * telling what this allocation is for so pick the largest alignment.
+    */
+   const uint32_t vma_alignment =
+      devinfo->gen >= 12 ? (64 * 1024) : (4 * 1024);
+
    if (!(bo->flags & EXEC_OBJECT_PINNED)) {
       assert(!(bo->has_client_visible_address));
       return true;
@@ -2989,7 +3005,8 @@ anv_vma_alloc(struct anv_device *device, struct anv_bo *bo,
             bo->offset = gen_canonical_address(client_address);
          }
       } else {
-         uint64_t addr = util_vma_heap_alloc(&device->vma_cva, bo->size, 4096);
+         uint64_t addr =
+            util_vma_heap_alloc(&device->vma_cva, bo->size, vma_alignment);
          if (addr) {
             bo->offset = gen_canonical_address(addr);
             assert(addr == gen_48b_address(bo->offset));
@@ -3002,7 +3019,8 @@ anv_vma_alloc(struct anv_device *device, struct anv_bo *bo,
    assert(client_address == 0);
 
    if (bo->flags & EXEC_OBJECT_SUPPORTS_48B_ADDRESS) {
-      uint64_t addr = util_vma_heap_alloc(&device->vma_hi, bo->size, 4096);
+      uint64_t addr =
+         util_vma_heap_alloc(&device->vma_hi, bo->size, vma_alignment);
       if (addr) {
          bo->offset = gen_canonical_address(addr);
          assert(addr == gen_48b_address(bo->offset));
@@ -3010,7 +3028,8 @@ anv_vma_alloc(struct anv_device *device, struct anv_bo *bo,
    }
 
    if (bo->offset == 0) {
-      uint64_t addr = util_vma_heap_alloc(&device->vma_lo, bo->size, 4096);
+      uint64_t addr =
+         util_vma_heap_alloc(&device->vma_lo, bo->size, vma_alignment);
       if (addr) {
          bo->offset = gen_canonical_address(addr);
          assert(addr == gen_48b_address(bo->offset));
@@ -3167,7 +3186,7 @@ VkResult anv_AllocateMemory(
       if (result != VK_SUCCESS)
          goto fail;
 
-      const struct VkImportAndroidHardwareBufferInfoANDROID import_info = {
+      const VkImportAndroidHardwareBufferInfoANDROID import_info = {
          .buffer = mem->ahw,
       };
       result = anv_import_ahw_memory(_device, mem, &import_info);

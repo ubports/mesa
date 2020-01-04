@@ -45,7 +45,6 @@ clear_image(struct tu_cmd_buffer *cmdbuf,
 
       tu_blit(cmdbuf, &(struct tu_blit) {
          .dst = tu_blit_surf_whole(image, range->baseMipLevel + j, range->baseArrayLayer),
-         .src = tu_blit_surf_whole(image, range->baseMipLevel + j, range->baseArrayLayer),
          .layers = layer_count,
          .clear_value = {clear_value[0], clear_value[1], clear_value[2], clear_value[3]},
          .type = TU_BLIT_CLEAR,
@@ -126,15 +125,21 @@ tu_CmdClearAttachments(VkCommandBuffer commandBuffer,
       tu_cs_emit(cs, A6XX_RB_BLIT_SCISSOR_BR_X(x2) | A6XX_RB_BLIT_SCISSOR_BR_Y(y2));
 
       for (unsigned j = 0; j < attachmentCount; j++) {
-         uint32_t index, a;
+         uint32_t a;
+         unsigned clear_mask = 0;
          if (pAttachments[j].aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) {
-            index = pAttachments[j].colorAttachment;
-            a = subpass->color_attachments[index].attachment;
+            clear_mask = 0xf;
+            a = subpass->color_attachments[pAttachments[j].colorAttachment].attachment;
          } else {
-            index = subpass->color_count;
             a = subpass->depth_stencil_attachment.attachment;
+            if (pAttachments[j].aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT)
+               clear_mask |= 1;
+            if (pAttachments[j].aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT)
+               clear_mask |= 2;
          }
-         /* TODO: partial depth/stencil clear? */
+
+         if (a == VK_ATTACHMENT_UNUSED)
+               continue;
 
          VkFormat fmt = cmd->state.pass->attachments[a].format;
          const struct tu_native_format *format = tu6_get_native_format(fmt);
@@ -144,10 +149,10 @@ tu_CmdClearAttachments(VkCommandBuffer commandBuffer,
          tu_cs_emit(cs, A6XX_RB_BLIT_DST_INFO_COLOR_FORMAT(format->rb));
 
          tu_cs_emit_pkt4(cs, REG_A6XX_RB_BLIT_INFO, 1);
-         tu_cs_emit(cs, A6XX_RB_BLIT_INFO_GMEM | A6XX_RB_BLIT_INFO_CLEAR_MASK(0xf));
+         tu_cs_emit(cs, A6XX_RB_BLIT_INFO_GMEM | A6XX_RB_BLIT_INFO_CLEAR_MASK(clear_mask));
 
          tu_cs_emit_pkt4(cs, REG_A6XX_RB_BLIT_BASE_GMEM, 1);
-         tu_cs_emit(cs, cmd->state.tiling_config.gmem_offsets[index]);
+         tu_cs_emit(cs, cmd->state.pass->attachments[a].gmem_offset);
 
          tu_cs_emit_pkt4(cs, REG_A6XX_RB_UNKNOWN_88D0, 1);
          tu_cs_emit(cs, 0);

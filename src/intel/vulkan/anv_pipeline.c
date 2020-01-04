@@ -688,8 +688,7 @@ anv_pipeline_lower_nir(struct anv_pipeline *pipeline,
    /* Apply the actual pipeline layout to UBOs, SSBOs, and textures */
    anv_nir_apply_pipeline_layout(pdevice,
                                  pipeline->device->robust_buffer_access,
-                                 layout, nir, prog_data,
-                                 &stage->bind_map);
+                                 layout, nir, &stage->bind_map);
 
    NIR_PASS_V(nir, nir_lower_explicit_io, nir_var_mem_ubo,
               nir_address_format_32bit_index_offset);
@@ -1156,12 +1155,15 @@ anv_pipeline_compile_graphics(struct anv_pipeline *pipeline,
       case MESA_SHADER_GEOMETRY:
          populate_gs_prog_key(devinfo, sinfo->flags, &stages[stage].key.gs);
          break;
-      case MESA_SHADER_FRAGMENT:
+      case MESA_SHADER_FRAGMENT: {
+         const bool raster_enabled =
+            !info->pRasterizationState->rasterizerDiscardEnable;
          populate_wm_prog_key(devinfo, sinfo->flags,
                               pipeline->subpass,
-                              info->pMultisampleState,
+                              raster_enabled ? info->pMultisampleState : NULL,
                               &stages[stage].key.wm);
          break;
+      }
       default:
          unreachable("Invalid graphics shader stage");
       }
@@ -1862,9 +1864,10 @@ anv_pipeline_init(struct anv_pipeline *pipeline,
    pipeline->mem_ctx = ralloc_context(NULL);
    pipeline->flags = pCreateInfo->flags;
 
+   assert(pCreateInfo->pRasterizationState);
+
    copy_non_dynamic_state(pipeline, pCreateInfo);
-   pipeline->depth_clamp_enable = pCreateInfo->pRasterizationState &&
-                                  pCreateInfo->pRasterizationState->depthClampEnable;
+   pipeline->depth_clamp_enable = pCreateInfo->pRasterizationState->depthClampEnable;
 
    /* Previously we enabled depth clipping when !depthClampEnable.
     * DepthClipStateCreateInfo now makes depth clipping explicit so if the
@@ -1876,8 +1879,10 @@ anv_pipeline_init(struct anv_pipeline *pipeline,
                            PIPELINE_RASTERIZATION_DEPTH_CLIP_STATE_CREATE_INFO_EXT);
    pipeline->depth_clip_enable = clip_info ? clip_info->depthClipEnable : !pipeline->depth_clamp_enable;
 
-   pipeline->sample_shading_enable = pCreateInfo->pMultisampleState &&
-                                     pCreateInfo->pMultisampleState->sampleShadingEnable;
+   pipeline->sample_shading_enable =
+      !pCreateInfo->pRasterizationState->rasterizerDiscardEnable &&
+      pCreateInfo->pMultisampleState &&
+      pCreateInfo->pMultisampleState->sampleShadingEnable;
 
    pipeline->needs_data_cache = false;
 

@@ -214,6 +214,7 @@ struct panfrost_shader_state {
         bool reads_point_coord;
         bool reads_face;
         bool reads_frag_coord;
+        unsigned stack_size;
 
         struct mali_attr_meta varyings[PIPE_MAX_ATTRIBS];
         gl_varying_slot varyings_loc[PIPE_MAX_ATTRIBS];
@@ -304,14 +305,18 @@ panfrost_flush(
 mali_ptr panfrost_sfbd_fragment(struct panfrost_batch *batch, bool has_draws);
 mali_ptr panfrost_mfbd_fragment(struct panfrost_batch *batch, bool has_draws);
 
-struct bifrost_framebuffer
-panfrost_emit_mfbd(struct panfrost_batch *batch, unsigned vertex_count);
+void
+panfrost_attach_mfbd(struct panfrost_batch *batch, unsigned vertex_count);
 
-struct mali_single_framebuffer
-panfrost_emit_sfbd(struct panfrost_batch *batch, unsigned vertex_count);
+void
+panfrost_attach_sfbd(struct panfrost_batch *batch, unsigned vertex_count);
+
+struct midgard_tiler_descriptor
+panfrost_emit_midg_tiler(struct panfrost_batch *batch, unsigned vertex_count);
 
 mali_ptr
-panfrost_fragment_job(struct panfrost_batch *batch, bool has_draws);
+panfrost_fragment_job(struct panfrost_batch *batch, bool has_draws,
+                      struct mali_job_descriptor_header **header_cpu);
 
 void
 panfrost_shader_compile(
@@ -330,20 +335,6 @@ panfrost_vertex_buffer_address(struct panfrost_context *ctx, unsigned i);
 
 void
 panfrost_emit_vertex_data(struct panfrost_batch *batch);
-
-struct pan_shift_odd {
-        unsigned shift;
-        unsigned odd;
-};
-
-struct pan_shift_odd
-panfrost_padded_vertex_count(
-        unsigned vertex_count,
-        bool primitive_pot);
-
-
-unsigned
-pan_expand_shift_odd(struct pan_shift_odd o);
 
 /* Compute */
 

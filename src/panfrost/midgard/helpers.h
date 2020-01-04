@@ -69,6 +69,19 @@
                 op == TEXTURE_OP_DFDY \
         )
 
+#define OP_IS_UNSIGNED_CMP(op) ( \
+                op == midgard_alu_op_ult || \
+                op == midgard_alu_op_ule \
+        )
+
+#define OP_IS_INTEGER_CMP(op) ( \
+                op == midgard_alu_op_ieq || \
+                op == midgard_alu_op_ine || \
+                op == midgard_alu_op_ilt || \
+                op == midgard_alu_op_ile || \
+                OP_IS_UNSIGNED_CMP(op) \
+        )
+
 /* ALU control words are single bit fields with a lot of space */
 
 #define ALU_ENAB_VEC_MUL  (1 << 17)
@@ -123,28 +136,7 @@
 #define TAG_ALU_12 0xA
 #define TAG_ALU_16 0xB
 
-static inline int
-quadword_size(int tag)
-{
-        switch (tag) {
-        case TAG_ALU_4:
-        case TAG_LOAD_STORE_4:
-        case TAG_TEXTURE_4:
-        case TAG_TEXTURE_4_VTX:
-                return 1;
-        case TAG_ALU_8:
-                return 2;
-        case TAG_ALU_12:
-                return 3;
-        case TAG_ALU_16:
-                return 4;
-        default:
-                unreachable("Unknown tag");
-        }
-}
-
-#define IS_ALU(tag) (tag == TAG_ALU_4 || tag == TAG_ALU_8 ||  \
-		     tag == TAG_ALU_12 || tag == TAG_ALU_16)
+#define IS_ALU(tag) (tag >= TAG_ALU_4)
 
 /* Special register aliases */
 
@@ -161,7 +153,6 @@ quadword_size(int tag)
 
 /* SSA helper aliases to mimic the registers. */
 
-#define SSA_UNUSED ~0
 #define SSA_FIXED_SHIFT 24
 #define SSA_FIXED_REGISTER(reg) (((1 + (reg)) << SSA_FIXED_SHIFT) | 1)
 #define SSA_REG_FROM_FIXED(reg) ((((reg) & ~1) >> SSA_FIXED_SHIFT) - 1)
@@ -175,10 +166,12 @@ quadword_size(int tag)
 #define SWIZZLE_IDENTITY { \
         { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 }, \
         { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 }, \
+        { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 }, \
         { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 } \
 }
 
 #define SWIZZLE_IDENTITY_4 { \
+        { 0, 1, 2, 3, 0, 0, 0, 0, 0, 0,  0,  0,  0,  0,  0,  0 }, \
         { 0, 1, 2, 3, 0, 0, 0, 0, 0, 0,  0,  0,  0,  0,  0,  0 }, \
         { 0, 1, 2, 3, 0, 0, 0, 0, 0, 0,  0,  0,  0,  0,  0,  0 }, \
         { 0, 1, 2, 3, 0, 0, 0, 0, 0, 0,  0,  0,  0,  0,  0,  0 }, \
@@ -323,22 +316,10 @@ midgard_ldst_reg(unsigned reg, unsigned component)
         return packed;
 }
 
-/* Unpacks a load/store argument */
-
-static inline midgard_ldst_register_select
-midgard_ldst_select(uint8_t u)
+static inline bool
+midgard_is_branch_unit(unsigned unit)
 {
-        midgard_ldst_register_select sel;
-        memcpy(&sel, &u, sizeof(u));
-        return sel;
-}
-
-static inline uint8_t
-midgard_ldst_pack(midgard_ldst_register_select sel)
-{
-        uint8_t packed;
-        memcpy(&packed, &sel, sizeof(packed));
-        return packed;
+        return (unit == ALU_ENAB_BRANCH) || (unit == ALU_ENAB_BR_COMPACT);
 }
 
 #endif
