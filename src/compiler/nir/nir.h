@@ -3839,6 +3839,7 @@ typedef struct nir_lower_subgroups_options {
    bool lower_shuffle:1;
    bool lower_shuffle_to_32bit:1;
    bool lower_quad:1;
+   bool lower_quad_broadcast_dynamic:1;
 } nir_lower_subgroups_options;
 
 bool nir_lower_subgroups(nir_shader *shader,
@@ -4111,7 +4112,7 @@ typedef enum  {
 
 bool nir_lower_to_source_mods(nir_shader *shader, nir_lower_to_source_mods_flags options);
 
-bool nir_lower_gs_intrinsics(nir_shader *shader);
+bool nir_lower_gs_intrinsics(nir_shader *shader, bool per_stream);
 
 typedef unsigned (*nir_lower_bit_size_callback)(const nir_alu_instr *, void *);
 
@@ -4217,6 +4218,7 @@ typedef enum {
     nir_move_load_ubo    = (1 << 1),
     nir_move_load_input  = (1 << 2),
     nir_move_comparisons = (1 << 3),
+    nir_move_copies      = (1 << 4),
 } nir_move_options;
 
 bool nir_can_move_instr(nir_instr *instr, nir_move_options options);

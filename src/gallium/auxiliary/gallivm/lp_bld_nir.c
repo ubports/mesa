@@ -474,9 +474,13 @@ static LLVMValueRef do_alu_action(struct lp_build_nir_context *bld_base,
       result = lp_build_cos(&bld_base->base, src[0]);
       break;
    case nir_op_fddx:
+   case nir_op_fddx_coarse:
+   case nir_op_fddx_fine:
       result = lp_build_ddx(&bld_base->base, src[0]);
       break;
    case nir_op_fddy:
+   case nir_op_fddy_coarse:
+   case nir_op_fddy_fine:
       result = lp_build_ddy(&bld_base->base, src[0]);
       break;
    case nir_op_fdiv:
@@ -1348,10 +1352,14 @@ static void visit_intrinsic(struct lp_build_nir_context *bld_base,
    case nir_intrinsic_shared_atomic_comp_swap:
       visit_shared_atomic(bld_base, instr, result);
       break;
-   case nir_intrinsic_barrier:
+   case nir_intrinsic_control_barrier:
       visit_barrier(bld_base);
       break;
    case nir_intrinsic_memory_barrier:
+   case nir_intrinsic_memory_barrier_shared:
+   case nir_intrinsic_memory_barrier_buffer:
+   case nir_intrinsic_memory_barrier_image:
+   case nir_intrinsic_memory_barrier_tcs_patch:
       break;
    case nir_intrinsic_load_kernel_input:
       visit_load_kernel_input(bld_base, instr, result);

@@ -210,6 +210,7 @@ M_LOAD(ld_color_buffer_32u);
 M_STORE(st_vary_32);
 M_LOAD(ld_cubemap_coords);
 M_LOAD(ld_compute_id);
+M_LOAD(pack_colour);
 
 static midgard_instruction
 v_branch(bool conditional, bool invert)
@@ -487,6 +488,7 @@ optimise_nir(nir_shader *nir, unsigned quirks)
                 NIR_PASS(progress, nir, nir_lower_vars_to_ssa);
 
                 NIR_PASS(progress, nir, nir_copy_prop);
+                NIR_PASS(progress, nir, nir_opt_remove_phis);
                 NIR_PASS(progress, nir, nir_opt_dce);
                 NIR_PASS(progress, nir, nir_opt_dead_cf);
                 NIR_PASS(progress, nir, nir_opt_cse);
@@ -1121,13 +1123,14 @@ mir_set_intr_mask(nir_instr *instr, midgard_instruction *ins, bool is_read)
 /* Uniforms and UBOs use a shared code path, as uniforms are just (slightly
  * optimized) versions of UBO #0 */
 
-midgard_instruction *
+static midgard_instruction *
 emit_ubo_read(
         compiler_context *ctx,
         nir_instr *instr,
         unsigned dest,
         unsigned offset,
         nir_src *indirect_offset,
+        unsigned indirect_shift,
         unsigned index)
 {
         /* TODO: half-floats */
@@ -1140,7 +1143,7 @@ emit_ubo_read(
 
         if (indirect_offset) {
                 ins.src[2] = nir_src_index(ctx, indirect_offset);
-                ins.load_store.arg_2 = 0x80;
+                ins.load_store.arg_2 = (indirect_shift << 5);
         } else {
                 ins.load_store.arg_2 = 0x1E;
         }
@@ -1313,7 +1316,7 @@ emit_sysval_read(compiler_context *ctx, nir_instr *instr, signed dest_override,
 
         /* Emit the read itself -- this is never indirect */
         midgard_instruction *ins =
-                emit_ubo_read(ctx, instr, dest, uniform * 16, NULL, 0);
+                emit_ubo_read(ctx, instr, dest, uniform * 16, NULL, 0, 0);
 
         ins->mask = mask_of(nr_components);
 }
@@ -1450,22 +1453,15 @@ emit_intrinsic(compiler_context *ctx, nir_intrinsic_instr *instr)
                 reg = nir_dest_index(ctx, &instr->dest);
 
                 if (is_uniform && !ctx->is_blend) {
-                        emit_ubo_read(ctx, &instr->instr, reg, (ctx->sysval_count + offset) * 16, indirect_offset, 0);
+                        emit_ubo_read(ctx, &instr->instr, reg, (ctx->sysval_count + offset) * 16, indirect_offset, 4, 0);
                 } else if (is_ubo) {
                         nir_src index = instr->src[0];
 
-                        /* We don't yet support indirect UBOs. For indirect
-                         * block numbers (if that's possible), we don't know
-                         * enough about the hardware yet. For indirect sources,
-                         * we know what we need but we need to add some NIR
-                         * support for lowering correctly with respect to
-                         * 128-bit reads */
-
+                        /* TODO: Is indirect block number possible? */
                         assert(nir_src_is_const(index));
-                        assert(nir_src_is_const(*src_offset));
 
                         uint32_t uindex = nir_src_as_uint(index) + 1;
-                        emit_ubo_read(ctx, &instr->instr, reg, offset, NULL, uindex);
+                        emit_ubo_read(ctx, &instr->instr, reg, offset, indirect_offset, 0, uindex);
                 } else if (is_ssbo) {
                         nir_src index = instr->src[0];
                         assert(nir_src_is_const(index));
@@ -1559,7 +1555,7 @@ emit_intrinsic(compiler_context *ctx, nir_intrinsic_instr *instr)
 
                         emit_explicit_constant(ctx, reg, reg);
 
-                        unsigned component = nir_intrinsic_component(instr);
+                        unsigned dst_component = nir_intrinsic_component(instr);
                         unsigned nr_comp = nir_src_num_components(instr->src[0]);
 
                         midgard_instruction st = m_st_vary_32(reg, offset);
@@ -1582,8 +1578,20 @@ emit_intrinsic(compiler_context *ctx, nir_intrinsic_instr *instr)
                                 break;
                         }
 
-                        for (unsigned i = 0; i < ARRAY_SIZE(st.swizzle[0]); ++i)
-                                st.swizzle[0][i] = MIN2(i + component, nr_comp);
+                        /* nir_intrinsic_component(store_intr) encodes the
+                         * destination component start. Source component offset
+                         * adjustment is taken care of in
+                         * install_registers_instr(), when offset_swizzle() is
+                         * called.
+                         */
+                        unsigned src_component = COMPONENT_X;
+
+                        assert(nr_comp > 0);
+                        for (unsigned i = 0; i < ARRAY_SIZE(st.swizzle); ++i) {
+                                st.swizzle[0][i] = src_component;
+                                if (i >= dst_component && i < dst_component + nr_comp - 1)
+                                        src_component++;
+                        }
 
                         emit_mir_instruction(ctx, st);
                 } else {
@@ -1784,6 +1792,11 @@ emit_texop_native(compiler_context *ctx, nir_tex_instr *instr,
 
                         unsigned coord_mask = mask_of(instr->coord_components);
 
+                        bool flip_zw = (instr->sampler_dim == GLSL_SAMPLER_DIM_2D) && (coord_mask & (1 << COMPONENT_Z));
+
+                        if (flip_zw)
+                                coord_mask ^= ((1 << COMPONENT_Z) | (1 << COMPONENT_W));
+
                         if (instr->sampler_dim == GLSL_SAMPLER_DIM_CUBE) {
                                 /* texelFetch is undefined on samplerCube */
                                 assert(midgard_texop != TEXTURE_OP_TEXEL_FETCH);
@@ -1806,6 +1819,10 @@ emit_texop_native(compiler_context *ctx, nir_tex_instr *instr,
                                 /* mov coord_temp, coords */
                                 midgard_instruction mov = v_mov(index, coords);
                                 mov.mask = coord_mask;
+
+                                if (flip_zw)
+                                        mov.swizzle[1][COMPONENT_W] = COMPONENT_Z;
+
                                 emit_mir_instruction(ctx, mov);
                         } else {
                                 coords = index;
@@ -1828,10 +1845,13 @@ emit_texop_native(compiler_context *ctx, nir_tex_instr *instr,
                         }
 
                         if (instr->sampler_dim == GLSL_SAMPLER_DIM_2D) {
-                                /* Array component in w but NIR wants it in z */
+                                /* Array component in w but NIR wants it in z,
+                                 * but if we have a temp coord we already fixed
+                                 * that up */
+
                                 if (nr_components == 3) {
                                         ins.swizzle[1][2] = COMPONENT_Z;
-                                        ins.swizzle[1][3] = COMPONENT_Z;
+                                        ins.swizzle[1][3] = needs_temp_coord ? COMPONENT_W : COMPONENT_Z;
                                 } else if (nr_components == 2) {
                                         ins.swizzle[1][2] =
                                                 instr->is_shadow ? COMPONENT_Z : COMPONENT_X;
@@ -2726,7 +2746,7 @@ midgard_compile_shader_nir(nir_shader *nir, midgard_program *program, bool is_bl
                 mir_add_writeout_loops(ctx);
 
         /* Schedule! */
-        schedule_program(ctx);
+        midgard_schedule_program(ctx);
         mir_ra(ctx);
 
         /* Now that all the bundles are scheduled and we can calculate block

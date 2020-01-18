@@ -537,7 +537,7 @@ midgard_reg_mode mir_mode_for_destsize(unsigned size);
 uint16_t mir_from_bytemask(uint16_t bytemask, midgard_reg_mode mode);
 uint16_t mir_to_bytemask(midgard_reg_mode mode, unsigned mask);
 uint16_t mir_bytemask(midgard_instruction *ins);
-uint16_t mir_round_bytemask_down(uint16_t mask, midgard_reg_mode mode);
+uint16_t mir_round_bytemask_up(uint16_t mask, midgard_reg_mode mode);
 void mir_set_bytemask(midgard_instruction *ins, uint16_t bytemask);
 unsigned mir_upper_override(midgard_instruction *ins);
 
@@ -650,7 +650,7 @@ mir_has_arg(midgard_instruction *ins, unsigned arg)
 
 /* Scheduling */
 
-void schedule_program(compiler_context *ctx);
+void midgard_schedule_program(compiler_context *ctx);
 
 void mir_ra(compiler_context *ctx);
 void mir_squeeze_index(compiler_context *ctx);
@@ -662,15 +662,6 @@ bool mir_is_live_after(compiler_context *ctx, midgard_block *block, midgard_inst
 
 void mir_create_pipeline_registers(compiler_context *ctx);
 void midgard_promote_uniforms(compiler_context *ctx);
-
-midgard_instruction *
-emit_ubo_read(
-        compiler_context *ctx,
-        nir_instr *instr,
-        unsigned dest,
-        unsigned offset,
-        nir_src *indirect_offset,
-        unsigned index);
 
 void
 emit_sysval_read(compiler_context *ctx, nir_instr *instr, signed dest_override, unsigned nr_components);
