@@ -1,3 +1,9 @@
+mesa (19.2.0~git20191209-1ubports3) xenial; urgency=medium
+
+  * Update from upstream master
+
+ -- Marius Gripsgard <marius@ubports.com>  Sat, 18 Jan 2020 19:54:29 +0100
+
 mesa (19.2.0~git20191209-1ubports2) xenial; urgency=medium
 
   * Update from upstream master
