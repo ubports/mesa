@@ -2038,6 +2038,56 @@ static void si_draw_vbo(struct pipe_context *ctx, const struct pipe_draw_info *i
 		sctx->do_update_shaders = true;
 	}
 
+	/* Update NGG culling settings. */
+	if (sctx->ngg &&
+	    rast_prim == PIPE_PRIM_TRIANGLES &&
+	    (sctx->screen->always_use_ngg_culling ||
+	     /* At least 1024 non-indexed vertices (8 subgroups) are needed
+	      * per draw call (no TES/GS) to enable NGG culling.
+	      */
+	     (!index_size && direct_count >= 1024 &&
+	      (prim == PIPE_PRIM_TRIANGLES || prim == PIPE_PRIM_TRIANGLE_STRIP) &&
+	      !sctx->tes_shader.cso && !sctx->gs_shader.cso)) &&
+	    si_get_vs(sctx)->cso->ngg_culling_allowed) {
+		unsigned ngg_culling = 0;
+
+		if (rs->rasterizer_discard) {
+			ngg_culling |= SI_NGG_CULL_FRONT_FACE |
+				       SI_NGG_CULL_BACK_FACE;
+		} else {
+			/* Polygon mode can't use view and small primitive culling,
+			 * because it draws points or lines where the culling depends
+			 * on the point or line width.
+			 */
+			if (!rs->polygon_mode_enabled)
+				ngg_culling |= SI_NGG_CULL_VIEW_SMALLPRIMS;
+
+			if (sctx->viewports.y_inverted ? rs->cull_back : rs->cull_front)
+				ngg_culling |= SI_NGG_CULL_FRONT_FACE;
+			if (sctx->viewports.y_inverted ? rs->cull_front : rs->cull_back)
+				ngg_culling |= SI_NGG_CULL_BACK_FACE;
+		}
+
+		/* Use NGG fast launch for certain non-indexed primitive types.
+		 * A draw must have at least 1 full primitive.
+		 */
+		if (ngg_culling && !index_size && direct_count >= 3 &&
+		    !sctx->tes_shader.cso && !sctx->gs_shader.cso) {
+			if (prim == PIPE_PRIM_TRIANGLES)
+				ngg_culling |= SI_NGG_CULL_GS_FAST_LAUNCH_TRI_LIST;
+			else if (prim == PIPE_PRIM_TRIANGLE_STRIP)
+				ngg_culling |= SI_NGG_CULL_GS_FAST_LAUNCH_TRI_STRIP;
+		}
+
+		if (ngg_culling != sctx->ngg_culling) {
+			sctx->ngg_culling = ngg_culling;
+			sctx->do_update_shaders = true;
+		}
+	} else if (sctx->ngg_culling) {
+		sctx->ngg_culling = false;
+		sctx->do_update_shaders = true;
+	}
+
 	if (sctx->do_update_shaders && !si_update_shaders(sctx))
 		goto return_cleanup;
 

@@ -159,7 +159,7 @@ genX(cmd_buffer_emit_state_base_address)(struct anv_cmd_buffer *cmd_buffer)
       sba.InstructionAccessUpperBoundModifyEnable = true;
 #  endif
 #  if (GEN_GEN >= 9)
-      if (cmd_buffer->device->instance->physicalDevice.use_softpin) {
+      if (cmd_buffer->device->physical->use_softpin) {
          sba.BindlessSurfaceStateBaseAddress = (struct anv_address) {
             .bo = device->surface_state_pool.block_pool.bo,
             .offset = 0,
@@ -342,7 +342,7 @@ color_attachment_compute_aux_usage(struct anv_device * device,
           */
          if (cmd_state->pass->attachments[att].first_subpass_layout ==
              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
-            anv_perf_warn(device->instance, iview->image,
+            anv_perf_warn(device, iview->image,
                           "Not temporarily enabling CCS_E.");
          }
       } else {
@@ -406,13 +406,13 @@ color_attachment_compute_aux_usage(struct anv_device * device,
       if (att_state->fast_clear &&
           (iview->planes[0].isl.base_level > 0 ||
            iview->planes[0].isl.base_array_layer > 0)) {
-         anv_perf_warn(device->instance, iview->image,
+         anv_perf_warn(device, iview->image,
                        "Rendering with multi-lod or multi-layer framebuffer "
                        "with LOAD_OP_LOAD and baseMipLevel > 0 or "
                        "baseArrayLayer > 0.  Not fast clearing.");
          att_state->fast_clear = false;
       } else if (att_state->fast_clear && cmd_state->framebuffer->layers > 1) {
-         anv_perf_warn(device->instance, iview->image,
+         anv_perf_warn(device, iview->image,
                        "Rendering to a multi-layer framebuffer with "
                        "LOAD_OP_CLEAR.  Only fast-clearing the first slice");
       }
@@ -1102,7 +1102,7 @@ transition_color_buffer(struct anv_cmd_buffer *cmd_buffer,
          }
       } else {
          if (image->samples == 4 || image->samples == 16) {
-            anv_perf_warn(cmd_buffer->device->instance, image,
+            anv_perf_warn(cmd_buffer->device, image,
                           "Doing a potentially unnecessary fast-clear to "
                           "define an MCS buffer.");
          }
@@ -1820,7 +1820,7 @@ genX(cmd_buffer_config_l3)(struct anv_cmd_buffer *cmd_buffer,
    emit_lri(&cmd_buffer->batch, GENX(L3CNTLREG3_num), l3cr3);
 
 #if GEN_IS_HASWELL
-   if (cmd_buffer->device->instance->physicalDevice.cmd_parser_version >= 4) {
+   if (cmd_buffer->device->physical->cmd_parser_version >= 4) {
       /* Enable L3 atomics on HSW if we have a DC partition, otherwise keep
        * them disabled to avoid crashing the system hard.
        */
@@ -1845,7 +1845,7 @@ genX(cmd_buffer_apply_pipe_flushes)(struct anv_cmd_buffer *cmd_buffer)
 {
    enum anv_pipe_bits bits = cmd_buffer->state.pending_pipe_bits;
 
-   if (cmd_buffer->device->instance->physicalDevice.always_flush_cache)
+   if (cmd_buffer->device->physical->always_flush_cache)
       bits |= ANV_PIPE_FLUSH_BITS | ANV_PIPE_INVALIDATE_BITS;
 
    /* Flushes are pipelined while invalidations are handled immediately.
@@ -2209,7 +2209,7 @@ emit_binding_table(struct anv_cmd_buffer *cmd_buffer,
     * softpin then we always keep all user-allocated memory objects resident.
     */
    const bool need_client_mem_relocs =
-      !cmd_buffer->device->instance->physicalDevice.use_softpin;
+      !cmd_buffer->device->physical->use_softpin;
 
    for (uint32_t s = 0; s < map->surface_count; s++) {
       struct anv_pipeline_binding *binding = &map->surface_to_descriptor[s];
@@ -3837,8 +3837,8 @@ verify_cmd_parser(const struct anv_device *device,
                   int required_version,
                   const char *function)
 {
-   if (device->instance->physicalDevice.cmd_parser_version < required_version) {
-      return vk_errorf(device->instance, device->instance,
+   if (device->physical->cmd_parser_version < required_version) {
+      return vk_errorf(device, device->physical,
                        VK_ERROR_FEATURE_NOT_PRESENT,
                        "cmd parser version %d is required for %s",
                        required_version, function);
@@ -4081,7 +4081,7 @@ genX(flush_pipeline_select)(struct anv_cmd_buffer *cmd_buffer,
        * really know why.
        */
       const uint32_t subslices =
-         MAX2(cmd_buffer->device->instance->physicalDevice.subslice_total, 1);
+         MAX2(cmd_buffer->device->physical->subslice_total, 1);
       anv_batch_emit(&cmd_buffer->batch, GENX(MEDIA_VFE_STATE), vfe) {
          vfe.MaximumNumberofThreads =
             devinfo->max_cs_threads * subslices - 1;
@@ -4242,7 +4242,7 @@ genX(cmd_buffer_set_binding_for_gen8_vb_flush)(struct anv_cmd_buffer *cmd_buffer
                                                uint32_t vb_size)
 {
    if (GEN_GEN < 8 || GEN_GEN > 9 ||
-       !cmd_buffer->device->instance->physicalDevice.use_softpin)
+       !cmd_buffer->device->physical->use_softpin)
       return;
 
    struct anv_vb_cache_range *bound, *dirty;
@@ -4290,7 +4290,7 @@ genX(cmd_buffer_update_dirty_vbs_for_gen8_vb_flush)(struct anv_cmd_buffer *cmd_b
                                                     uint64_t vb_used)
 {
    if (GEN_GEN < 8 || GEN_GEN > 9 ||
-       !cmd_buffer->device->instance->physicalDevice.use_softpin)
+       !cmd_buffer->device->physical->use_softpin)
       return;
 
    if (access_type == RANDOM) {
@@ -5166,7 +5166,7 @@ cmd_buffer_end_subpass(struct anv_cmd_buffer *cmd_buffer)
           * SRGB view & a UNORM image).
           */
          if (fast_clear_type != ANV_FAST_CLEAR_NONE) {
-            anv_perf_warn(cmd_buffer->device->instance, iview,
+            anv_perf_warn(cmd_buffer->device, iview,
                           "Doing a partial resolve to get rid of clear color at the "
                           "end of a renderpass due to an image/view format mismatch");
 

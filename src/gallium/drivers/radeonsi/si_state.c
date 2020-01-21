@@ -3101,6 +3101,7 @@ static void si_set_framebuffer_state(struct pipe_context *ctx,
 
 	si_update_ps_colorbuf0_slot(sctx);
 	si_update_poly_offset_state(sctx);
+	si_update_ngg_small_prim_precision(sctx);
 	si_mark_atom_dirty(sctx, &sctx->atoms.s.cb_render_state);
 	si_mark_atom_dirty(sctx, &sctx->atoms.s.framebuffer);
 
@@ -5564,46 +5565,46 @@ static void si_init_config(struct si_context *sctx)
 
 		/* Compute LATE_ALLOC_VS.LIMIT. */
 		unsigned num_cu_per_sh = sscreen->info.num_good_cu_per_sh;
-		unsigned late_alloc_limit; /* The limit is per SH. */
-
-		if (sctx->family == CHIP_KABINI) {
-			late_alloc_limit = 0; /* Potential hang on Kabini. */
-		} else if (num_cu_per_sh <= 4) {
-			/* Too few available compute units per SH. Disallowing
-			 * VS to run on one CU could hurt us more than late VS
-			 * allocation would help.
-			 *
-			 * 2 is the highest safe number that allows us to keep
-			 * all CUs enabled.
-			 */
-			late_alloc_limit = 2;
-		} else {
-			/* This is a good initial value, allowing 1 late_alloc
-			 * wave per SIMD on num_cu - 2.
-			 */
-			late_alloc_limit = (num_cu_per_sh - 2) * 4;
-		}
-
-		unsigned late_alloc_limit_gs = late_alloc_limit;
+		unsigned late_alloc_wave64 = 0; /* The limit is per SH. */
 		unsigned cu_mask_vs = 0xffff;
 		unsigned cu_mask_gs = 0xffff;
 
-		if (late_alloc_limit > 2) {
-			if (sctx->chip_class >= GFX10) {
-				/* CU2 & CU3 disabled because of the dual CU design */
-				cu_mask_vs = 0xfff3;
-				cu_mask_gs = 0xfff3; /* NGG only */
+		if (sctx->chip_class >= GFX10) {
+			/* For Wave32, the hw will launch twice the number of late
+			 * alloc waves, so 1 == 2x wave32.
+			 */
+			if (num_cu_per_sh <= 6) {
+				late_alloc_wave64 = num_cu_per_sh - 2;
 			} else {
-				cu_mask_vs = 0xfffe; /* 1 CU disabled */
-			}
-		}
+				late_alloc_wave64 = (num_cu_per_sh - 2) * 4;
 
-		/* Don't use late alloc for NGG on Navi14 due to a hw bug.
-		 * If NGG is never used, enable all CUs.
-		 */
-		if (!sscreen->use_ngg || sctx->family == CHIP_NAVI14) {
-			late_alloc_limit_gs = 0;
-			cu_mask_gs = 0xffff;
+				/* CU2 & CU3 disabled because of the dual CU design */
+				/* Late alloc is not used for NGG on Navi14 due to a hw bug. */
+				cu_mask_vs = 0xfff3;
+				cu_mask_gs = sscreen->use_ngg &&
+					     sctx->family != CHIP_NAVI14 ? 0xfff3 : 0xffff;
+			}
+		} else {
+			if (sctx->family == CHIP_KABINI) {
+				late_alloc_wave64 = 0; /* Potential hang on Kabini. */
+			} else if (num_cu_per_sh <= 4) {
+				/* Too few available compute units per SH. Disallowing
+				 * VS to run on one CU could hurt us more than late VS
+				 * allocation would help.
+				 *
+				 * 2 is the highest safe number that allows us to keep
+				 * all CUs enabled.
+				 */
+				late_alloc_wave64 = 2;
+			} else {
+				/* This is a good initial value, allowing 1 late_alloc
+				 * wave per SIMD on num_cu - 2.
+				 */
+				late_alloc_wave64 = (num_cu_per_sh - 2) * 4;
+			}
+
+			if (late_alloc_wave64 > 2)
+				cu_mask_vs = 0xfffe; /* 1 CU disabled */
 		}
 
 		/* VS can't execute on one CU if the limit is > 2. */
@@ -5611,16 +5612,10 @@ static void si_init_config(struct si_context *sctx)
 			S_00B118_CU_EN(cu_mask_vs) |
 			S_00B118_WAVE_LIMIT(0x3F));
 		si_pm4_set_reg(pm4, R_00B11C_SPI_SHADER_LATE_ALLOC_VS,
-			S_00B11C_LIMIT(late_alloc_limit));
+			S_00B11C_LIMIT(late_alloc_wave64));
 
 		si_pm4_set_reg(pm4, R_00B21C_SPI_SHADER_PGM_RSRC3_GS,
 			       S_00B21C_CU_EN(cu_mask_gs) | S_00B21C_WAVE_LIMIT(0x3F));
-
-		if (sctx->chip_class >= GFX10) {
-			si_pm4_set_reg(pm4, R_00B204_SPI_SHADER_PGM_RSRC4_GS,
-				       S_00B204_CU_EN(0xffff) |
-				       S_00B204_SPI_SHADER_LATE_ALLOC_GS_GFX10(late_alloc_limit_gs));
-		}
 
 		si_pm4_set_reg(pm4, R_00B01C_SPI_SHADER_PGM_RSRC3_PS,
 			       S_00B01C_CU_EN(0xffff) | S_00B01C_WAVE_LIMIT(0x3F));
@@ -5669,19 +5664,6 @@ static void si_init_config(struct si_context *sctx)
 			       S_00B0C0_SOFT_GROUPING_EN(1) |
 			       S_00B0C0_NUMBER_OF_REQUESTS_PER_CU(4 - 1));
 		si_pm4_set_reg(pm4, R_00B1C0_SPI_SHADER_REQ_CTRL_VS, 0);
-
-		if (sctx->family == CHIP_NAVI10 ||
-		    sctx->family == CHIP_NAVI12 ||
-		    sctx->family == CHIP_NAVI14) {
-			/* SQ_NON_EVENT must be emitted before GE_PC_ALLOC is written. */
-			si_pm4_cmd_begin(pm4, PKT3_EVENT_WRITE);
-			si_pm4_cmd_add(pm4, EVENT_TYPE(V_028A90_SQ_NON_EVENT) | EVENT_INDEX(0));
-			si_pm4_cmd_end(pm4, false);
-		}
-		/* TODO: For culling, replace 128 with 256. */
-		si_pm4_set_reg(pm4, R_030980_GE_PC_ALLOC,
-			       S_030980_OVERSUB_EN(1) |
-			       S_030980_NUM_PC_LINES(sscreen->info.pc_lines / 4 - 1));
 	}
 
 	if (sctx->chip_class >= GFX8) {

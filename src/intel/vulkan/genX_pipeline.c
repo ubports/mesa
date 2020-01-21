@@ -1163,7 +1163,7 @@ emit_cb_state(struct anv_pipeline *pipeline,
            is_dual_src_blend_factor(a->dstColorBlendFactor) ||
            is_dual_src_blend_factor(a->srcAlphaBlendFactor) ||
            is_dual_src_blend_factor(a->dstAlphaBlendFactor))) {
-         vk_debug_report(&device->instance->debug_report_callbacks,
+         vk_debug_report(&device->physical->instance->debug_report_callbacks,
                          VK_DEBUG_REPORT_WARNING_BIT_EXT,
                          VK_DEBUG_REPORT_OBJECT_TYPE_DEVICE_EXT,
                          (uint64_t)(uintptr_t)device,
@@ -2088,7 +2088,7 @@ genX(graphics_pipeline_create)(
    assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO);
 
    /* Use the default pipeline cache if none is specified */
-   if (cache == NULL && device->instance->pipeline_cache_enabled)
+   if (cache == NULL && device->physical->instance->pipeline_cache_enabled)
       cache = &device->default_pipeline_cache;
 
    pipeline = vk_alloc2(&device->alloc, pAllocator, sizeof(*pipeline), 8,
@@ -2192,16 +2192,14 @@ compute_pipeline_create(
     VkPipeline*                                 pPipeline)
 {
    ANV_FROM_HANDLE(anv_device, device, _device);
-   const struct anv_physical_device *physical_device =
-      &device->instance->physicalDevice;
-   const struct gen_device_info *devinfo = &physical_device->info;
+   const struct gen_device_info *devinfo = &device->info;
    struct anv_pipeline *pipeline;
    VkResult result;
 
    assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO);
 
    /* Use the default pipeline cache if none is specified */
-   if (cache == NULL && device->instance->pipeline_cache_enabled)
+   if (cache == NULL && device->physical->instance->pipeline_cache_enabled)
       cache = &device->default_pipeline_cache;
 
    pipeline = vk_alloc2(&device->alloc, pAllocator, sizeof(*pipeline), 8,
@@ -2267,7 +2265,7 @@ compute_pipeline_create(
       ALIGN(cs_prog_data->push.per_thread.regs * cs_prog_data->threads +
             cs_prog_data->push.cross_thread.regs, 2);
 
-   const uint32_t subslices = MAX2(physical_device->subslice_total, 1);
+   const uint32_t subslices = MAX2(device->physical->subslice_total, 1);
 
    const struct anv_shader_bin *cs_bin =
       pipeline->shaders[MESA_SHADER_COMPUTE];

@@ -448,15 +448,16 @@ VkResult __vk_errorf(struct anv_instance *instance, const void *object,
 #define vk_error(error) __vk_errorf(NULL, NULL,\
                                     VK_DEBUG_REPORT_OBJECT_TYPE_UNKNOWN_EXT,\
                                     error, __FILE__, __LINE__, NULL)
-#define vk_errorv(instance, obj, error, format, args)\
-    __vk_errorv(instance, obj, REPORT_OBJECT_TYPE(obj), error,\
-                __FILE__, __LINE__, format, args)
-#define vk_errorf(instance, obj, error, format, ...)\
+#define vk_errorfi(instance, obj, error, format, ...)\
     __vk_errorf(instance, obj, REPORT_OBJECT_TYPE(obj), error,\
                 __FILE__, __LINE__, format, ## __VA_ARGS__)
+#define vk_errorf(device, obj, error, format, ...)\
+   vk_errorfi(anv_device_instance_or_null(device),\
+              obj, error, format, ## __VA_ARGS__)
 #else
 #define vk_error(error) error
-#define vk_errorf(instance, obj, error, format, ...) error
+#define vk_errorfi(instance, obj, error, format, ...) error
+#define vk_errorf(device, obj, error, format, ...) error
 #endif
 
 /**
@@ -477,7 +478,7 @@ VkResult __vk_errorf(struct anv_instance *instance, const void *object,
 #define anv_debug_ignored_stype(sType) \
    intel_logd("%s: ignored VkStructureType %u\n", __func__, (sType))
 
-void __anv_perf_warn(struct anv_instance *instance, const void *object,
+void __anv_perf_warn(struct anv_device *device, const void *object,
                      VkDebugReportObjectTypeEXT type, const char *file,
                      int line, const char *format, ...)
    anv_printflike(6, 7);
@@ -964,8 +965,10 @@ struct anv_memory_heap {
 struct anv_physical_device {
     VK_LOADER_DATA                              _loader_data;
 
+    /* Link in anv_instance::physical_devices */
+    struct list_head                            link;
+
     struct anv_instance *                       instance;
-    uint32_t                                    chipset_id;
     bool                                        no_hw;
     char                                        path[20];
     const char *                                name;
@@ -1013,7 +1016,6 @@ struct anv_physical_device {
     bool                                        always_flush_cache;
 
     struct anv_device_extension_table           supported_extensions;
-    struct anv_physical_device_dispatch_table   dispatch;
 
     uint32_t                                    eu_total;
     uint32_t                                    subslice_total;
@@ -1054,10 +1056,11 @@ struct anv_instance {
 
     struct anv_instance_extension_table         enabled_extensions;
     struct anv_instance_dispatch_table          dispatch;
+    struct anv_physical_device_dispatch_table   physical_device_dispatch;
     struct anv_device_dispatch_table            device_dispatch;
 
-    int                                         physicalDeviceCount;
-    struct anv_physical_device                  physicalDevice;
+    bool                                        physical_devices_enumerated;
+    struct list_head                            physical_devices;
 
     bool                                        pipeline_cache_enabled;
 
@@ -1208,8 +1211,7 @@ struct anv_device {
 
     VkAllocationCallbacks                       alloc;
 
-    struct anv_instance *                       instance;
-    uint32_t                                    chipset_id;
+    struct anv_physical_device *                physical;
     bool                                        no_hw;
     struct gen_device_info                      info;
     struct isl_device                           isl_dev;
@@ -1269,10 +1271,16 @@ struct anv_device {
     struct gen_aux_map_context                  *aux_map_ctx;
 };
 
+static inline struct anv_instance *
+anv_device_instance_or_null(const struct anv_device *device)
+{
+   return device ? device->physical->instance : NULL;
+}
+
 static inline struct anv_state_pool *
 anv_binding_table_pool(struct anv_device *device)
 {
-   if (device->instance->physicalDevice.use_softpin)
+   if (device->physical->use_softpin)
       return &device->binding_table_pool;
    else
       return &device->surface_state_pool;
@@ -1280,7 +1288,7 @@ anv_binding_table_pool(struct anv_device *device)
 
 static inline struct anv_state
 anv_binding_table_pool_alloc(struct anv_device *device) {
-   if (device->instance->physicalDevice.use_softpin)
+   if (device->physical->use_softpin)
       return anv_state_pool_alloc(&device->binding_table_pool,
                                   device->binding_table_pool.block_size, 0);
    else

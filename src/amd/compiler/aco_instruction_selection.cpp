@@ -3408,6 +3408,9 @@ void load_buffer(isel_context *ctx, unsigned num_components, Temp dst,
          emit_split_vector(ctx, lower, 2);
          num_bytes -= 16;
          const_offset = 16;
+      } else if (num_bytes == 12 && ctx->options->chip_class == GFX6) {
+         /* GFX6 doesn't support loading vec3, expand to vec4. */
+         num_bytes = 16;
       }
 
       switch (num_bytes) {
@@ -3418,6 +3421,7 @@ void load_buffer(isel_context *ctx, unsigned num_components, Temp dst,
             op = aco_opcode::buffer_load_dwordx2;
             break;
          case 12:
+            assert(ctx->options->chip_class > GFX6);
             op = aco_opcode::buffer_load_dwordx3;
             break;
          case 16:
@@ -3451,6 +3455,16 @@ void load_buffer(isel_context *ctx, unsigned num_components, Temp dst,
          instr->operands[2] = Operand(emit_extract_vector(ctx, upper, 0, v2));
          if (dst.size() == 8)
             instr->operands[3] = Operand(emit_extract_vector(ctx, upper, 1, v2));
+      } else if (dst.size() == 3 && ctx->options->chip_class == GFX6) {
+         Temp vec = bld.tmp(v4);
+         instr->definitions[0] = Definition(vec);
+         bld.insert(std::move(instr));
+         emit_split_vector(ctx, vec, 4);
+
+         instr.reset(create_instruction<Pseudo_instruction>(aco_opcode::p_create_vector, Format::PSEUDO, 3, 1));
+         instr->operands[0] = Operand(emit_extract_vector(ctx, vec, 0, v1));
+         instr->operands[1] = Operand(emit_extract_vector(ctx, vec, 1, v1));
+         instr->operands[2] = Operand(emit_extract_vector(ctx, vec, 2, v1));
       }
 
       if (dst.type() == RegType::sgpr) {
@@ -4501,7 +4515,8 @@ void visit_store_ssbo(isel_context *ctx, nir_intrinsic_instr *instr)
    while (writemask) {
       int start, count;
       u_bit_scan_consecutive_range(&writemask, &start, &count);
-      if (count == 3 && smem) {
+      if (count == 3 && (smem || ctx->options->chip_class == GFX6)) {
+         /* GFX6 doesn't support storing vec3, split it. */
          writemask |= 1u << (start + 2);
          count = 2;
       }
@@ -4551,7 +4566,7 @@ void visit_store_ssbo(isel_context *ctx, nir_intrinsic_instr *instr)
          case 12:
             vmem_op = aco_opcode::buffer_store_dwordx3;
             smem_op = aco_opcode::last_opcode;
-            assert(!smem);
+            assert(!smem && ctx->options->chip_class > GFX6);
             break;
          case 16:
             vmem_op = aco_opcode::buffer_store_dwordx4;
@@ -5542,7 +5557,7 @@ void visit_intrinsic(isel_context *ctx, nir_intrinsic_instr *instr)
       } else if (ctx->options->chip_class >= GFX9) {
          addr = bld.vop2(aco_opcode::v_lshlrev_b32, bld.def(v1), Operand(3u), addr);
          sample_pos = bld.global(aco_opcode::global_load_dwordx2, bld.def(v2), addr, private_segment_buffer, sample_pos_offset);
-      } else {
+      } else if (ctx->options->chip_class >= GFX7) {
          /* addr += private_segment_buffer + sample_pos_offset */
          Temp tmp0 = bld.tmp(s1);
          Temp tmp1 = bld.tmp(s1);
@@ -5559,6 +5574,32 @@ void visit_intrinsic(isel_context *ctx, nir_intrinsic_instr *instr)
 
          /* sample_pos = flat_load_dwordx2 addr */
          sample_pos = bld.flat(aco_opcode::flat_load_dwordx2, bld.def(v2), addr, Operand(s1));
+      } else {
+         assert(ctx->options->chip_class == GFX6);
+
+         uint32_t rsrc_conf = S_008F0C_NUM_FORMAT(V_008F0C_BUF_NUM_FORMAT_FLOAT) |
+                              S_008F0C_DATA_FORMAT(V_008F0C_BUF_DATA_FORMAT_32);
+         Temp rsrc = bld.pseudo(aco_opcode::p_create_vector, bld.def(s4), private_segment_buffer, Operand(rsrc_conf));
+
+         addr = bld.vop2(aco_opcode::v_lshlrev_b32, bld.def(v1), Operand(3u), addr);
+         addr = bld.pseudo(aco_opcode::p_create_vector, bld.def(v2), addr, Operand(0u));
+
+         sample_pos = bld.tmp(v2);
+
+         aco_ptr<MUBUF_instruction> load{create_instruction<MUBUF_instruction>(aco_opcode::buffer_load_dwordx2, Format::MUBUF, 3, 1)};
+         load->definitions[0] = Definition(sample_pos);
+         load->operands[0] = Operand(addr);
+         load->operands[1] = Operand(rsrc);
+         load->operands[2] = Operand(0u);
+         load->offset = sample_pos_offset;
+         load->offen = 0;
+         load->addr64 = true;
+         load->glc = false;
+         load->dlc = false;
+         load->disable_wqm = false;
+         load->barrier = barrier_none;
+         load->can_reorder = true;
+         ctx->block->instructions.emplace_back(std::move(load));
       }
 
       /* sample_pos -= 0.5 */

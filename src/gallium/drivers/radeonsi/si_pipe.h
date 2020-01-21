@@ -183,6 +183,8 @@ enum {
 	/* 3D engine options: */
 	DBG_NO_GFX,
 	DBG_NO_NGG,
+	DBG_ALWAYS_NGG_CULLING,
+	DBG_NO_NGG_CULLING,
 	DBG_ALWAYS_PD,
 	DBG_PD,
 	DBG_NO_PD,
@@ -506,6 +508,8 @@ struct si_screen {
 	bool				dfsm_allowed;
 	bool				llvm_has_working_vgpr_indexing;
 	bool				use_ngg;
+	bool				use_ngg_culling;
+	bool				always_use_ngg_culling;
 	bool				use_ngg_streamout;
 
 	struct {
@@ -798,7 +802,7 @@ union si_vgt_param_key {
 	uint32_t index;
 };
 
-#define SI_NUM_VGT_STAGES_KEY_BITS 5
+#define SI_NUM_VGT_STAGES_KEY_BITS 6
 #define SI_NUM_VGT_STAGES_STATES (1 << SI_NUM_VGT_STAGES_KEY_BITS)
 
 /* The VGT_SHADER_STAGES key used to index the table of precomputed values.
@@ -809,6 +813,7 @@ union si_vgt_stages_key {
 #if UTIL_ARCH_LITTLE_ENDIAN
 		unsigned tess:1;
 		unsigned gs:1;
+		unsigned ngg_gs_fast_launch:1;
 		unsigned ngg_passthrough:1;
 		unsigned ngg:1; /* gfx10+ */
 		unsigned streamout:1; /* only used with NGG */
@@ -818,6 +823,7 @@ union si_vgt_stages_key {
 		unsigned streamout:1;
 		unsigned ngg:1;
 		unsigned ngg_passthrough:1;
+		unsigned ngg_gs_fast_launch:1;
 		unsigned gs:1;
 		unsigned tess:1;
 #endif
@@ -1072,6 +1078,7 @@ struct si_context {
 	bool			ls_vgpr_fix:1;
 	bool			prim_discard_cs_instancing:1;
 	bool			ngg:1;
+	uint8_t			ngg_culling;
 	int			last_index_size;
 	int			last_base_vertex;
 	int			last_start_instance;
@@ -1087,6 +1094,11 @@ struct si_context {
 	unsigned		current_vs_state;
 	unsigned		last_vs_state;
 	enum pipe_prim_type	current_rast_prim; /* primitive type after TES, GS */
+
+	struct si_small_prim_cull_info last_small_prim_cull_info;
+	struct si_resource	*small_prim_cull_info_buf;
+	uint64_t		small_prim_cull_info_address;
+	bool			small_prim_cull_info_dirty;
 
 	/* Scratch buffer */
 	struct si_resource	*scratch_buffer;
@@ -1257,6 +1269,10 @@ void si_blitter_begin(struct si_context *sctx, enum si_blitter_op op);
 void si_blitter_end(struct si_context *sctx);
 void si_init_blit_functions(struct si_context *sctx);
 void si_decompress_textures(struct si_context *sctx, unsigned shader_mask);
+void si_decompress_subresource(struct pipe_context *ctx,
+			       struct pipe_resource *tex,
+			       unsigned planes, unsigned level,
+			       unsigned first_layer, unsigned last_layer);
 void si_resource_copy_region(struct pipe_context *ctx,
 			     struct pipe_resource *dst,
 			     unsigned dst_level,
@@ -1495,6 +1511,7 @@ struct pipe_video_buffer *si_video_buffer_create(struct pipe_context *pipe,
 						 const struct pipe_video_buffer *tmpl);
 
 /* si_viewport.c */
+void si_update_ngg_small_prim_precision(struct si_context *ctx);
 void si_get_small_prim_cull_info(struct si_context *sctx,
 				 struct si_small_prim_cull_info *out);
 void si_update_vs_viewport_state(struct si_context *ctx);

@@ -817,7 +817,9 @@ void label_instruction(opt_ctx &ctx, Block& block, aco_ptr<Instruction>& instr)
          Temp base;
          uint32_t offset;
          if (i == 1 && info.is_constant_or_literal() &&
-             (ctx.program->chip_class < GFX8 || info.val <= 0xFFFFF)) {
+             ((ctx.program->chip_class == GFX6 && info.val <= 0x3FF) ||
+              (ctx.program->chip_class == GFX7 && info.val <= 0xFFFFFFFF) ||
+              (ctx.program->chip_class >= GFX8 && info.val <= 0xFFFFF))) {
             instr->operands[i] = Operand(info.val);
             continue;
          } else if (i == 1 && parse_base_offset(ctx, instr.get(), i, &base, &offset) && base.regClass() == s1 && offset <= 0xFFFFF && ctx.program->chip_class >= GFX9) {
@@ -2112,7 +2114,8 @@ void apply_sgprs(opt_ctx &ctx, aco_ptr<Instruction>& instr)
          continue;
       }
 
-      sgpr_ids[num_sgprs++] = sgpr.id();
+      if (new_sgpr)
+         sgpr_ids[num_sgprs++] = sgpr.id();
       ctx.uses[sgpr_info_id]--;
       ctx.uses[sgpr.id()]++;
    }

@@ -112,6 +112,7 @@ choose_isl_tiling_flags(const struct anv_image_create_info *anv_info,
       flags = ISL_TILING_LINEAR_BIT;
       break;
    case VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT:
+      assert(isl_mod_info);
       flags = 1 << isl_mod_info->tiling;
    }
 
@@ -307,7 +308,7 @@ add_aux_state_tracking_buffer(struct anv_image *image,
  * image's memory requirements (that is, the image's size and alignment).
  */
 static VkResult
-make_surface(const struct anv_device *dev,
+make_surface(struct anv_device *dev,
              struct anv_image *image,
              uint32_t stride,
              isl_tiling_flags_t tiling_flags,
@@ -423,14 +424,14 @@ make_surface(const struct anv_device *dev,
       if (!(image->usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) {
          /* It will never be used as an attachment, HiZ is pointless. */
       } else if (dev->info.gen == 7) {
-         anv_perf_warn(dev->instance, image, "Implement gen7 HiZ");
+         anv_perf_warn(dev, image, "Implement gen7 HiZ");
       } else if (image->levels > 1) {
-         anv_perf_warn(dev->instance, image, "Enable multi-LOD HiZ");
+         anv_perf_warn(dev, image, "Enable multi-LOD HiZ");
       } else if (image->array_size > 1) {
-         anv_perf_warn(dev->instance, image,
+         anv_perf_warn(dev, image,
                        "Implement multi-arrayLayer HiZ clears and resolves");
       } else if (dev->info.gen == 8 && image->samples > 1) {
-         anv_perf_warn(dev->instance, image, "Enable gen8 multisampled HiZ");
+         anv_perf_warn(dev, image, "Enable gen8 multisampled HiZ");
       } else if (!unlikely(INTEL_DEBUG & DEBUG_NO_HIZ)) {
          assert(image->planes[plane].aux_surface.isl.size_B == 0);
          ok = isl_surf_get_hiz_surf(&dev->isl_dev,
@@ -474,7 +475,7 @@ make_surface(const struct anv_device *dev,
                 * image, we currently don't have things hooked up to get it
                 * working.
                 */
-               anv_perf_warn(dev->instance, image,
+               anv_perf_warn(dev, image,
                              "This image format doesn't support rendering. "
                              "Not allocating an CCS buffer.");
                image->planes[plane].aux_surface.isl.size_B = 0;
@@ -493,7 +494,7 @@ make_surface(const struct anv_device *dev,
                 image->ccs_e_compatible) {
                image->planes[plane].aux_usage = ISL_AUX_USAGE_CCS_E;
             } else if (dev->info.gen >= 12) {
-               anv_perf_warn(dev->instance, image,
+               anv_perf_warn(dev, image,
                              "The CCS_D aux mode is not yet handled on "
                              "Gen12+. Not allocating a CCS buffer.");
                image->planes[plane].aux_surface.isl.size_B = 0;
@@ -593,7 +594,7 @@ anv_image_create(VkDevice _device,
       const VkImageDrmFormatModifierListCreateInfoEXT *mod_info =
          vk_find_struct_const(pCreateInfo->pNext,
                               IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT);
-      isl_mod_info = choose_drm_format_mod(&device->instance->physicalDevice,
+      isl_mod_info = choose_drm_format_mod(device->physical,
                                            mod_info->drmFormatModifierCount,
                                            mod_info->pDrmFormatModifiers);
       assert(isl_mod_info);
@@ -1076,7 +1077,7 @@ VkResult anv_GetImageDrmFormatModifierPropertiesEXT(
 {
    ANV_FROM_HANDLE(anv_image, image, _image);
 
-   assert(pProperties->sType =
+   assert(pProperties->sType ==
           VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_PROPERTIES_EXT);
 
    pProperties->drmFormatModifier = image->drm_format_mod;
