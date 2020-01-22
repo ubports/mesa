@@ -459,7 +459,7 @@ fs_generator::generate_mov_indirect(fs_inst *inst,
       if (type_sz(reg.type) > 4 &&
           ((devinfo->gen == 7 && !devinfo->is_haswell) ||
            devinfo->is_cherryview || gen_device_info_is_9lp(devinfo) ||
-           !devinfo->has_64bit_types)) {
+           !devinfo->has_64bit_float)) {
          /* IVB has an issue (which we found empirically) where it reads two
           * address register components per channel for indirectly addressed
           * 64-bit sources.
@@ -2175,6 +2175,11 @@ fs_generator::generate_code(const cfg_t *cfg, int dispatch_width,
          assert(src[2].file == BRW_IMMEDIATE_VALUE);
          brw_memory_fence(p, dst, src[0], BRW_OPCODE_SEND, src[1].ud, src[2].ud);
          send_count++;
+         break;
+
+      case FS_OPCODE_SCHEDULING_FENCE:
+         if (unlikely(debug_flag))
+            disasm_info->use_tail = true;
          break;
 
       case SHADER_OPCODE_INTERLOCK:

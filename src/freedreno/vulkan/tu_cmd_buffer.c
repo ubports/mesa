@@ -2597,6 +2597,28 @@ write_tex_const(struct tu_cmd_buffer *cmd,
    }
 }
 
+static void
+write_image_ibo(struct tu_cmd_buffer *cmd,
+                uint32_t *dst,
+                struct tu_descriptor_state *descriptors_state,
+                const struct tu_descriptor_map *map,
+                unsigned i, unsigned array_index)
+{
+   assert(descriptors_state->valid & (1 << map->set[i]));
+
+   struct tu_descriptor_set *set = descriptors_state->sets[map->set[i]];
+   assert(map->binding[i] < set->layout->binding_count);
+
+   const struct tu_descriptor_set_binding_layout *layout =
+      &set->layout->binding[map->binding[i]];
+
+   assert(layout->type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+
+   memcpy(dst, &set->mapped_ptr[layout->offset / 4 +
+                                (array_index * 2 + 1) * A6XX_TEX_CONST_DWORDS],
+          A6XX_TEX_CONST_DWORDS * 4);
+}
+
 static uint64_t
 buffer_ptr(struct tu_descriptor_state *descriptors_state,
            const struct tu_descriptor_map *map,
@@ -2956,26 +2978,25 @@ tu6_emit_ibo(struct tu_cmd_buffer *cmd,
       &pipeline->program.link[type];
    VkResult result;
 
-   if (link->image_mapping.num_ibo == 0) {
+   unsigned num_desc = link->ssbo_map.num_desc + link->image_map.num_desc;
+
+   if (num_desc == 0) {
       *entry = (struct tu_cs_entry) {};
       return VK_SUCCESS;
    }
 
    struct ts_cs_memory ibo_const;
-   result = tu_cs_alloc(device, draw_state, link->image_mapping.num_ibo,
+   result = tu_cs_alloc(device, draw_state, num_desc,
                         A6XX_TEX_CONST_DWORDS, &ibo_const);
    if (result != VK_SUCCESS)
       return result;
 
-   for (unsigned i = 0; i < link->image_mapping.num_ibo; i++) {
-      unsigned idx = link->image_mapping.ibo_to_image[i];
-      uint32_t *dst = &ibo_const.map[A6XX_TEX_CONST_DWORDS * i];
+   int ssbo_index = 0;
+   for (unsigned i = 0; i < link->ssbo_map.num; i++) {
+      for (int j = 0; j < link->ssbo_map.array_size[i]; j++) {
+         uint32_t *dst = &ibo_const.map[A6XX_TEX_CONST_DWORDS * ssbo_index];
 
-      if (idx & IBO_SSBO) {
-         idx &= ~IBO_SSBO;
-
-         uint64_t va = buffer_ptr(descriptors_state, &link->ssbo_map, idx,
-                                  0 /* XXX */);
+         uint64_t va = buffer_ptr(descriptors_state, &link->ssbo_map, i, j);
          /* We don't expose robustBufferAccess, so leave the size unlimited. */
          uint32_t sz = MAX_STORAGE_BUFFER_RANGE / 4;
 
@@ -2990,10 +3011,23 @@ tu6_emit_ibo(struct tu_cmd_buffer *cmd,
          dst[5] = va >> 32;
          for (int i = 6; i < A6XX_TEX_CONST_DWORDS; i++)
             dst[i] = 0;
-      } else {
-         tu_finishme("Emit images");
+
+         ssbo_index++;
       }
    }
+
+   for (unsigned i = 0; i < link->image_map.num; i++) {
+      for (int j = 0; j < link->image_map.array_size[i]; j++) {
+         uint32_t *dst = &ibo_const.map[A6XX_TEX_CONST_DWORDS * ssbo_index];
+
+         write_image_ibo(cmd, dst,
+                         descriptors_state, &link->image_map, i, j);
+
+         ssbo_index++;
+      }
+   }
+
+   assert(ssbo_index == num_desc);
 
    struct tu_cs cs;
    result = tu_cs_begin_sub_stream(device, draw_state, 7, &cs);
@@ -3027,7 +3061,7 @@ tu6_emit_ibo(struct tu_cmd_buffer *cmd,
               CP_LOAD_STATE6_0_STATE_TYPE(st) |
               CP_LOAD_STATE6_0_STATE_SRC(SS6_INDIRECT) |
               CP_LOAD_STATE6_0_STATE_BLOCK(sb) |
-              CP_LOAD_STATE6_0_NUM_UNIT(link->image_mapping.num_ibo));
+              CP_LOAD_STATE6_0_NUM_UNIT(num_desc));
    tu_cs_emit_qw(&cs, ibo_const.iova); /* SRC_ADDR_LO/HI */
 
    tu_cs_emit_pkt4(&cs, ibo_addr_reg, 2);
