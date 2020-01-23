@@ -746,7 +746,7 @@ array_stride_decoration_cb(struct vtn_builder *b,
 
 static void
 struct_member_decoration_cb(struct vtn_builder *b,
-                            struct vtn_value *val, int member,
+                            UNUSED struct vtn_value *val, int member,
                             const struct vtn_decoration *dec, void *void_ctx)
 {
    struct member_decoration_ctx *ctx = void_ctx;
@@ -889,7 +889,7 @@ vtn_array_type_rewrite_glsl_type(struct vtn_type *type)
  */
 static void
 struct_member_matrix_stride_cb(struct vtn_builder *b,
-                               struct vtn_value *val, int member,
+                               UNUSED struct vtn_value *val, int member,
                                const struct vtn_decoration *dec,
                                void *void_ctx)
 {
@@ -946,7 +946,7 @@ struct_block_decoration_cb(struct vtn_builder *b,
 static void
 type_decoration_cb(struct vtn_builder *b,
                    struct vtn_value *val, int member,
-                    const struct vtn_decoration *dec, void *ctx)
+                   const struct vtn_decoration *dec, UNUSED void *ctx)
 {
    struct vtn_type *type = val->type;
 
@@ -1532,9 +1532,9 @@ vtn_null_constant(struct vtn_builder *b, struct vtn_type *type)
 }
 
 static void
-spec_constant_decoration_cb(struct vtn_builder *b, struct vtn_value *v,
-                             int member, const struct vtn_decoration *dec,
-                             void *data)
+spec_constant_decoration_cb(struct vtn_builder *b, UNUSED struct vtn_value *val,
+                            ASSERTED int member,
+                            const struct vtn_decoration *dec, void *data)
 {
    vtn_assert(member == -1);
    if (dec->decoration != SpvDecorationSpecId)
@@ -1578,9 +1578,9 @@ get_specialization64(struct vtn_builder *b, struct vtn_value *val,
 static void
 handle_workgroup_size_decoration_cb(struct vtn_builder *b,
                                     struct vtn_value *val,
-                                    int member,
+                                    ASSERTED int member,
                                     const struct vtn_decoration *dec,
-                                    void *data)
+                                    UNUSED void *data)
 {
    vtn_assert(member == -1);
    if (dec->decoration != SpvDecorationBuiltIn ||
@@ -2346,6 +2346,14 @@ vtn_handle_texture(struct vtn_builder *b, SpvOp opcode,
       dest_type = nir_type_int;
       break;
 
+   case SpvOpFragmentFetchAMD:
+      texop = nir_texop_fragment_fetch;
+      break;
+
+   case SpvOpFragmentMaskFetchAMD:
+      texop = nir_texop_fragment_mask_fetch;
+      break;
+
    default:
       vtn_fail_with_opcode("Unhandled opcode", opcode);
    }
@@ -2377,6 +2385,8 @@ vtn_handle_texture(struct vtn_builder *b, SpvOp opcode,
    case nir_texop_query_levels:
    case nir_texop_texture_samples:
    case nir_texop_samples_identical:
+   case nir_texop_fragment_fetch:
+   case nir_texop_fragment_mask_fetch:
       /* These don't */
       break;
    case nir_texop_txf_ms_fb:
@@ -2404,7 +2414,9 @@ vtn_handle_texture(struct vtn_builder *b, SpvOp opcode,
    case SpvOpImageFetch:
    case SpvOpImageGather:
    case SpvOpImageDrefGather:
-   case SpvOpImageQueryLod: {
+   case SpvOpImageQueryLod:
+   case SpvOpFragmentFetchAMD:
+   case SpvOpFragmentMaskFetchAMD: {
       /* All these types have the coordinate as their first real argument */
       switch (sampler_dim) {
       case GLSL_SAMPLER_DIM_1D:
@@ -2414,6 +2426,7 @@ vtn_handle_texture(struct vtn_builder *b, SpvOp opcode,
       case GLSL_SAMPLER_DIM_2D:
       case GLSL_SAMPLER_DIM_RECT:
       case GLSL_SAMPLER_DIM_MS:
+      case GLSL_SAMPLER_DIM_SUBPASS_MS:
          coord_components = 2;
          break;
       case GLSL_SAMPLER_DIM_3D:
@@ -2481,6 +2494,10 @@ vtn_handle_texture(struct vtn_builder *b, SpvOp opcode,
    /* For OpImageQuerySizeLod, we always have an LOD */
    if (opcode == SpvOpImageQuerySizeLod)
       (*p++) = vtn_tex_src(b, w[idx++], nir_tex_src_lod);
+
+   /* For OpFragmentFetchAMD, we always have a multisample index */
+   if (opcode == SpvOpFragmentFetchAMD)
+      (*p++) = vtn_tex_src(b, w[idx++], nir_tex_src_ms_index);
 
    /* Now we need to handle some number of optional arguments */
    struct vtn_value *gather_offsets = NULL;
@@ -3018,7 +3035,7 @@ get_uniform_nir_atomic_op(struct vtn_builder *b, SpvOp opcode)
        * only need to support GLSL Atomic Counters that are uints and don't
        * allow direct storage.
        */
-      unreachable("Invalid uniform atomic");
+      vtn_fail("Invalid uniform atomic");
    }
 }
 
@@ -3054,7 +3071,7 @@ get_deref_nir_atomic_op(struct vtn_builder *b, SpvOp opcode)
  */
 static void
 vtn_handle_atomics(struct vtn_builder *b, SpvOp opcode,
-                   const uint32_t *w, unsigned count)
+                   const uint32_t *w, UNUSED unsigned count)
 {
    struct vtn_pointer *ptr;
    nir_intrinsic_instr *atomic;
@@ -3632,7 +3649,7 @@ vtn_emit_memory_barrier(struct vtn_builder *b, SpvScope scope,
 
 static void
 vtn_handle_barrier(struct vtn_builder *b, SpvOp opcode,
-                   const uint32_t *w, unsigned count)
+                   const uint32_t *w, UNUSED unsigned count)
 {
    switch (opcode) {
    case SpvOpEmitVertex:
@@ -4119,6 +4136,14 @@ vtn_handle_preamble_instruction(struct vtn_builder *b, SpvOp opcode,
          spv_check_supported(amd_image_read_write_lod, cap);
          break;
 
+      case SpvCapabilityIntegerFunctions2INTEL:
+         spv_check_supported(integer_functions2, cap);
+         break;
+
+      case SpvCapabilityFragmentMaskAMD:
+         spv_check_supported(amd_fragment_mask, cap);
+         break;
+
       default:
          vtn_fail("Unhandled capability: %s (%u)",
                   spirv_capability_to_string(cap), cap);
@@ -4232,7 +4257,7 @@ vtn_handle_preamble_instruction(struct vtn_builder *b, SpvOp opcode,
 
 static void
 vtn_handle_execution_mode(struct vtn_builder *b, struct vtn_value *entry_point,
-                          const struct vtn_decoration *mode, void *data)
+                          const struct vtn_decoration *mode, UNUSED void *data)
 {
    vtn_assert(b->entry_point == entry_point);
 
@@ -4789,6 +4814,11 @@ vtn_handle_body_instruction(struct vtn_builder *b, SpvOp opcode,
       break;
    }
 
+   case SpvOpFragmentMaskFetchAMD:
+   case SpvOpFragmentFetchAMD:
+      vtn_handle_texture(b, opcode, w, count);
+      break;
+
    case SpvOpAtomicLoad:
    case SpvOpAtomicExchange:
    case SpvOpAtomicCompareExchange:
@@ -4925,6 +4955,20 @@ vtn_handle_body_instruction(struct vtn_builder *b, SpvOp opcode,
    case SpvOpVectorTimesMatrix:
    case SpvOpMatrixTimesVector:
    case SpvOpMatrixTimesMatrix:
+   case SpvOpUCountLeadingZerosINTEL:
+   case SpvOpUCountTrailingZerosINTEL:
+   case SpvOpAbsISubINTEL:
+   case SpvOpAbsUSubINTEL:
+   case SpvOpIAddSatINTEL:
+   case SpvOpUAddSatINTEL:
+   case SpvOpIAverageINTEL:
+   case SpvOpUAverageINTEL:
+   case SpvOpIAverageRoundedINTEL:
+   case SpvOpUAverageRoundedINTEL:
+   case SpvOpISubSatINTEL:
+   case SpvOpUSubSatINTEL:
+   case SpvOpIMul32x16INTEL:
+   case SpvOpUMul32x16INTEL:
       vtn_handle_alu(b, opcode, w, count);
       break;
 

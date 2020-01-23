@@ -467,11 +467,19 @@ emit_alu(struct ir3_context *ctx, nir_alu_instr *alu)
 		dst[0] = ir3_DSX(b, src[0], 0);
 		dst[0]->cat5.type = TYPE_F32;
 		break;
+	case nir_op_fddx_fine:
+		dst[0] = ir3_DSXPP_1(b, src[0], 0);
+		dst[0]->cat5.type = TYPE_F32;
+		break;
 	case nir_op_fddy:
 	case nir_op_fddy_coarse:
 		dst[0] = ir3_DSY(b, src[0], 0);
 		dst[0]->cat5.type = TYPE_F32;
 		break;
+		break;
+	case nir_op_fddy_fine:
+		dst[0] = ir3_DSYPP_1(b, src[0], 0);
+		dst[0]->cat5.type = TYPE_F32;
 		break;
 	case nir_op_flt16:
 	case nir_op_flt32:
@@ -3528,7 +3536,7 @@ ir3_compile_shader_nir(struct ir3_compiler *compiler,
 	/* We need to do legalize after (for frag shader's) the "bary.f"
 	 * offsets (inloc) have been assigned.
 	 */
-	ir3_legalize(ir, &so->has_ssbo, &so->need_pixlod, &max_bary);
+	ir3_legalize(ir, so, &max_bary);
 
 	ir3_debug_print(ir, "AFTER LEGALIZE");
 

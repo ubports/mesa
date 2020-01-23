@@ -1,5 +1,5 @@
 /*
- * Copyright © 2018 Intel Corporation
+ * Copyright © 2009,2012 Intel Corporation
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -19,47 +19,43 @@
  * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
  * IN THE SOFTWARE.
+ *
+ * Authors:
+ *    Eric Anholt <eric@anholt.net>
+ *
  */
 
-#undef NDEBUG
+#ifndef _FNV1A_H
+#define _FNV1A_H
 
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
-#include <assert.h>
-#include "hash_table.h"
+enum {
+   _mesa_fnv32_1a_offset_bias = 2166136261u,
+};
 
-int
-main(int argc, char **argv)
+/**
+ * Quick FNV-1a hash implementation based on:
+ * http://www.isthe.com/chongo/tech/comp/fnv/
+ *
+ * FNV-1a is not be the best hash out there -- Jenkins's lookup3 is supposed
+ * to be quite good, and it probably beats FNV.  But FNV has the advantage
+ * that it involves almost no code.  For an improvement on both, see Paul
+ * Hsieh's http://www.azillionmonkeys.com/qed/hash.html
+ */
+static inline uint32_t
+_mesa_fnv32_1a_accumulate_block(uint32_t hash, const void *data, size_t size)
 {
-   struct hash_table *ht;
-   const char *str1 = "test1";
-   const char *str2 = "test2";
-   struct hash_entry *entry;
+   const uint8_t *bytes = (const uint8_t *)data;
 
-   (void) argc;
-   (void) argv;
+   while (size-- != 0) {
+      hash ^= *bytes;
+      hash = hash * 0x01000193;
+      bytes++;
+   }
 
-   ht = _mesa_hash_table_create(NULL, _mesa_hash_string, _mesa_key_string_equal);
-
-   _mesa_hash_table_insert(ht, str1, NULL);
-   _mesa_hash_table_insert(ht, str2, NULL);
-
-   entry = _mesa_hash_table_search(ht, str2);
-   assert(strcmp(entry->key, str2) == 0);
-
-   entry = _mesa_hash_table_search(ht, str1);
-   assert(strcmp(entry->key, str1) == 0);
-
-   _mesa_hash_table_remove_key(ht, str1);
-
-   entry = _mesa_hash_table_search(ht, str1);
-   assert(entry == NULL);
-
-   entry = _mesa_hash_table_search(ht, str2);
-   assert(strcmp(entry->key, str2) == 0);
-
-   _mesa_hash_table_destroy(ht, NULL);
-
-   return 0;
+   return hash;
 }
+
+#define _mesa_fnv32_1a_accumulate(hash, expr) \
+   _mesa_fnv32_1a_accumulate_block(hash, &(expr), sizeof(expr))
+
+#endif
