@@ -85,6 +85,8 @@ enum Label {
    label_constant_64bit = 1 << 22,
    label_uniform_bitwise = 1 << 23,
    label_scc_invert = 1 << 24,
+   label_vcc_hint = 1 << 25,
+   label_scc_needed = 1 << 26,
 };
 
 static constexpr uint32_t instr_labels = label_vec | label_mul | label_mad | label_omod_success | label_clamp_success |
@@ -383,6 +385,16 @@ struct ssa_info {
       return label & label_fcmp;
    }
 
+   void set_scc_needed()
+   {
+      add_label(label_scc_needed);
+   }
+
+   bool is_scc_needed()
+   {
+      return label & label_scc_needed;
+   }
+
    void set_scc_invert(Temp scc_inv)
    {
       add_label(label_scc_invert);
@@ -405,6 +417,15 @@ struct ssa_info {
       return label & label_uniform_bool;
    }
 
+   void set_vcc_hint()
+   {
+      add_label(label_vcc_hint);
+   }
+
+   bool is_vcc_hint()
+   {
+      return label & label_vcc_hint;
+   }
 };
 
 struct opt_ctx {
@@ -1087,6 +1108,8 @@ void label_instruction(opt_ctx &ctx, Block& block, aco_ptr<Instruction>& instr)
                instr->operands[1].constantEquals(0x3f800000u) &&
                instr->operands[2].isTemp())
          ctx.info[instr->definitions[0].tempId()].set_b2f(instr->operands[2].getTemp());
+
+      ctx.info[instr->operands[2].tempId()].set_vcc_hint();
       break;
    case aco_opcode::v_cmp_lg_u32:
       if (instr->format == Format::VOPC && /* don't optimize VOP3 / SDWA / DPP */
@@ -2235,6 +2258,10 @@ void combine_instruction(opt_ctx &ctx, Block& block, aco_ptr<Instruction>& instr
          return;
    }
 
+   if (ctx.info[instr->definitions[0].tempId()].is_vcc_hint()) {
+      instr->definitions[0].setHint(vcc);
+   }
+
    /* TODO: There are still some peephole optimizations that could be done:
     * - abs(a - b) -> s_absdiff_i32
     * - various patterns for s_bitcmp{0,1}_b32 and s_bitset{0,1}_b32
@@ -2442,6 +2469,53 @@ void combine_instruction(opt_ctx &ctx, Block& block, aco_ptr<Instruction>& instr
    }
 }
 
+bool to_uniform_bool_instr(opt_ctx &ctx, aco_ptr<Instruction> &instr)
+{
+   switch (instr->opcode) {
+      case aco_opcode::s_and_b32:
+      case aco_opcode::s_and_b64:
+         instr->opcode = aco_opcode::s_and_b32;
+         break;
+      case aco_opcode::s_or_b32:
+      case aco_opcode::s_or_b64:
+         instr->opcode = aco_opcode::s_or_b32;
+         break;
+      case aco_opcode::s_xor_b32:
+      case aco_opcode::s_xor_b64:
+         instr->opcode = aco_opcode::s_absdiff_i32;
+         break;
+      default:
+         /* Don't transform other instructions. They are very unlikely to appear here. */
+         return false;
+   }
+
+   for (Operand &op : instr->operands) {
+      ctx.uses[op.tempId()]--;
+
+      if (ctx.info[op.tempId()].is_uniform_bool()) {
+         /* Just use the uniform boolean temp. */
+         op.setTemp(ctx.info[op.tempId()].temp);
+      } else if (ctx.info[op.tempId()].is_uniform_bitwise()) {
+         /* Use the SCC definition of the predecessor instruction.
+          * This allows the predecessor to get picked up by the same optimization (if it has no divergent users),
+          * and it also makes sure that the current instruction will keep working even if the predecessor won't be transformed.
+          */
+         Instruction *pred_instr = ctx.info[op.tempId()].instr;
+         assert(pred_instr->definitions.size() >= 2);
+         assert(pred_instr->definitions[1].isFixed() && pred_instr->definitions[1].physReg() == scc);
+         op.setTemp(pred_instr->definitions[1].getTemp());
+      } else {
+         unreachable("Invalid operand on uniform bitwise instruction.");
+      }
+
+      ctx.uses[op.tempId()]++;
+   }
+
+   instr->definitions[0].setTemp(Temp(instr->definitions[0].tempId(), s1));
+   assert(instr->operands[0].regClass() == s1);
+   assert(instr->operands[1].regClass() == s1);
+   return true;
+}
 
 void select_instruction(opt_ctx &ctx, aco_ptr<Instruction>& instr)
 {
@@ -2555,9 +2629,38 @@ void select_instruction(opt_ctx &ctx, aco_ptr<Instruction>& instr)
       }
    }
 
+   /* Mark SCC needed, so the uniform boolean transformation won't swap the definitions when it isn't beneficial */
+   if (instr->format == Format::PSEUDO_BRANCH &&
+       instr->operands.size() &&
+       instr->operands[0].isTemp()) {
+      ctx.info[instr->operands[0].tempId()].set_scc_needed();
+      return;
+   } else if ((instr->opcode == aco_opcode::s_cselect_b64 ||
+               instr->opcode == aco_opcode::s_cselect_b32) &&
+              instr->operands[2].isTemp()) {
+      ctx.info[instr->operands[2].tempId()].set_scc_needed();
+   }
+
    /* check for literals */
    if (!instr->isSALU() && !instr->isVALU())
       return;
+
+   /* Transform uniform bitwise boolean operations to 32-bit when there are no divergent uses. */
+   if (instr->definitions.size() &&
+       ctx.uses[instr->definitions[0].tempId()] == 0 &&
+       ctx.info[instr->definitions[0].tempId()].is_uniform_bitwise()) {
+      bool transform_done = to_uniform_bool_instr(ctx, instr);
+
+      if (transform_done && !ctx.info[instr->definitions[1].tempId()].is_scc_needed()) {
+         /* Swap the two definition IDs in order to avoid overusing the SCC. This reduces extra moves generated by RA. */
+         uint32_t def0_id = instr->definitions[0].getTemp().id();
+         uint32_t def1_id = instr->definitions[1].getTemp().id();
+         instr->definitions[0].setTemp(Temp(def1_id, s1));
+         instr->definitions[1].setTemp(Temp(def0_id, s1));
+      }
+
+      return;
+   }
 
    if (instr->isSDWA() || instr->isDPP() || (instr->isVOP3() && ctx.program->chip_class < GFX10))
       return; /* some encodings can't ever take literals */

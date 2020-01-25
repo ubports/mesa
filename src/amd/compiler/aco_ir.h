@@ -108,7 +108,12 @@ enum barrier_interaction : uint8_t {
    barrier_image = 0x2,
    barrier_atomic = 0x4,
    barrier_shared = 0x8,
-   barrier_count = 4,
+   /* used for geometry shaders to ensure vertex data writes are before the
+    * GS_DONE s_sendmsg. */
+   barrier_gs_data = 0x10,
+   /* used for geometry shaders to ensure s_sendmsg instructions are in-order. */
+   barrier_gs_sendmsg = 0x20,
+   barrier_count = 6,
 };
 
 enum fp_round {
@@ -975,25 +980,7 @@ static inline bool is_phi(aco_ptr<Instruction>& instr)
    return is_phi(instr.get());
 }
 
-constexpr barrier_interaction get_barrier_interaction(Instruction* instr)
-{
-   switch (instr->format) {
-   case Format::SMEM:
-      return static_cast<SMEM_instruction*>(instr)->barrier;
-   case Format::MUBUF:
-      return static_cast<MUBUF_instruction*>(instr)->barrier;
-   case Format::MIMG:
-      return static_cast<MIMG_instruction*>(instr)->barrier;
-   case Format::FLAT:
-   case Format::GLOBAL:
-   case Format::SCRATCH:
-      return static_cast<FLAT_instruction*>(instr)->barrier;
-   case Format::DS:
-      return barrier_shared;
-   default:
-      return barrier_none;
-   }
-}
+barrier_interaction get_barrier_interaction(Instruction* instr);
 
 bool is_dead(const std::vector<uint16_t>& uses, Instruction *instr);
 
@@ -1015,6 +1002,7 @@ enum block_kind {
    block_kind_uses_discard_if = 1 << 12,
    block_kind_needs_lowering = 1 << 13,
    block_kind_uses_demote = 1 << 14,
+   block_kind_export_end = 1 << 15,
 };
 
 
@@ -1118,23 +1106,25 @@ static constexpr Stage sw_tcs = 1 << 2;
 static constexpr Stage sw_tes = 1 << 3;
 static constexpr Stage sw_fs = 1 << 4;
 static constexpr Stage sw_cs = 1 << 5;
-static constexpr Stage sw_mask = 0x3f;
+static constexpr Stage sw_gs_copy = 1 << 6;
+static constexpr Stage sw_mask = 0x7f;
 
 /* hardware stages (can't be OR'd, just a mask for convenience when testing multiple) */
-static constexpr Stage hw_vs = 1 << 6;
-static constexpr Stage hw_es = 1 << 7; /* not on GFX9. combined into GS on GFX9 (and GFX10/legacy). */
-static constexpr Stage hw_gs = 1 << 8;
-static constexpr Stage hw_ls = 1 << 9; /* not on GFX9. combined into HS on GFX9 (and GFX10/legacy). */
-static constexpr Stage hw_hs = 1 << 10;
-static constexpr Stage hw_fs = 1 << 11;
-static constexpr Stage hw_cs = 1 << 12;
-static constexpr Stage hw_mask = 0x7f << 6;
+static constexpr Stage hw_vs = 1 << 7;
+static constexpr Stage hw_es = 1 << 8; /* not on GFX9. combined into GS on GFX9 (and GFX10/legacy). */
+static constexpr Stage hw_gs = 1 << 9;
+static constexpr Stage hw_ls = 1 << 10; /* not on GFX9. combined into HS on GFX9 (and GFX10/legacy). */
+static constexpr Stage hw_hs = 1 << 11;
+static constexpr Stage hw_fs = 1 << 12;
+static constexpr Stage hw_cs = 1 << 13;
+static constexpr Stage hw_mask = 0x7f << 7;
 
 /* possible settings of Program::stage */
 static constexpr Stage vertex_vs = sw_vs | hw_vs;
 static constexpr Stage fragment_fs = sw_fs | hw_fs;
 static constexpr Stage compute_cs = sw_cs | hw_cs;
 static constexpr Stage tess_eval_vs = sw_tes | hw_vs;
+static constexpr Stage gs_copy_vs = sw_gs_copy | hw_vs;
 /* GFX10/NGG */
 static constexpr Stage ngg_vertex_gs = sw_vs | hw_gs;
 static constexpr Stage ngg_vertex_geometry_gs = sw_vs | sw_gs | hw_gs;
@@ -1231,6 +1221,9 @@ void select_program(Program *program,
                     struct nir_shader *const *shaders,
                     ac_shader_config* config,
                     struct radv_shader_args *args);
+void select_gs_copy_shader(Program *program, struct nir_shader *gs_shader,
+                           ac_shader_config* config,
+                           struct radv_shader_args *args);
 
 void lower_wqm(Program* program, live& live_vars,
                const struct radv_nir_compiler_options *options);

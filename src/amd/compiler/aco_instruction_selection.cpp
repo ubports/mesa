@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <array>
+#include <stack>
 #include <map>
 
 #include "ac_shader_util.h"
@@ -356,7 +357,7 @@ Temp bool_to_vector_condition(isel_context *ctx, Temp val, Temp dst = Temp(0, s2
    assert(val.regClass() == s1);
    assert(dst.regClass() == bld.lm);
 
-   return bld.sop2(Builder::s_cselect, bld.hint_vcc(Definition(dst)), Operand((uint32_t) -1), Operand(0u), bld.scc(val));
+   return bld.sop2(Builder::s_cselect, Definition(dst), Operand((uint32_t) -1), Operand(0u), bld.scc(val));
 }
 
 Temp bool_to_scalar_condition(isel_context *ctx, Temp val, Temp dst = Temp(0, s1))
@@ -2632,231 +2633,6 @@ uint32_t widen_mask(uint32_t mask, unsigned multiplier)
    return new_mask;
 }
 
-void visit_store_vs_output(isel_context *ctx, nir_intrinsic_instr *instr)
-{
-   /* This wouldn't work inside control flow or with indirect offsets but
-    * that doesn't happen because of nir_lower_io_to_temporaries(). */
-
-   unsigned write_mask = nir_intrinsic_write_mask(instr);
-   unsigned component = nir_intrinsic_component(instr);
-   Temp src = get_ssa_temp(ctx, instr->src[0].ssa);
-   unsigned idx = nir_intrinsic_base(instr) + component;
-
-   nir_instr *off_instr = instr->src[1].ssa->parent_instr;
-   if (off_instr->type != nir_instr_type_load_const) {
-      fprintf(stderr, "Unimplemented nir_intrinsic_load_input offset\n");
-      nir_print_instr(off_instr, stderr);
-      fprintf(stderr, "\n");
-   }
-   idx += nir_instr_as_load_const(off_instr)->value[0].u32 * 4u;
-
-   if (instr->src[0].ssa->bit_size == 64)
-      write_mask = widen_mask(write_mask, 2);
-
-   for (unsigned i = 0; i < 8; ++i) {
-      if (write_mask & (1 << i)) {
-         ctx->vs_output.mask[idx / 4u] |= 1 << (idx % 4u);
-         ctx->vs_output.outputs[idx / 4u][idx % 4u] = emit_extract_vector(ctx, src, i, v1);
-      }
-      idx++;
-   }
-}
-
-void visit_store_fs_output(isel_context *ctx, nir_intrinsic_instr *instr)
-{
-   Builder bld(ctx->program, ctx->block);
-   unsigned write_mask = nir_intrinsic_write_mask(instr);
-   Operand values[4];
-   Temp src = get_ssa_temp(ctx, instr->src[0].ssa);
-   for (unsigned i = 0; i < 4; ++i) {
-      if (write_mask & (1 << i)) {
-         Temp tmp = emit_extract_vector(ctx, src, i, v1);
-         values[i] = Operand(tmp);
-      } else {
-         values[i] = Operand(v1);
-      }
-   }
-
-   unsigned index = nir_intrinsic_base(instr) / 4;
-   unsigned target, col_format;
-   unsigned enabled_channels = 0xF;
-   aco_opcode compr_op = (aco_opcode)0;
-
-   nir_const_value* offset = nir_src_as_const_value(instr->src[1]);
-   assert(offset && "Non-const offsets on exports not yet supported");
-   index += offset->u32;
-
-   assert(index != FRAG_RESULT_COLOR);
-
-   /* Unlike vertex shader exports, it's fine to use multiple exports to
-    * export separate channels of one target. So shaders which export both
-    * FRAG_RESULT_SAMPLE_MASK and FRAG_RESULT_DEPTH should work fine.
-    * TODO: combine the exports in those cases and create better code
-    */
-
-   if (index == FRAG_RESULT_SAMPLE_MASK) {
-
-      if (ctx->program->info->ps.writes_z) {
-         target = V_008DFC_SQ_EXP_MRTZ;
-         enabled_channels = 0x4;
-         col_format = (unsigned) -1;
-
-         values[2] = values[0];
-         values[0] = Operand(v1);
-      } else {
-         bld.exp(aco_opcode::exp, Operand(v1), Operand(values[0]), Operand(v1), Operand(v1),
-                 0xc, V_008DFC_SQ_EXP_MRTZ, true);
-         return;
-      }
-
-   } else if (index == FRAG_RESULT_DEPTH) {
-
-      target = V_008DFC_SQ_EXP_MRTZ;
-      enabled_channels = 0x1;
-      col_format = (unsigned) -1;
-
-   } else if (index == FRAG_RESULT_STENCIL) {
-
-      if (ctx->program->info->ps.writes_z) {
-         target = V_008DFC_SQ_EXP_MRTZ;
-         enabled_channels = 0x2;
-         col_format = (unsigned) -1;
-
-         values[1] = values[0];
-         values[0] = Operand(v1);
-      } else {
-         values[0] = bld.vop2(aco_opcode::v_lshlrev_b32, bld.def(v1), Operand(16u), values[0]);
-         bld.exp(aco_opcode::exp, values[0], Operand(v1), Operand(v1), Operand(v1),
-                 0x3, V_008DFC_SQ_EXP_MRTZ, true);
-         return;
-      }
-
-   } else {
-      index -= FRAG_RESULT_DATA0;
-      target = V_008DFC_SQ_EXP_MRT + index;
-      col_format = (ctx->options->key.fs.col_format >> (4 * index)) & 0xf;
-   }
-   bool is_int8 = (ctx->options->key.fs.is_int8 >> index) & 1;
-   bool is_int10 = (ctx->options->key.fs.is_int10 >> index) & 1;
-
-   switch (col_format)
-   {
-   case V_028714_SPI_SHADER_ZERO:
-      enabled_channels = 0; /* writemask */
-      target = V_008DFC_SQ_EXP_NULL;
-      break;
-
-   case V_028714_SPI_SHADER_32_R:
-      enabled_channels = 1;
-      break;
-
-   case V_028714_SPI_SHADER_32_GR:
-      enabled_channels = 0x3;
-      break;
-
-   case V_028714_SPI_SHADER_32_AR:
-      if (ctx->options->chip_class >= GFX10) {
-         /* Special case: on GFX10, the outputs are different for 32_AR */
-         enabled_channels = 0x3;
-         values[1] = values[3];
-         values[3] = Operand(v1);
-      } else {
-         enabled_channels = 0x9;
-      }
-      break;
-
-   case V_028714_SPI_SHADER_FP16_ABGR:
-      enabled_channels = 0x5;
-      compr_op = aco_opcode::v_cvt_pkrtz_f16_f32;
-      break;
-
-   case V_028714_SPI_SHADER_UNORM16_ABGR:
-      enabled_channels = 0x5;
-      compr_op = aco_opcode::v_cvt_pknorm_u16_f32;
-      break;
-
-   case V_028714_SPI_SHADER_SNORM16_ABGR:
-      enabled_channels = 0x5;
-      compr_op = aco_opcode::v_cvt_pknorm_i16_f32;
-      break;
-
-   case V_028714_SPI_SHADER_UINT16_ABGR: {
-      enabled_channels = 0x5;
-      compr_op = aco_opcode::v_cvt_pk_u16_u32;
-      if (is_int8 || is_int10) {
-         /* clamp */
-         uint32_t max_rgb = is_int8 ? 255 : is_int10 ? 1023 : 0;
-         Temp max_rgb_val = bld.copy(bld.def(s1), Operand(max_rgb));
-
-         for (unsigned i = 0; i < 4; i++) {
-            if ((write_mask >> i) & 1) {
-               values[i] = bld.vop2(aco_opcode::v_min_u32, bld.def(v1),
-                                    i == 3 && is_int10 ? Operand(3u) : Operand(max_rgb_val),
-                                    values[i]);
-            }
-         }
-      }
-      break;
-   }
-
-   case V_028714_SPI_SHADER_SINT16_ABGR:
-      enabled_channels = 0x5;
-      compr_op = aco_opcode::v_cvt_pk_i16_i32;
-      if (is_int8 || is_int10) {
-         /* clamp */
-         uint32_t max_rgb = is_int8 ? 127 : is_int10 ? 511 : 0;
-         uint32_t min_rgb = is_int8 ? -128 :is_int10 ? -512 : 0;
-         Temp max_rgb_val = bld.copy(bld.def(s1), Operand(max_rgb));
-         Temp min_rgb_val = bld.copy(bld.def(s1), Operand(min_rgb));
-
-         for (unsigned i = 0; i < 4; i++) {
-            if ((write_mask >> i) & 1) {
-               values[i] = bld.vop2(aco_opcode::v_min_i32, bld.def(v1),
-                                    i == 3 && is_int10 ? Operand(1u) : Operand(max_rgb_val),
-                                    values[i]);
-               values[i] = bld.vop2(aco_opcode::v_max_i32, bld.def(v1),
-                                    i == 3 && is_int10 ? Operand(-2u) : Operand(min_rgb_val),
-                                    values[i]);
-            }
-         }
-      }
-      break;
-
-   case V_028714_SPI_SHADER_32_ABGR:
-      enabled_channels = 0xF;
-      break;
-
-   default:
-      break;
-   }
-
-   if (target == V_008DFC_SQ_EXP_NULL)
-      return;
-
-   if ((bool) compr_op) {
-      for (int i = 0; i < 2; i++) {
-         /* check if at least one of the values to be compressed is enabled */
-         unsigned enabled = (write_mask >> (i*2) | write_mask >> (i*2+1)) & 0x1;
-         if (enabled) {
-            enabled_channels |= enabled << (i*2);
-            values[i] = bld.vop3(compr_op, bld.def(v1),
-                                 values[i*2].isUndefined() ? Operand(0u) : values[i*2],
-                                 values[i*2+1].isUndefined() ? Operand(0u): values[i*2+1]);
-         } else {
-            values[i] = Operand(v1);
-         }
-      }
-      values[2] = Operand(v1);
-      values[3] = Operand(v1);
-   } else {
-      for (int i = 0; i < 4; i++)
-         values[i] = enabled_channels & (1 << i) ? values[i] : Operand(v1);
-   }
-
-   bld.exp(aco_opcode::exp, values[0], values[1], values[2], values[3],
-           enabled_channels, target, (bool) compr_op);
-}
-
 Operand load_lds_size_m0(isel_context *ctx)
 {
    /* TODO: m0 does not need to be initialized on GFX9+ */
@@ -3104,12 +2880,118 @@ void store_lds(isel_context *ctx, unsigned elem_size_bytes, Temp data, uint32_t 
    return;
 }
 
+void visit_store_vsgs_output(isel_context *ctx, nir_intrinsic_instr *instr)
+{
+   unsigned write_mask = nir_intrinsic_write_mask(instr);
+   unsigned component = nir_intrinsic_component(instr);
+   Temp src = get_ssa_temp(ctx, instr->src[0].ssa);
+   unsigned idx = (nir_intrinsic_base(instr) + component) * 4u;
+   Operand offset(s1);
+   Builder bld(ctx->program, ctx->block);
+
+   nir_instr *off_instr = instr->src[1].ssa->parent_instr;
+   if (off_instr->type != nir_instr_type_load_const)
+      offset = bld.v_mul24_imm(bld.def(v1), get_ssa_temp(ctx, instr->src[1].ssa), 16u);
+   else
+      idx += nir_instr_as_load_const(off_instr)->value[0].u32 * 16u;
+
+   unsigned elem_size_bytes = instr->src[0].ssa->bit_size / 8u;
+   if (ctx->stage == vertex_es) {
+      Temp esgs_ring = bld.smem(aco_opcode::s_load_dwordx4, bld.def(s4), ctx->program->private_segment_buffer, Operand(RING_ESGS_VS * 16u));
+
+      Temp elems[NIR_MAX_VEC_COMPONENTS * 2];
+      if (elem_size_bytes == 8) {
+         for (unsigned i = 0; i < src.size() / 2; i++) {
+            Temp elem = emit_extract_vector(ctx, src, i, v2);
+            elems[i*2] = bld.tmp(v1);
+            elems[i*2+1] = bld.tmp(v1);
+            bld.pseudo(aco_opcode::p_split_vector, Definition(elems[i*2]), Definition(elems[i*2+1]), elem);
+         }
+         write_mask = widen_mask(write_mask, 2);
+         elem_size_bytes /= 2u;
+      } else {
+         for (unsigned i = 0; i < src.size(); i++)
+            elems[i] = emit_extract_vector(ctx, src, i, v1);
+      }
+
+      while (write_mask) {
+         unsigned index = u_bit_scan(&write_mask);
+         unsigned offset = index * elem_size_bytes;
+         Temp elem = emit_extract_vector(ctx, src, index, RegClass(RegType::vgpr, elem_size_bytes / 4));
+
+         Operand vaddr_offset(v1);
+         unsigned const_offset = idx + offset;
+         if (const_offset >= 4096u) {
+            vaddr_offset = bld.copy(bld.def(v1), Operand(const_offset / 4096u * 4096u));
+            const_offset %= 4096u;
+         }
+
+         aco_ptr<MTBUF_instruction> mtbuf{create_instruction<MTBUF_instruction>(aco_opcode::tbuffer_store_format_x, Format::MTBUF, 4, 0)};
+         mtbuf->operands[0] = vaddr_offset;
+         mtbuf->operands[1] = Operand(esgs_ring);
+         mtbuf->operands[2] = Operand(get_arg(ctx, ctx->args->es2gs_offset));
+         mtbuf->operands[3] = Operand(elem);
+         mtbuf->offen = !vaddr_offset.isUndefined();
+         mtbuf->dfmt = V_008F0C_BUF_DATA_FORMAT_32;
+         mtbuf->nfmt = V_008F0C_BUF_NUM_FORMAT_UINT;
+         mtbuf->offset = const_offset;
+         mtbuf->glc = true;
+         mtbuf->slc = true;
+         mtbuf->barrier = barrier_none;
+         mtbuf->can_reorder = true;
+         bld.insert(std::move(mtbuf));
+      }
+   } else {
+      unsigned itemsize = ctx->program->info->vs.es_info.esgs_itemsize;
+
+      Temp vertex_idx = emit_mbcnt(ctx, bld.def(v1));
+      Temp wave_idx = bld.sop2(aco_opcode::s_bfe_u32, bld.def(s1), bld.def(s1, scc), get_arg(ctx, ctx->args->merged_wave_info), Operand(4u << 16 | 24));
+      vertex_idx = bld.vop2(aco_opcode::v_or_b32, bld.def(v1), vertex_idx,
+                            bld.v_mul24_imm(bld.def(v1), as_vgpr(ctx, wave_idx), ctx->program->wave_size));
+
+      Temp lds_base = bld.v_mul24_imm(bld.def(v1), vertex_idx, itemsize);
+      if (!offset.isUndefined())
+         lds_base = bld.vadd32(bld.def(v1), offset, lds_base);
+
+      unsigned align = 1 << (ffs(itemsize) - 1);
+      if (idx)
+         align = std::min(align, 1u << (ffs(idx) - 1));
+
+      store_lds(ctx, elem_size_bytes, src, write_mask, lds_base, idx, align);
+   }
+}
+
 void visit_store_output(isel_context *ctx, nir_intrinsic_instr *instr)
 {
-   if (ctx->stage == vertex_vs) {
-      visit_store_vs_output(ctx, instr);
-   } else if (ctx->stage == fragment_fs) {
-      visit_store_fs_output(ctx, instr);
+   if (ctx->stage == vertex_vs ||
+       ctx->stage == fragment_fs ||
+       ctx->shader->info.stage == MESA_SHADER_GEOMETRY) {
+      unsigned write_mask = nir_intrinsic_write_mask(instr);
+      unsigned component = nir_intrinsic_component(instr);
+      Temp src = get_ssa_temp(ctx, instr->src[0].ssa);
+      unsigned idx = nir_intrinsic_base(instr) + component;
+
+      nir_instr *off_instr = instr->src[1].ssa->parent_instr;
+      if (off_instr->type != nir_instr_type_load_const) {
+         fprintf(stderr, "Unimplemented nir_intrinsic_load_input offset\n");
+         nir_print_instr(off_instr, stderr);
+         fprintf(stderr, "\n");
+      }
+      idx += nir_instr_as_load_const(off_instr)->value[0].u32 * 4u;
+
+      if (instr->src[0].ssa->bit_size == 64)
+         write_mask = widen_mask(write_mask, 2);
+
+      for (unsigned i = 0; i < 8; ++i) {
+         if (write_mask & (1 << i)) {
+            ctx->outputs.mask[idx / 4u] |= 1 << (idx % 4u);
+            ctx->outputs.outputs[idx / 4u][idx % 4u] = emit_extract_vector(ctx, src, i, v1);
+         }
+         idx++;
+      }
+   } else if (ctx->stage == vertex_es ||
+              (ctx->stage == vertex_geometry_gs && ctx->shader->info.stage == MESA_SHADER_VERTEX)) {
+      visit_store_vsgs_output(ctx, instr);
    } else {
       unreachable("Shader stage not implemented");
    }
@@ -3276,14 +3158,14 @@ void visit_load_input(isel_context *ctx, nir_intrinsic_instr *instr)
       if (post_shuffle)
          num_channels = MAX2(num_channels, 3);
 
-      Temp list = bld.smem(aco_opcode::s_load_dwordx4, bld.def(s4), vertex_buffers, Operand(attrib_binding * 16u));
+      Operand off = bld.copy(bld.def(s1), Operand(attrib_binding * 16u));
+      Temp list = bld.smem(aco_opcode::s_load_dwordx4, bld.def(s4), vertex_buffers, off);
 
       Temp index;
       if (ctx->options->key.vs.instance_rate_inputs & (1u << location)) {
          uint32_t divisor = ctx->options->key.vs.instance_rate_divisors[location];
          Temp start_instance = get_arg(ctx, ctx->args->ac.start_instance);
          if (divisor) {
-            ctx->needs_instance_id = true;
             Temp instance_id = get_arg(ctx, ctx->args->ac.instance_id);
             if (divisor != 1) {
                Temp divided = bld.tmp(v1);
@@ -3420,12 +3302,124 @@ void visit_load_input(isel_context *ctx, nir_intrinsic_instr *instr)
    }
 }
 
+void visit_load_per_vertex_input(isel_context *ctx, nir_intrinsic_instr *instr)
+{
+   assert(ctx->stage == vertex_geometry_gs || ctx->stage == geometry_gs);
+   assert(ctx->shader->info.stage == MESA_SHADER_GEOMETRY);
+
+   Builder bld(ctx->program, ctx->block);
+   Temp dst = get_ssa_temp(ctx, &instr->dest.ssa);
+
+   Temp offset = Temp();
+   if (instr->src[0].ssa->parent_instr->type != nir_instr_type_load_const) {
+      /* better code could be created, but this case probably doesn't happen
+       * much in practice */
+      Temp indirect_vertex = as_vgpr(ctx, get_ssa_temp(ctx, instr->src[0].ssa));
+      for (unsigned i = 0; i < ctx->shader->info.gs.vertices_in; i++) {
+         Temp elem;
+         if (ctx->stage == vertex_geometry_gs) {
+            elem = get_arg(ctx, ctx->args->gs_vtx_offset[i / 2u * 2u]);
+            if (i % 2u)
+               elem = bld.vop2(aco_opcode::v_lshrrev_b32, bld.def(v1), Operand(16u), elem);
+         } else {
+            elem = get_arg(ctx, ctx->args->gs_vtx_offset[i]);
+         }
+         if (offset.id()) {
+            Temp cond = bld.vopc(aco_opcode::v_cmp_eq_u32, bld.hint_vcc(bld.def(s2)),
+                                 Operand(i), indirect_vertex);
+            offset = bld.vop2(aco_opcode::v_cndmask_b32, bld.def(v1), offset, elem, cond);
+         } else {
+            offset = elem;
+         }
+      }
+      if (ctx->stage == vertex_geometry_gs)
+         offset = bld.vop2(aco_opcode::v_and_b32, bld.def(v1), Operand(0xffffu), offset);
+   } else {
+      unsigned vertex = nir_src_as_uint(instr->src[0]);
+      if (ctx->stage == vertex_geometry_gs)
+         offset = bld.vop3(
+         aco_opcode::v_bfe_u32, bld.def(v1), get_arg(ctx, ctx->args->gs_vtx_offset[vertex / 2u * 2u]),
+            Operand((vertex % 2u) * 16u), Operand(16u));
+      else
+         offset = get_arg(ctx, ctx->args->gs_vtx_offset[vertex]);
+   }
+
+   unsigned const_offset = nir_intrinsic_base(instr);
+   const_offset += nir_intrinsic_component(instr);
+
+   nir_instr *off_instr = instr->src[1].ssa->parent_instr;
+   if (off_instr->type != nir_instr_type_load_const) {
+      Temp indirect_offset = get_ssa_temp(ctx, instr->src[1].ssa);
+      offset = bld.vop2(aco_opcode::v_lshlrev_b32, bld.def(v1), Operand(2u),
+                        bld.vadd32(bld.def(v1), indirect_offset, offset));
+   } else {
+      const_offset += nir_instr_as_load_const(off_instr)->value[0].u32 * 4u;
+   }
+   const_offset *= 4u;
+
+   offset = bld.vop2(aco_opcode::v_lshlrev_b32, bld.def(v1), Operand(2u), offset);
+
+   unsigned itemsize = ctx->program->info->vs.es_info.esgs_itemsize;
+
+   unsigned elem_size_bytes = instr->dest.ssa.bit_size / 8;
+   if (ctx->stage == geometry_gs) {
+      Temp esgs_ring = bld.smem(aco_opcode::s_load_dwordx4, bld.def(s4), ctx->program->private_segment_buffer, Operand(RING_ESGS_GS * 16u));
+
+      const_offset *= ctx->program->wave_size;
+
+      std::array<Temp,NIR_MAX_VEC_COMPONENTS> elems;
+      aco_ptr<Pseudo_instruction> vec{create_instruction<Pseudo_instruction>(
+         aco_opcode::p_create_vector, Format::PSEUDO, instr->dest.ssa.num_components, 1)};
+      for (unsigned i = 0; i < instr->dest.ssa.num_components; i++) {
+         Temp subelems[2];
+         for (unsigned j = 0; j < elem_size_bytes / 4; j++) {
+            Operand soffset(0u);
+            if (const_offset >= 4096u)
+               soffset = bld.copy(bld.def(s1), Operand(const_offset / 4096u * 4096u));
+
+            aco_ptr<MUBUF_instruction> mubuf{create_instruction<MUBUF_instruction>(aco_opcode::buffer_load_dword, Format::MUBUF, 3, 1)};
+            mubuf->definitions[0] = bld.def(v1);
+            subelems[j] = mubuf->definitions[0].getTemp();
+            mubuf->operands[0] = Operand(offset);
+            mubuf->operands[1] = Operand(esgs_ring);
+            mubuf->operands[2] = Operand(soffset);
+            mubuf->offen = true;
+            mubuf->offset = const_offset % 4096u;
+            mubuf->glc = true;
+            mubuf->dlc = ctx->options->chip_class >= GFX10;
+            mubuf->barrier = barrier_none;
+            mubuf->can_reorder = true;
+            bld.insert(std::move(mubuf));
+
+            const_offset += ctx->program->wave_size * 4u;
+         }
+
+         if (elem_size_bytes == 4)
+            elems[i] = subelems[0];
+         else
+            elems[i] = bld.pseudo(aco_opcode::p_create_vector, bld.def(v2), subelems[0], subelems[1]);
+         vec->operands[i] = Operand(elems[i]);
+      }
+      vec->definitions[0] = Definition(dst);
+      ctx->block->instructions.emplace_back(std::move(vec));
+      ctx->allocated_vec.emplace(dst.id(), elems);
+   } else {
+      unsigned align = 16; /* alignment of indirect offset */
+      align = std::min(align, 1u << (ffs(itemsize) - 1));
+      if (const_offset)
+         align = std::min(align, 1u << (ffs(const_offset) - 1));
+
+      load_lds(ctx, elem_size_bytes, dst, offset, const_offset, align);
+   }
+}
+
 Temp load_desc_ptr(isel_context *ctx, unsigned desc_set)
 {
    if (ctx->program->info->need_indirect_descriptor_sets) {
       Builder bld(ctx->program, ctx->block);
       Temp ptr64 = convert_pointer_to_64_bit(ctx, get_arg(ctx, ctx->args->descriptor_sets[0]));
-      return bld.smem(aco_opcode::s_load_dword, bld.def(s1), ptr64, Operand(desc_set << 2));//, false, false, false);
+      Operand off = bld.copy(bld.def(s1), Operand(desc_set << 2));
+      return bld.smem(aco_opcode::s_load_dword, bld.def(s1), ptr64, off);//, false, false, false);
    }
 
    return get_arg(ctx, ctx->args->descriptor_sets[desc_set]);
@@ -4043,7 +4037,7 @@ Temp get_sampler_desc(isel_context *ctx, nir_deref_instr *deref_instr,
 
    Operand off;
    if (!index_set) {
-      off = Operand(offset);
+      off = bld.copy(bld.def(s1), Operand(offset));
    } else {
       off = Operand((Temp)bld.sop2(aco_opcode::s_add_i32, bld.def(s1), bld.def(s1, scc), Operand(offset),
                                    bld.sop2(aco_opcode::s_mul_i32, bld.def(s1), Operand(stride), index)));
@@ -5281,7 +5275,7 @@ void emit_memory_barrier(isel_context *ctx, nir_intrinsic_instr *instr) {
    switch(instr->intrinsic) {
       case nir_intrinsic_group_memory_barrier:
       case nir_intrinsic_memory_barrier:
-         bld.barrier(aco_opcode::p_memory_barrier_all);
+         bld.barrier(aco_opcode::p_memory_barrier_common);
          break;
       case nir_intrinsic_memory_barrier_buffer:
          bld.barrier(aco_opcode::p_memory_barrier_buffer);
@@ -5613,6 +5607,102 @@ void visit_load_sample_mask_in(isel_context *ctx, nir_intrinsic_instr *instr) {
    bld.vop2(aco_opcode::v_and_b32, Definition(dst), mask, get_arg(ctx, ctx->args->ac.sample_coverage));
 }
 
+void visit_emit_vertex_with_counter(isel_context *ctx, nir_intrinsic_instr *instr) {
+   Builder bld(ctx->program, ctx->block);
+
+   unsigned stream = nir_intrinsic_stream_id(instr);
+   Temp next_vertex = as_vgpr(ctx, get_ssa_temp(ctx, instr->src[0].ssa));
+   next_vertex = bld.v_mul_imm(bld.def(v1), next_vertex, 4u);
+   nir_const_value *next_vertex_cv = nir_src_as_const_value(instr->src[0]);
+
+   /* get GSVS ring */
+   Temp gsvs_ring = bld.smem(aco_opcode::s_load_dwordx4, bld.def(s4), ctx->program->private_segment_buffer, Operand(RING_GSVS_GS * 16u));
+
+   unsigned num_components =
+      ctx->program->info->gs.num_stream_output_components[stream];
+   assert(num_components);
+
+   unsigned stride = 4u * num_components * ctx->shader->info.gs.vertices_out;
+   unsigned stream_offset = 0;
+   for (unsigned i = 0; i < stream; i++) {
+      unsigned prev_stride = 4u * ctx->program->info->gs.num_stream_output_components[i] * ctx->shader->info.gs.vertices_out;
+      stream_offset += prev_stride * ctx->program->wave_size;
+   }
+
+   /* Limit on the stride field for <= GFX7. */
+   assert(stride < (1 << 14));
+
+   Temp gsvs_dwords[4];
+   for (unsigned i = 0; i < 4; i++)
+      gsvs_dwords[i] = bld.tmp(s1);
+   bld.pseudo(aco_opcode::p_split_vector,
+              Definition(gsvs_dwords[0]),
+              Definition(gsvs_dwords[1]),
+              Definition(gsvs_dwords[2]),
+              Definition(gsvs_dwords[3]),
+              gsvs_ring);
+
+   if (stream_offset) {
+      Temp stream_offset_tmp = bld.copy(bld.def(s1), Operand(stream_offset));
+
+      Temp carry = bld.tmp(s1);
+      gsvs_dwords[0] = bld.sop2(aco_opcode::s_add_u32, bld.def(s1), bld.scc(Definition(carry)), gsvs_dwords[0], stream_offset_tmp);
+      gsvs_dwords[1] = bld.sop2(aco_opcode::s_addc_u32, bld.def(s1), bld.def(s1, scc), gsvs_dwords[1], Operand(0u), bld.scc(carry));
+   }
+
+   gsvs_dwords[1] = bld.sop2(aco_opcode::s_or_b32, bld.def(s1), bld.def(s1, scc), gsvs_dwords[1], Operand(S_008F04_STRIDE(stride)));
+   gsvs_dwords[2] = bld.copy(bld.def(s1), Operand((uint32_t)ctx->program->wave_size));
+
+   gsvs_ring = bld.pseudo(aco_opcode::p_create_vector, bld.def(s4),
+                          gsvs_dwords[0], gsvs_dwords[1], gsvs_dwords[2], gsvs_dwords[3]);
+
+   unsigned offset = 0;
+   for (unsigned i = 0; i <= VARYING_SLOT_VAR31; i++) {
+      if (ctx->program->info->gs.output_streams[i] != stream)
+         continue;
+
+      for (unsigned j = 0; j < 4; j++) {
+         if (!(ctx->program->info->gs.output_usage_mask[i] & (1 << j)))
+            continue;
+
+         if (ctx->outputs.mask[i] & (1 << j)) {
+            Operand vaddr_offset = next_vertex_cv ? Operand(v1) : Operand(next_vertex);
+            unsigned const_offset = (offset + (next_vertex_cv ? next_vertex_cv->u32 : 0u)) * 4u;
+            if (const_offset >= 4096u) {
+               if (vaddr_offset.isUndefined())
+                  vaddr_offset = bld.copy(bld.def(v1), Operand(const_offset / 4096u * 4096u));
+               else
+                  vaddr_offset = bld.vadd32(bld.def(v1), Operand(const_offset / 4096u * 4096u), vaddr_offset);
+               const_offset %= 4096u;
+            }
+
+            aco_ptr<MTBUF_instruction> mtbuf{create_instruction<MTBUF_instruction>(aco_opcode::tbuffer_store_format_x, Format::MTBUF, 4, 0)};
+            mtbuf->operands[0] = vaddr_offset;
+            mtbuf->operands[1] = Operand(gsvs_ring);
+            mtbuf->operands[2] = Operand(get_arg(ctx, ctx->args->gs2vs_offset));
+            mtbuf->operands[3] = Operand(ctx->outputs.outputs[i][j]);
+            mtbuf->offen = !vaddr_offset.isUndefined();
+            mtbuf->dfmt = V_008F0C_BUF_DATA_FORMAT_32;
+            mtbuf->nfmt = V_008F0C_BUF_NUM_FORMAT_UINT;
+            mtbuf->offset = const_offset;
+            mtbuf->glc = true;
+            mtbuf->slc = true;
+            mtbuf->barrier = barrier_gs_data;
+            mtbuf->can_reorder = true;
+            bld.insert(std::move(mtbuf));
+         }
+
+         offset += ctx->shader->info.gs.vertices_out;
+      }
+
+      /* outputs for the next vertex are undefined and keeping them around can
+       * create invalid IR with control flow */
+      ctx->outputs.mask[i] = 0;
+   }
+
+   bld.sopp(aco_opcode::s_sendmsg, bld.m0(ctx->gs_wave_id), -1, sendmsg_gs(false, true, stream));
+}
+
 Temp emit_boolean_reduce(isel_context *ctx, nir_op op, unsigned cluster_size, Temp src)
 {
    Builder bld(ctx->program, ctx->block);
@@ -5863,7 +5953,9 @@ void visit_intrinsic(isel_context *ctx, nir_intrinsic_instr *instr)
             offset = bld.sop2(aco_opcode::s_lshl_b32, bld.def(s1), bld.def(s1, scc), addr, Operand(3u));
             offset = bld.sop2(aco_opcode::s_add_u32, bld.def(s1), bld.def(s1, scc), addr, Operand(sample_pos_offset));
          }
-         sample_pos = bld.smem(aco_opcode::s_load_dwordx2, bld.def(s2), private_segment_buffer, Operand(offset));
+
+         Operand off = bld.copy(bld.def(s1), Operand(offset));
+         sample_pos = bld.smem(aco_opcode::s_load_dwordx2, bld.def(s2), private_segment_buffer, off);
 
       } else if (ctx->options->chip_class >= GFX9) {
          addr = bld.vop2(aco_opcode::v_lshlrev_b32, bld.def(v1), Operand(3u), addr);
@@ -5938,7 +6030,7 @@ void visit_intrinsic(isel_context *ctx, nir_intrinsic_instr *instr)
    }
    case nir_intrinsic_load_view_index:
    case nir_intrinsic_load_layer_id: {
-      if (instr->intrinsic == nir_intrinsic_load_view_index && (ctx->stage & sw_vs)) {
+      if (instr->intrinsic == nir_intrinsic_load_view_index && (ctx->stage & (sw_vs | sw_gs))) {
          Temp dst = get_ssa_temp(ctx, &instr->dest.ssa);
          bld.copy(Definition(dst), Operand(get_arg(ctx, ctx->args->ac.view_index)));
          break;
@@ -5969,6 +6061,9 @@ void visit_intrinsic(isel_context *ctx, nir_intrinsic_instr *instr)
       break;
    case nir_intrinsic_load_input:
       visit_load_input(ctx, instr);
+      break;
+   case nir_intrinsic_load_per_vertex_input:
+      visit_load_per_vertex_input(ctx, instr);
       break;
    case nir_intrinsic_load_ubo:
       visit_load_ubo(ctx, instr);
@@ -6603,6 +6698,34 @@ void visit_intrinsic(isel_context *ctx, nir_intrinsic_instr *instr)
    case nir_intrinsic_load_draw_id: {
       Temp dst = get_ssa_temp(ctx, &instr->dest.ssa);
       bld.copy(Definition(dst), get_arg(ctx, ctx->args->ac.draw_id));
+      break;
+   }
+   case nir_intrinsic_load_invocation_id: {
+      assert(ctx->shader->info.stage == MESA_SHADER_GEOMETRY);
+      Temp dst = get_ssa_temp(ctx, &instr->dest.ssa);
+      if (ctx->options->chip_class >= GFX10)
+         bld.vop2_e64(aco_opcode::v_and_b32, Definition(dst), Operand(127u), get_arg(ctx, ctx->args->ac.gs_invocation_id));
+      else
+         bld.copy(Definition(dst), get_arg(ctx, ctx->args->ac.gs_invocation_id));
+      break;
+   }
+   case nir_intrinsic_load_primitive_id: {
+      assert(ctx->shader->info.stage == MESA_SHADER_GEOMETRY);
+      Temp dst = get_ssa_temp(ctx, &instr->dest.ssa);
+      bld.copy(Definition(dst), get_arg(ctx, ctx->args->ac.gs_prim_id));
+      break;
+   }
+   case nir_intrinsic_emit_vertex_with_counter: {
+      visit_emit_vertex_with_counter(ctx, instr);
+      break;
+   }
+   case nir_intrinsic_end_primitive_with_counter: {
+      unsigned stream = nir_intrinsic_stream_id(instr);
+      bld.sopp(aco_opcode::s_sendmsg, bld.m0(ctx->gs_wave_id), -1, sendmsg_gs(true, false, stream));
+      break;
+   }
+   case nir_intrinsic_set_vertex_count: {
+      /* unused, the HW keeps track of this for us */
       break;
    }
    default:
@@ -8095,7 +8218,7 @@ static void visit_cf_list(isel_context *ctx,
 static void export_vs_varying(isel_context *ctx, int slot, bool is_pos, int *next_pos)
 {
    int offset = ctx->program->info->vs.outinfo.vs_output_param_offset[slot];
-   uint64_t mask = ctx->vs_output.mask[slot];
+   uint64_t mask = ctx->outputs.mask[slot];
    if (!is_pos && !mask)
       return;
    if (!is_pos && offset == AC_EXP_PARAM_UNDEFINED)
@@ -8104,7 +8227,7 @@ static void export_vs_varying(isel_context *ctx, int slot, bool is_pos, int *nex
    exp->enabled_mask = mask;
    for (unsigned i = 0; i < 4; ++i) {
       if (mask & (1 << i))
-         exp->operands[i] = Operand(ctx->vs_output.outputs[slot][i]);
+         exp->operands[i] = Operand(ctx->outputs.outputs[slot][i]);
       else
          exp->operands[i] = Operand(v1);
    }
@@ -8127,23 +8250,23 @@ static void export_vs_psiz_layer_viewport(isel_context *ctx, int *next_pos)
    exp->enabled_mask = 0;
    for (unsigned i = 0; i < 4; ++i)
       exp->operands[i] = Operand(v1);
-   if (ctx->vs_output.mask[VARYING_SLOT_PSIZ]) {
-      exp->operands[0] = Operand(ctx->vs_output.outputs[VARYING_SLOT_PSIZ][0]);
+   if (ctx->outputs.mask[VARYING_SLOT_PSIZ]) {
+      exp->operands[0] = Operand(ctx->outputs.outputs[VARYING_SLOT_PSIZ][0]);
       exp->enabled_mask |= 0x1;
    }
-   if (ctx->vs_output.mask[VARYING_SLOT_LAYER]) {
-      exp->operands[2] = Operand(ctx->vs_output.outputs[VARYING_SLOT_LAYER][0]);
+   if (ctx->outputs.mask[VARYING_SLOT_LAYER]) {
+      exp->operands[2] = Operand(ctx->outputs.outputs[VARYING_SLOT_LAYER][0]);
       exp->enabled_mask |= 0x4;
    }
-   if (ctx->vs_output.mask[VARYING_SLOT_VIEWPORT]) {
+   if (ctx->outputs.mask[VARYING_SLOT_VIEWPORT]) {
       if (ctx->options->chip_class < GFX9) {
-         exp->operands[3] = Operand(ctx->vs_output.outputs[VARYING_SLOT_VIEWPORT][0]);
+         exp->operands[3] = Operand(ctx->outputs.outputs[VARYING_SLOT_VIEWPORT][0]);
          exp->enabled_mask |= 0x8;
       } else {
          Builder bld(ctx->program, ctx->block);
 
          Temp out = bld.vop2(aco_opcode::v_lshlrev_b32, bld.def(v1), Operand(16u),
-                             Operand(ctx->vs_output.outputs[VARYING_SLOT_VIEWPORT][0]));
+                             Operand(ctx->outputs.outputs[VARYING_SLOT_VIEWPORT][0]));
          if (exp->operands[2].isTemp())
             out = bld.vop2(aco_opcode::v_or_b32, bld.def(v1), Operand(out), exp->operands[2]);
 
@@ -8163,13 +8286,13 @@ static void create_vs_exports(isel_context *ctx)
    radv_vs_output_info *outinfo = &ctx->program->info->vs.outinfo;
 
    if (outinfo->export_prim_id) {
-      ctx->vs_output.mask[VARYING_SLOT_PRIMITIVE_ID] |= 0x1;
-      ctx->vs_output.outputs[VARYING_SLOT_PRIMITIVE_ID][0] = get_arg(ctx, ctx->args->vs_prim_id);
+      ctx->outputs.mask[VARYING_SLOT_PRIMITIVE_ID] |= 0x1;
+      ctx->outputs.outputs[VARYING_SLOT_PRIMITIVE_ID][0] = get_arg(ctx, ctx->args->vs_prim_id);
    }
 
    if (ctx->options->key.has_multiview_view_index) {
-      ctx->vs_output.mask[VARYING_SLOT_LAYER] |= 0x1;
-      ctx->vs_output.outputs[VARYING_SLOT_LAYER][0] = as_vgpr(ctx, get_arg(ctx, ctx->args->ac.view_index));
+      ctx->outputs.mask[VARYING_SLOT_LAYER] |= 0x1;
+      ctx->outputs.outputs[VARYING_SLOT_LAYER][0] = as_vgpr(ctx, get_arg(ctx, ctx->args->ac.view_index));
    }
 
    /* the order these position exports are created is important */
@@ -8183,7 +8306,7 @@ static void create_vs_exports(isel_context *ctx)
    if (ctx->num_clip_distances + ctx->num_cull_distances > 4)
       export_vs_varying(ctx, VARYING_SLOT_CLIP_DIST1, true, &next_pos);
 
-   if (ctx->options->key.vs_common_out.export_clip_dists) {
+   if (ctx->export_clip_dists) {
       if (ctx->num_clip_distances + ctx->num_cull_distances > 0)
          export_vs_varying(ctx, VARYING_SLOT_CLIP_DIST0, false, &next_pos);
       if (ctx->num_clip_distances + ctx->num_cull_distances > 4)
@@ -8196,6 +8319,224 @@ static void create_vs_exports(isel_context *ctx)
          continue;
 
       export_vs_varying(ctx, i, false, NULL);
+   }
+}
+
+static void export_fs_mrt_z(isel_context *ctx)
+{
+   Builder bld(ctx->program, ctx->block);
+   unsigned enabled_channels = 0;
+   bool compr = false;
+   Operand values[4];
+
+   for (unsigned i = 0; i < 4; ++i) {
+      values[i] = Operand(v1);
+   }
+
+   /* Both stencil and sample mask only need 16-bits. */
+   if (!ctx->program->info->ps.writes_z &&
+       (ctx->program->info->ps.writes_stencil ||
+        ctx->program->info->ps.writes_sample_mask)) {
+      compr = true; /* COMPR flag */
+
+      if (ctx->program->info->ps.writes_stencil) {
+         /* Stencil should be in X[23:16]. */
+         values[0] = Operand(ctx->outputs.outputs[FRAG_RESULT_STENCIL][0]);
+         values[0] = bld.vop2(aco_opcode::v_lshlrev_b32, bld.def(v1), Operand(16u), values[0]);
+         enabled_channels |= 0x3;
+      }
+
+      if (ctx->program->info->ps.writes_sample_mask) {
+         /* SampleMask should be in Y[15:0]. */
+         values[1] = Operand(ctx->outputs.outputs[FRAG_RESULT_SAMPLE_MASK][0]);
+         enabled_channels |= 0xc;
+     }
+   } else {
+      if (ctx->program->info->ps.writes_z) {
+         values[0] = Operand(ctx->outputs.outputs[FRAG_RESULT_DEPTH][0]);
+         enabled_channels |= 0x1;
+      }
+
+      if (ctx->program->info->ps.writes_stencil) {
+         values[1] = Operand(ctx->outputs.outputs[FRAG_RESULT_STENCIL][0]);
+         enabled_channels |= 0x2;
+      }
+
+      if (ctx->program->info->ps.writes_sample_mask) {
+         values[2] = Operand(ctx->outputs.outputs[FRAG_RESULT_SAMPLE_MASK][0]);
+         enabled_channels |= 0x4;
+      }
+   }
+
+   /* GFX6 (except OLAND and HAINAN) has a bug that it only looks at the X
+    * writemask component.
+    */
+   if (ctx->options->chip_class == GFX6 &&
+       ctx->options->family != CHIP_OLAND &&
+       ctx->options->family != CHIP_HAINAN) {
+            enabled_channels |= 0x1;
+   }
+
+   bld.exp(aco_opcode::exp, values[0], values[1], values[2], values[3],
+           enabled_channels, V_008DFC_SQ_EXP_MRTZ, compr);
+}
+
+static void export_fs_mrt_color(isel_context *ctx, int slot)
+{
+   Builder bld(ctx->program, ctx->block);
+   unsigned write_mask = ctx->outputs.mask[slot];
+   Operand values[4];
+
+   for (unsigned i = 0; i < 4; ++i) {
+      if (write_mask & (1 << i)) {
+         values[i] = Operand(ctx->outputs.outputs[slot][i]);
+      } else {
+         values[i] = Operand(v1);
+      }
+   }
+
+   unsigned target, col_format;
+   unsigned enabled_channels = 0;
+   aco_opcode compr_op = (aco_opcode)0;
+
+   slot -= FRAG_RESULT_DATA0;
+   target = V_008DFC_SQ_EXP_MRT + slot;
+   col_format = (ctx->options->key.fs.col_format >> (4 * slot)) & 0xf;
+
+   bool is_int8 = (ctx->options->key.fs.is_int8 >> slot) & 1;
+   bool is_int10 = (ctx->options->key.fs.is_int10 >> slot) & 1;
+
+   switch (col_format)
+   {
+   case V_028714_SPI_SHADER_ZERO:
+      enabled_channels = 0; /* writemask */
+      target = V_008DFC_SQ_EXP_NULL;
+      break;
+
+   case V_028714_SPI_SHADER_32_R:
+      enabled_channels = 1;
+      break;
+
+   case V_028714_SPI_SHADER_32_GR:
+      enabled_channels = 0x3;
+      break;
+
+   case V_028714_SPI_SHADER_32_AR:
+      if (ctx->options->chip_class >= GFX10) {
+         /* Special case: on GFX10, the outputs are different for 32_AR */
+         enabled_channels = 0x3;
+         values[1] = values[3];
+         values[3] = Operand(v1);
+      } else {
+         enabled_channels = 0x9;
+      }
+      break;
+
+   case V_028714_SPI_SHADER_FP16_ABGR:
+      enabled_channels = 0x5;
+      compr_op = aco_opcode::v_cvt_pkrtz_f16_f32;
+      break;
+
+   case V_028714_SPI_SHADER_UNORM16_ABGR:
+      enabled_channels = 0x5;
+      compr_op = aco_opcode::v_cvt_pknorm_u16_f32;
+      break;
+
+   case V_028714_SPI_SHADER_SNORM16_ABGR:
+      enabled_channels = 0x5;
+      compr_op = aco_opcode::v_cvt_pknorm_i16_f32;
+      break;
+
+   case V_028714_SPI_SHADER_UINT16_ABGR: {
+      enabled_channels = 0x5;
+      compr_op = aco_opcode::v_cvt_pk_u16_u32;
+      if (is_int8 || is_int10) {
+         /* clamp */
+         uint32_t max_rgb = is_int8 ? 255 : is_int10 ? 1023 : 0;
+         Temp max_rgb_val = bld.copy(bld.def(s1), Operand(max_rgb));
+
+         for (unsigned i = 0; i < 4; i++) {
+            if ((write_mask >> i) & 1) {
+               values[i] = bld.vop2(aco_opcode::v_min_u32, bld.def(v1),
+                                    i == 3 && is_int10 ? Operand(3u) : Operand(max_rgb_val),
+                                    values[i]);
+            }
+         }
+      }
+      break;
+   }
+
+   case V_028714_SPI_SHADER_SINT16_ABGR:
+      enabled_channels = 0x5;
+      compr_op = aco_opcode::v_cvt_pk_i16_i32;
+      if (is_int8 || is_int10) {
+         /* clamp */
+         uint32_t max_rgb = is_int8 ? 127 : is_int10 ? 511 : 0;
+         uint32_t min_rgb = is_int8 ? -128 :is_int10 ? -512 : 0;
+         Temp max_rgb_val = bld.copy(bld.def(s1), Operand(max_rgb));
+         Temp min_rgb_val = bld.copy(bld.def(s1), Operand(min_rgb));
+
+         for (unsigned i = 0; i < 4; i++) {
+            if ((write_mask >> i) & 1) {
+               values[i] = bld.vop2(aco_opcode::v_min_i32, bld.def(v1),
+                                    i == 3 && is_int10 ? Operand(1u) : Operand(max_rgb_val),
+                                    values[i]);
+               values[i] = bld.vop2(aco_opcode::v_max_i32, bld.def(v1),
+                                    i == 3 && is_int10 ? Operand(-2u) : Operand(min_rgb_val),
+                                    values[i]);
+            }
+         }
+      }
+      break;
+
+   case V_028714_SPI_SHADER_32_ABGR:
+      enabled_channels = 0xF;
+      break;
+
+   default:
+      break;
+   }
+
+   if (target == V_008DFC_SQ_EXP_NULL)
+      return;
+
+   if ((bool) compr_op) {
+      for (int i = 0; i < 2; i++) {
+         /* check if at least one of the values to be compressed is enabled */
+         unsigned enabled = (write_mask >> (i*2) | write_mask >> (i*2+1)) & 0x1;
+         if (enabled) {
+            enabled_channels |= enabled << (i*2);
+            values[i] = bld.vop3(compr_op, bld.def(v1),
+                                 values[i*2].isUndefined() ? Operand(0u) : values[i*2],
+                                 values[i*2+1].isUndefined() ? Operand(0u): values[i*2+1]);
+         } else {
+            values[i] = Operand(v1);
+         }
+      }
+      values[2] = Operand(v1);
+      values[3] = Operand(v1);
+   } else {
+      for (int i = 0; i < 4; i++)
+         values[i] = enabled_channels & (1 << i) ? values[i] : Operand(v1);
+   }
+
+   bld.exp(aco_opcode::exp, values[0], values[1], values[2], values[3],
+           enabled_channels, target, (bool) compr_op);
+}
+
+static void create_fs_exports(isel_context *ctx)
+{
+   /* Export depth, stencil and sample mask. */
+   if (ctx->outputs.mask[FRAG_RESULT_DEPTH] ||
+       ctx->outputs.mask[FRAG_RESULT_STENCIL] ||
+       ctx->outputs.mask[FRAG_RESULT_SAMPLE_MASK]) {
+      export_fs_mrt_z(ctx);
+   }
+
+   /* Export all color render targets. */
+   for (unsigned i = FRAG_RESULT_DATA0; i < FRAG_RESULT_DATA7 + 1; ++i) {
+      if (ctx->outputs.mask[i])
+         export_fs_mrt_color(ctx, i);
    }
 }
 
@@ -8217,9 +8558,9 @@ static void emit_stream_output(isel_context *ctx,
 
    Temp out[4];
    bool all_undef = true;
-   assert(ctx->stage == vertex_vs);
+   assert(ctx->stage == vertex_vs || ctx->stage == gs_copy_vs);
    for (unsigned i = 0; i < num_comps; i++) {
-      out[i] = ctx->vs_output.outputs[loc][start + i];
+      out[i] = ctx->outputs.outputs[loc][start + i];
       all_undef = all_undef && !out[i].id();
    }
    if (all_undef)
@@ -8239,7 +8580,7 @@ static void emit_stream_output(isel_context *ctx,
       Temp write_data = {ctx->program->allocateId(), RegClass(RegType::vgpr, count)};
       aco_ptr<Pseudo_instruction> vec{create_instruction<Pseudo_instruction>(aco_opcode::p_create_vector, Format::PSEUDO, count, 1)};
       for (int i = 0; i < count; ++i)
-         vec->operands[i] = (ctx->vs_output.mask[loc] & 1 << (start + i)) ? Operand(out[start + i]) : Operand(0u);
+         vec->operands[i] = (ctx->outputs.mask[loc] & 1 << (start + i)) ? Operand(out[start + i]) : Operand(0u);
       vec->definitions[0] = Definition(write_data);
       ctx->block->instructions.emplace_back(std::move(vec));
 
@@ -8293,7 +8634,8 @@ static void emit_streamout(isel_context *ctx, unsigned stream)
       if (!stride)
          continue;
 
-      so_buffers[i] = bld.smem(aco_opcode::s_load_dwordx4, bld.def(s4), buf_ptr, Operand(i * 16u));
+      Operand off = bld.copy(bld.def(s1), Operand(i * 16u));
+      so_buffers[i] = bld.smem(aco_opcode::s_load_dwordx4, bld.def(s4), buf_ptr, off);
    }
 
    Temp so_vtx_count = bld.sop2(aco_opcode::s_bfe_u32, bld.def(s1), bld.def(s1, scc),
@@ -8453,13 +8795,24 @@ void setup_fp_mode(isel_context *ctx, nir_shader *shader)
    ctx->block->fp_mode = program->next_fp_mode;
 }
 
+void cleanup_cfg(Program *program)
+{
+   /* create linear_succs/logical_succs */
+   for (Block& BB : program->blocks) {
+      for (unsigned idx : BB.linear_preds)
+         program->blocks[idx].linear_succs.emplace_back(BB.index);
+      for (unsigned idx : BB.logical_preds)
+         program->blocks[idx].logical_succs.emplace_back(BB.index);
+   }
+}
+
 void select_program(Program *program,
                     unsigned shader_count,
                     struct nir_shader *const *shaders,
                     ac_shader_config* config,
                     struct radv_shader_args *args)
 {
-   isel_context ctx = setup_isel_context(program, shader_count, shaders, config, args);
+   isel_context ctx = setup_isel_context(program, shader_count, shaders, config, args, false);
 
    for (unsigned i = 0; i < shader_count; i++) {
       nir_shader *nir = shaders[i];
@@ -8477,7 +8830,7 @@ void select_program(Program *program,
       if_context ic;
       if (shader_count >= 2) {
          Builder bld(ctx.program, ctx.block);
-         Temp count = bld.sop2(aco_opcode::s_bfe_u32, bld.def(s1), bld.def(s1, scc), ctx.merged_wave_info, Operand((8u << 16) | (i * 8u)));
+         Temp count = bld.sop2(aco_opcode::s_bfe_u32, bld.def(s1), bld.def(s1, scc), get_arg(&ctx, args->merged_wave_info), Operand((8u << 16) | (i * 8u)));
          Temp thread_id = emit_mbcnt(&ctx, bld.def(v1));
          Temp cond = bld.vopc(aco_opcode::v_cmp_gt_u32, bld.hint_vcc(bld.def(bld.lm)), count, thread_id);
 
@@ -8486,9 +8839,13 @@ void select_program(Program *program,
 
       if (i) {
          Builder bld(ctx.program, ctx.block);
-         bld.barrier(aco_opcode::p_memory_barrier_shared); //TODO: different barriers are needed for different stages
+         assert(ctx.stage == vertex_geometry_gs);
+         bld.barrier(aco_opcode::p_memory_barrier_shared);
          bld.sopp(aco_opcode::s_barrier);
-      }
+
+         ctx.gs_wave_id = bld.sop2(aco_opcode::s_bfe_u32, bld.def(s1, m0), bld.def(s1, scc), get_arg(&ctx, args->merged_wave_info), Operand((8u << 16) | 16u));
+      } else if (ctx.stage == geometry_gs)
+         ctx.gs_wave_id = get_arg(&ctx, args->gs_wave_id);
 
       if (ctx.stage == fragment_fs)
          handle_bc_optimize(&ctx);
@@ -8496,11 +8853,19 @@ void select_program(Program *program,
       nir_function_impl *func = nir_shader_get_entrypoint(nir);
       visit_cf_list(&ctx, &func->body);
 
-      if (ctx.program->info->so.num_outputs/*&& !ctx->is_gs_copy_shader */)
+      if (ctx.program->info->so.num_outputs && ctx.stage == vertex_vs)
          emit_streamout(&ctx, 0);
 
-      if (ctx.stage == vertex_vs)
+      if (ctx.stage == vertex_vs) {
          create_vs_exports(&ctx);
+      } else if (nir->info.stage == MESA_SHADER_GEOMETRY) {
+         Builder bld(ctx.program, ctx.block);
+         bld.barrier(aco_opcode::p_memory_barrier_gs_data);
+         bld.sopp(aco_opcode::s_sendmsg, bld.m0(ctx.gs_wave_id), -1, sendmsg_gs_done(false, false, 0));
+      }
+
+      if (ctx.stage == fragment_fs)
+         create_fs_exports(&ctx);
 
       if (shader_count >= 2) {
          begin_divergent_if_else(&ctx, &ic);
@@ -8513,18 +8878,168 @@ void select_program(Program *program,
    program->config->float_mode = program->blocks[0].fp_mode.val;
 
    append_logical_end(ctx.block);
-   ctx.block->kind |= block_kind_uniform;
+   ctx.block->kind |= block_kind_uniform | block_kind_export_end;
    Builder bld(ctx.program, ctx.block);
    if (ctx.program->wb_smem_l1_on_end)
       bld.smem(aco_opcode::s_dcache_wb, false);
    bld.sopp(aco_opcode::s_endpgm);
 
-   /* cleanup CFG */
-   for (Block& BB : program->blocks) {
-      for (unsigned idx : BB.linear_preds)
-         program->blocks[idx].linear_succs.emplace_back(BB.index);
-      for (unsigned idx : BB.logical_preds)
-         program->blocks[idx].logical_succs.emplace_back(BB.index);
+   cleanup_cfg(program);
+}
+
+void select_gs_copy_shader(Program *program, struct nir_shader *gs_shader,
+                           ac_shader_config* config,
+                           struct radv_shader_args *args)
+{
+   isel_context ctx = setup_isel_context(program, 1, &gs_shader, config, args, true);
+
+   program->next_fp_mode.preserve_signed_zero_inf_nan32 = false;
+   program->next_fp_mode.preserve_signed_zero_inf_nan16_64 = false;
+   program->next_fp_mode.must_flush_denorms32 = false;
+   program->next_fp_mode.must_flush_denorms16_64 = false;
+   program->next_fp_mode.care_about_round32 = false;
+   program->next_fp_mode.care_about_round16_64 = false;
+   program->next_fp_mode.denorm16_64 = fp_denorm_keep;
+   program->next_fp_mode.denorm32 = 0;
+   program->next_fp_mode.round32 = fp_round_ne;
+   program->next_fp_mode.round16_64 = fp_round_ne;
+   ctx.block->fp_mode = program->next_fp_mode;
+
+   add_startpgm(&ctx);
+   append_logical_start(ctx.block);
+
+   Builder bld(ctx.program, ctx.block);
+
+   Temp gsvs_ring = bld.smem(aco_opcode::s_load_dwordx4, bld.def(s4), program->private_segment_buffer, Operand(RING_GSVS_VS * 16u));
+
+   Operand stream_id(0u);
+   if (args->shader_info->so.num_outputs)
+      stream_id = bld.sop2(aco_opcode::s_bfe_u32, bld.def(s1), bld.def(s1, scc),
+                           get_arg(&ctx, ctx.args->streamout_config), Operand(0x20018u));
+
+   Temp vtx_offset = bld.vop2(aco_opcode::v_lshlrev_b32, bld.def(v1), Operand(2u), get_arg(&ctx, ctx.args->ac.vertex_id));
+
+   std::stack<Block> endif_blocks;
+
+   for (unsigned stream = 0; stream < 4; stream++) {
+      if (stream_id.isConstant() && stream != stream_id.constantValue())
+         continue;
+
+      unsigned num_components = args->shader_info->gs.num_stream_output_components[stream];
+      if (stream > 0 && (!num_components || !args->shader_info->so.num_outputs))
+         continue;
+
+      memset(ctx.outputs.mask, 0, sizeof(ctx.outputs.mask));
+
+      unsigned BB_if_idx = ctx.block->index;
+      Block BB_endif = Block();
+      if (!stream_id.isConstant()) {
+         /* begin IF */
+         Temp cond = bld.sopc(aco_opcode::s_cmp_eq_u32, bld.def(s1, scc), stream_id, Operand(stream));
+         append_logical_end(ctx.block);
+         ctx.block->kind |= block_kind_uniform;
+         bld.branch(aco_opcode::p_cbranch_z, cond);
+
+         BB_endif.kind |= ctx.block->kind & block_kind_top_level;
+
+         ctx.block = ctx.program->create_and_insert_block();
+         add_edge(BB_if_idx, ctx.block);
+         bld.reset(ctx.block);
+         append_logical_start(ctx.block);
+      }
+
+      unsigned offset = 0;
+      for (unsigned i = 0; i <= VARYING_SLOT_VAR31; ++i) {
+         if (args->shader_info->gs.output_streams[i] != stream)
+            continue;
+
+         unsigned output_usage_mask = args->shader_info->gs.output_usage_mask[i];
+         unsigned length = util_last_bit(output_usage_mask);
+         for (unsigned j = 0; j < length; ++j) {
+            if (!(output_usage_mask & (1 << j)))
+               continue;
+
+            unsigned const_offset = offset * args->shader_info->gs.vertices_out * 16 * 4;
+            Temp voffset = vtx_offset;
+            if (const_offset >= 4096u) {
+               voffset = bld.vadd32(bld.def(v1), Operand(const_offset / 4096u * 4096u), voffset);
+               const_offset %= 4096u;
+            }
+
+            aco_ptr<MUBUF_instruction> mubuf{create_instruction<MUBUF_instruction>(aco_opcode::buffer_load_dword, Format::MUBUF, 3, 1)};
+            mubuf->definitions[0] = bld.def(v1);
+            mubuf->operands[0] = Operand(voffset);
+            mubuf->operands[1] = Operand(gsvs_ring);
+            mubuf->operands[2] = Operand(0u);
+            mubuf->offen = true;
+            mubuf->offset = const_offset;
+            mubuf->glc = true;
+            mubuf->slc = true;
+            mubuf->dlc = args->options->chip_class >= GFX10;
+            mubuf->barrier = barrier_none;
+            mubuf->can_reorder = true;
+
+            ctx.outputs.mask[i] |= 1 << j;
+            ctx.outputs.outputs[i][j] = mubuf->definitions[0].getTemp();
+
+            bld.insert(std::move(mubuf));
+
+            offset++;
+         }
+      }
+
+      if (args->shader_info->so.num_outputs) {
+         emit_streamout(&ctx, stream);
+         bld.reset(ctx.block);
+      }
+
+      if (stream == 0) {
+         create_vs_exports(&ctx);
+         ctx.block->kind |= block_kind_export_end;
+      }
+
+      if (!stream_id.isConstant()) {
+         append_logical_end(ctx.block);
+
+         /* branch from then block to endif block */
+         bld.branch(aco_opcode::p_branch);
+         add_edge(ctx.block->index, &BB_endif);
+         ctx.block->kind |= block_kind_uniform;
+
+         /* emit else block */
+         ctx.block = ctx.program->create_and_insert_block();
+         add_edge(BB_if_idx, ctx.block);
+         bld.reset(ctx.block);
+         append_logical_start(ctx.block);
+
+         endif_blocks.push(std::move(BB_endif));
+      }
    }
+
+   while (!endif_blocks.empty()) {
+      Block BB_endif = std::move(endif_blocks.top());
+      endif_blocks.pop();
+
+      Block *BB_else = ctx.block;
+
+      append_logical_end(BB_else);
+      /* branch from else block to endif block */
+      bld.branch(aco_opcode::p_branch);
+      add_edge(BB_else->index, &BB_endif);
+      BB_else->kind |= block_kind_uniform;
+
+      /** emit endif merge block */
+      ctx.block = program->insert_block(std::move(BB_endif));
+      bld.reset(ctx.block);
+      append_logical_start(ctx.block);
+   }
+
+   program->config->float_mode = program->blocks[0].fp_mode.val;
+
+   append_logical_end(ctx.block);
+   ctx.block->kind |= block_kind_uniform;
+   bld.sopp(aco_opcode::s_endpgm);
+
+   cleanup_cfg(program);
 }
 }
