@@ -34,8 +34,6 @@
 #include "vk_util.h"
 #include "util/u_math.h"
 
-#include "common/gen_aux_map.h"
-
 #include "vk_format_info.h"
 
 static isl_surf_usage_flags_t
@@ -251,7 +249,7 @@ add_aux_state_tracking_buffer(struct anv_image *image,
                               const struct anv_device *device)
 {
    assert(image && device);
-   assert(image->planes[plane].aux_surface.isl.size_B > 0 &&
+   assert(image->planes[plane].aux_usage != ISL_AUX_USAGE_NONE &&
           image->aspects & VK_IMAGE_ASPECT_ANY_COLOR_BIT_ANV);
 
    /* Compressed images must be tiled and therefore everything should be 4K
@@ -438,8 +436,8 @@ make_surface(struct anv_device *dev,
                                     &image->planes[plane].surface.isl,
                                     &image->planes[plane].aux_surface.isl);
          assert(ok);
-         add_surface(image, &image->planes[plane].aux_surface, plane);
          image->planes[plane].aux_usage = ISL_AUX_USAGE_HIZ;
+         add_surface(image, &image->planes[plane].aux_surface, plane);
       }
    } else if ((aspect & VK_IMAGE_ASPECT_ANY_COLOR_BIT_ANV) && image->samples == 1) {
       /* TODO: Disallow compression with :
@@ -499,9 +497,13 @@ make_surface(struct anv_device *dev,
                              "Gen12+. Not allocating a CCS buffer.");
                image->planes[plane].aux_surface.isl.size_B = 0;
                return VK_SUCCESS;
+            } else {
+               image->planes[plane].aux_usage = ISL_AUX_USAGE_CCS_D;
             }
 
-            add_surface(image, &image->planes[plane].aux_surface, plane);
+            if (!dev->physical->has_implicit_ccs)
+               add_surface(image, &image->planes[plane].aux_surface, plane);
+
             add_aux_state_tracking_buffer(image, plane, dev);
          }
       }
@@ -512,9 +514,9 @@ make_surface(struct anv_device *dev,
                                  &image->planes[plane].surface.isl,
                                  &image->planes[plane].aux_surface.isl);
       if (ok) {
+         image->planes[plane].aux_usage = ISL_AUX_USAGE_MCS;
          add_surface(image, &image->planes[plane].aux_surface, plane);
          add_aux_state_tracking_buffer(image, plane, dev);
-         image->planes[plane].aux_usage = ISL_AUX_USAGE_MCS;
       }
    }
 
@@ -530,7 +532,7 @@ make_surface(struct anv_device *dev,
             image->planes[plane].surface.isl.size_B)) <=
           (image->planes[plane].offset + image->planes[plane].size));
 
-   if (image->planes[plane].aux_surface.isl.size_B) {
+   if (image->planes[plane].aux_usage != ISL_AUX_USAGE_NONE) {
       /* assert(image->planes[plane].fast_clear_state_offset == */
       /*        (image->planes[plane].aux_surface.offset + image->planes[plane].aux_surface.isl.size_B)); */
       assert(image->planes[plane].fast_clear_state_offset <
@@ -803,12 +805,6 @@ anv_DestroyImage(VkDevice _device, VkImage _image,
       return;
 
    for (uint32_t p = 0; p < image->n_planes; ++p) {
-      if (anv_image_plane_uses_aux_map(device, image, p) &&
-          image->planes[p].address.bo) {
-         gen_aux_map_unmap_range(device->aux_map_ctx,
-                                 image->planes[p].aux_map_surface_address,
-                                 image->planes[p].surface.isl.size_B);
-      }
       if (image->planes[p].bo_is_owned) {
          assert(image->planes[p].address.bo != NULL);
          anv_device_release_bo(device, image->planes[p].address.bo);
@@ -827,12 +823,6 @@ static void anv_image_bind_memory_plane(struct anv_device *device,
    assert(!image->planes[plane].bo_is_owned);
 
    if (!memory) {
-      if (anv_image_plane_uses_aux_map(device, image, plane) &&
-          image->planes[plane].address.bo) {
-         gen_aux_map_unmap_range(device->aux_map_ctx,
-                                 image->planes[plane].aux_map_surface_address,
-                                 image->planes[plane].surface.isl.size_B);
-      }
       image->planes[plane].address = ANV_NULL_ADDRESS;
       return;
    }
@@ -842,19 +832,11 @@ static void anv_image_bind_memory_plane(struct anv_device *device,
       .offset = memory_offset,
    };
 
-   if (anv_image_plane_uses_aux_map(device, image, plane)) {
-      image->planes[plane].aux_map_surface_address =
-         anv_address_physical(
-            anv_address_add(image->planes[plane].address,
-                            image->planes[plane].surface.offset));
-
-      gen_aux_map_add_image(device->aux_map_ctx,
-                            &image->planes[plane].surface.isl,
-                            image->planes[plane].aux_map_surface_address,
-                            anv_address_physical(
-                               anv_address_add(image->planes[plane].address,
-                                               image->planes[plane].aux_surface.offset)));
-   }
+   /* If we're on a platform that uses implicit CCS and our buffer does not
+    * have any implicit CCS data, disable compression on that image.
+    */
+   if (device->physical->has_implicit_ccs && !memory->bo->has_implicit_ccs)
+      image->planes[plane].aux_usage = ISL_AUX_USAGE_NONE;
 }
 
 /* We are binding AHardwareBuffer. Get a description, resolve the
@@ -1086,10 +1068,9 @@ VkResult anv_GetImageDrmFormatModifierPropertiesEXT(
 }
 
 /**
- * This function determines the optimal buffer to use for a given
- * VkImageLayout and other pieces of information needed to make that
- * determination. This does not determine the optimal buffer to use
- * during a resolve operation.
+ * This function returns the assumed isl_aux_state for a given VkImageLayout.
+ * Because Vulkan image layouts don't map directly to isl_aux_state enums, the
+ * returned enum is the assumed worst case.
  *
  * @param devinfo The device information of the Intel GPU.
  * @param image The image that may contain a collection of buffers.
@@ -1098,8 +1079,8 @@ VkResult anv_GetImageDrmFormatModifierPropertiesEXT(
  *
  * @return The primary buffer that should be used for the given layout.
  */
-enum isl_aux_usage
-anv_layout_to_aux_usage(const struct gen_device_info * const devinfo,
+enum isl_aux_state
+anv_layout_to_aux_state(const struct gen_device_info * const devinfo,
                         const struct anv_image * const image,
                         const VkImageAspectFlagBits aspect,
                         const VkImageLayout layout)
@@ -1119,11 +1100,8 @@ anv_layout_to_aux_usage(const struct gen_device_info * const devinfo,
 
    uint32_t plane = anv_image_aspect_to_plane(image->aspects, aspect);
 
-   /* If there is no auxiliary surface allocated, we must use the one and only
-    * main buffer.
-    */
-   if (image->planes[plane].aux_surface.isl.size_B == 0)
-      return ISL_AUX_USAGE_NONE;
+   /* If we don't have an aux buffer then aux state makes no sense */
+   assert(image->planes[plane].aux_usage != ISL_AUX_USAGE_NONE);
 
    /* All images that use an auxiliary surface are required to be tiled. */
    assert(image->planes[plane].surface.isl.tiling != ISL_TILING_LINEAR);
@@ -1132,8 +1110,7 @@ anv_layout_to_aux_usage(const struct gen_device_info * const devinfo,
    assert(aspect != VK_IMAGE_ASPECT_STENCIL_BIT);
 
    switch (layout) {
-
-   /* Invalid Layouts */
+   /* Invalid layouts */
    case VK_IMAGE_LAYOUT_RANGE_SIZE:
    case VK_IMAGE_LAYOUT_MAX_ENUM:
       unreachable("Invalid image layout.");
@@ -1146,11 +1123,9 @@ anv_layout_to_aux_usage(const struct gen_device_info * const devinfo,
     */
    case VK_IMAGE_LAYOUT_UNDEFINED:
    case VK_IMAGE_LAYOUT_PREINITIALIZED:
-      return ISL_AUX_USAGE_NONE;
+      return ISL_AUX_STATE_AUX_INVALID;
 
-
-   /* Transfer Layouts
-    */
+   /* Transfer layouts */
    case VK_IMAGE_LAYOUT_GENERAL:
    case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
       if (aspect == VK_IMAGE_ASPECT_DEPTH_BIT) {
@@ -1159,14 +1134,14 @@ anv_layout_to_aux_usage(const struct gen_device_info * const devinfo,
           * use the main buffer for this layout. TODO: Enable HiZ in BLORP.
           */
          assert(image->planes[plane].aux_usage == ISL_AUX_USAGE_HIZ);
-         return ISL_AUX_USAGE_NONE;
+         return ISL_AUX_STATE_AUX_INVALID;
+      } else if (image->planes[plane].aux_usage == ISL_AUX_USAGE_CCS_D) {
+         return ISL_AUX_STATE_PASS_THROUGH;
       } else {
-         assert(image->aspects & VK_IMAGE_ASPECT_ANY_COLOR_BIT_ANV);
-         return image->planes[plane].aux_usage;
+         return ISL_AUX_STATE_COMPRESSED_CLEAR;
       }
 
-
-   /* Sampling Layouts */
+   /* Sampling layouts */
    case VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL_KHR:
    case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
    case VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL:
@@ -1176,16 +1151,17 @@ anv_layout_to_aux_usage(const struct gen_device_info * const devinfo,
    case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
       if (aspect == VK_IMAGE_ASPECT_DEPTH_BIT) {
          if (anv_can_sample_with_hiz(devinfo, image))
-            return ISL_AUX_USAGE_HIZ;
+            return ISL_AUX_STATE_COMPRESSED_CLEAR;
          else
-            return ISL_AUX_USAGE_NONE;
+            return ISL_AUX_STATE_RESOLVED;
+      } else if (image->planes[plane].aux_usage == ISL_AUX_USAGE_CCS_D) {
+         return ISL_AUX_STATE_PASS_THROUGH;
       } else {
-         return image->planes[plane].aux_usage;
+         return ISL_AUX_STATE_COMPRESSED_CLEAR;
       }
 
    case VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL_KHR:
-      return ISL_AUX_USAGE_NONE;
-
+      return ISL_AUX_STATE_RESOLVED;
 
    case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR: {
       assert(image->aspects == VK_IMAGE_ASPECT_COLOR_BIT);
@@ -1199,28 +1175,36 @@ anv_layout_to_aux_usage(const struct gen_device_info * const devinfo,
        */
       const struct isl_drm_modifier_info *mod_info =
          isl_drm_modifier_get_info(image->drm_format_mod);
-      return mod_info ? mod_info->aux_usage : ISL_AUX_USAGE_NONE;
+      if (mod_info && mod_info->aux_usage != ISL_AUX_USAGE_NONE) {
+         assert(mod_info->aux_usage == ISL_AUX_USAGE_CCS_E);
+         assert(image->planes[plane].aux_usage == ISL_AUX_USAGE_CCS_E);
+         /* We do not yet support any modifiers which support clear color so
+          * we just always return COMPRESSED_NO_CLEAR.  One day, this will
+          * change.
+          */
+         assert(!mod_info->supports_clear_color);
+         return ISL_AUX_STATE_COMPRESSED_NO_CLEAR;
+      } else {
+         return ISL_AUX_STATE_PASS_THROUGH;
+      }
    }
 
-
-   /* Rendering Layouts */
+   /* Rendering layouts */
    case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
       assert(aspect & VK_IMAGE_ASPECT_ANY_COLOR_BIT_ANV);
       /* fall-through */
    case VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL_KHR:
-      if (image->planes[plane].aux_usage == ISL_AUX_USAGE_NONE) {
-         assert(image->samples == 1);
-         return ISL_AUX_USAGE_CCS_D;
+      if (image->planes[plane].aux_usage == ISL_AUX_USAGE_CCS_D) {
+         return ISL_AUX_STATE_PARTIAL_CLEAR;
       } else {
-         assert(image->planes[plane].aux_usage != ISL_AUX_USAGE_CCS_D);
-         return image->planes[plane].aux_usage;
+         return ISL_AUX_STATE_COMPRESSED_CLEAR;
       }
 
    case VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL_KHR:
    case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
    case VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL:
       assert(aspect == VK_IMAGE_ASPECT_DEPTH_BIT);
-      return ISL_AUX_USAGE_HIZ;
+      return ISL_AUX_STATE_COMPRESSED_CLEAR;
 
    case VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR:
       unreachable("VK_KHR_shared_presentable_image is unsupported");
@@ -1232,10 +1216,127 @@ anv_layout_to_aux_usage(const struct gen_device_info * const devinfo,
       unreachable("VK_NV_shading_rate_image is unsupported");
    }
 
-   /* If the layout isn't recognized in the exhaustive switch above, the
-    * VkImageLayout value is not defined in vulkan.h.
-    */
    unreachable("layout is not a VkImageLayout enumeration member.");
+}
+
+ASSERTED static bool
+vk_image_layout_is_read_only(VkImageLayout layout,
+                             VkImageAspectFlagBits aspect)
+{
+   assert(util_bitcount(aspect) == 1);
+
+   switch (layout) {
+   case VK_IMAGE_LAYOUT_UNDEFINED:
+   case VK_IMAGE_LAYOUT_PREINITIALIZED:
+      return true; /* These are only used for layout transitions */
+
+   case VK_IMAGE_LAYOUT_GENERAL:
+   case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+   case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+   case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+   case VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR:
+   case VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL_KHR:
+   case VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL_KHR:
+      return false;
+
+   case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
+   case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+   case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+   case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
+   case VK_IMAGE_LAYOUT_SHADING_RATE_OPTIMAL_NV:
+   case VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT:
+   case VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL_KHR:
+   case VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL_KHR:
+      return true;
+
+   case VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL:
+      return aspect == VK_IMAGE_ASPECT_DEPTH_BIT;
+
+   case VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL:
+      return aspect == VK_IMAGE_ASPECT_STENCIL_BIT;
+
+   case VK_IMAGE_LAYOUT_RANGE_SIZE:
+   case VK_IMAGE_LAYOUT_MAX_ENUM:
+      unreachable("Invalid image layout.");
+   }
+
+   unreachable("Invalid image layout.");
+}
+
+/**
+ * This function determines the optimal buffer to use for a given
+ * VkImageLayout and other pieces of information needed to make that
+ * determination. This does not determine the optimal buffer to use
+ * during a resolve operation.
+ *
+ * @param devinfo The device information of the Intel GPU.
+ * @param image The image that may contain a collection of buffers.
+ * @param aspect The aspect of the image to be accessed.
+ * @param usage The usage which describes how the image will be accessed.
+ * @param layout The current layout of the image aspect(s).
+ *
+ * @return The primary buffer that should be used for the given layout.
+ */
+enum isl_aux_usage
+anv_layout_to_aux_usage(const struct gen_device_info * const devinfo,
+                        const struct anv_image * const image,
+                        const VkImageAspectFlagBits aspect,
+                        const VkImageUsageFlagBits usage,
+                        const VkImageLayout layout)
+{
+   uint32_t plane = anv_image_aspect_to_plane(image->aspects, aspect);
+
+   /* If there is no auxiliary surface allocated, we must use the one and only
+    * main buffer.
+    */
+   if (image->planes[plane].aux_usage == ISL_AUX_USAGE_NONE)
+      return ISL_AUX_USAGE_NONE;
+
+   enum isl_aux_state aux_state =
+      anv_layout_to_aux_state(devinfo, image, aspect, layout);
+
+   switch (aux_state) {
+   case ISL_AUX_STATE_CLEAR:
+      unreachable("We never use this state");
+
+   case ISL_AUX_STATE_PARTIAL_CLEAR:
+      assert(image->aspects & VK_IMAGE_ASPECT_ANY_COLOR_BIT_ANV);
+      assert(image->planes[plane].aux_usage == ISL_AUX_USAGE_CCS_D);
+      assert(image->samples == 1);
+      return ISL_AUX_USAGE_CCS_D;
+
+   case ISL_AUX_STATE_COMPRESSED_CLEAR:
+   case ISL_AUX_STATE_COMPRESSED_NO_CLEAR:
+      if (aspect == VK_IMAGE_ASPECT_DEPTH_BIT) {
+         return ISL_AUX_USAGE_HIZ;
+      } else {
+         assert(image->planes[plane].aux_usage != ISL_AUX_USAGE_NONE);
+         return image->planes[plane].aux_usage;
+      }
+
+   case ISL_AUX_STATE_RESOLVED:
+      /* We can only use RESOLVED in read-only layouts because any write will
+       * either land us in AUX_INVALID or COMPRESSED_NO_CLEAR.  We can do
+       * writes in PASS_THROUGH without destroying it so that is allowed.
+       */
+      assert(vk_image_layout_is_read_only(layout, aspect));
+      assert(util_is_power_of_two_or_zero(usage));
+      if (usage == VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) {
+         /* If we have valid HiZ data and are using the image as a read-only
+          * depth/stencil attachment, we should enable HiZ so that we can get
+          * faster depth testing.
+          */
+         return ISL_AUX_USAGE_HIZ;
+      } else {
+         return ISL_AUX_USAGE_NONE;
+      }
+
+   case ISL_AUX_STATE_PASS_THROUGH:
+   case ISL_AUX_STATE_AUX_INVALID:
+      return ISL_AUX_USAGE_NONE;
+   }
+
+   unreachable("Invalid isl_aux_state");
 }
 
 /**
@@ -1245,6 +1346,7 @@ anv_layout_to_aux_usage(const struct gen_device_info * const devinfo,
  * @param devinfo The device information of the Intel GPU.
  * @param image The image that may contain a collection of buffers.
  * @param aspect The aspect of the image to be accessed.
+ * @param usage The usage which describes how the image will be accessed.
  * @param layout The current layout of the image aspect(s).
  */
 enum anv_fast_clear_type
@@ -1256,33 +1358,11 @@ anv_layout_to_fast_clear_type(const struct gen_device_info * const devinfo,
    if (INTEL_DEBUG & DEBUG_NO_FAST_CLEAR)
       return ANV_FAST_CLEAR_NONE;
 
-   /* The aspect must be exactly one of the image aspects. */
-   assert(util_bitcount(aspect) == 1 && (aspect & image->aspects));
-
    uint32_t plane = anv_image_aspect_to_plane(image->aspects, aspect);
 
    /* If there is no auxiliary surface allocated, there are no fast-clears */
-   if (image->planes[plane].aux_surface.isl.size_B == 0)
+   if (image->planes[plane].aux_usage == ISL_AUX_USAGE_NONE)
       return ANV_FAST_CLEAR_NONE;
-
-   /* All images that use an auxiliary surface are required to be tiled. */
-   assert(image->planes[plane].surface.isl.tiling != ISL_TILING_LINEAR);
-
-   /* Stencil has no aux */
-   assert(aspect != VK_IMAGE_ASPECT_STENCIL_BIT);
-
-   if (aspect == VK_IMAGE_ASPECT_DEPTH_BIT) {
-      /* For depth images (with HiZ), the layout supports fast-clears if and
-       * only if it supports HiZ.  However, we only support fast-clears to the
-       * default depth value.
-       */
-      enum isl_aux_usage aux_usage =
-         anv_layout_to_aux_usage(devinfo, image, aspect, layout);
-      return aux_usage == ISL_AUX_USAGE_HIZ ?
-             ANV_FAST_CLEAR_DEFAULT_VALUE : ANV_FAST_CLEAR_NONE;
-   }
-
-   assert(image->aspects & VK_IMAGE_ASPECT_ANY_COLOR_BIT_ANV);
 
    /* We don't support MSAA fast-clears on Ivybridge or Bay Trail because they
     * lack the MI ALU which we need to determine the predicates.
@@ -1290,35 +1370,43 @@ anv_layout_to_fast_clear_type(const struct gen_device_info * const devinfo,
    if (devinfo->gen == 7 && !devinfo->is_haswell && image->samples > 1)
       return ANV_FAST_CLEAR_NONE;
 
-   switch (layout) {
-   case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
-      return ANV_FAST_CLEAR_ANY;
+   enum isl_aux_state aux_state =
+      anv_layout_to_aux_state(devinfo, image, aspect, layout);
 
-   case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR: {
-      assert(image->aspects == VK_IMAGE_ASPECT_COLOR_BIT);
-#ifndef NDEBUG
-      /* We do not yet support any modifiers which support clear color so we
-       * just always return NONE.  One day, this will change.
-       */
-      const struct isl_drm_modifier_info *mod_info =
-         isl_drm_modifier_get_info(image->drm_format_mod);
-      assert(!mod_info || !mod_info->supports_clear_color);
-#endif
+   switch (aux_state) {
+   case ISL_AUX_STATE_CLEAR:
+      unreachable("We never use this state");
+
+   case ISL_AUX_STATE_PARTIAL_CLEAR:
+   case ISL_AUX_STATE_COMPRESSED_CLEAR:
+      if (aspect == VK_IMAGE_ASPECT_DEPTH_BIT) {
+         return ANV_FAST_CLEAR_DEFAULT_VALUE;
+      } else if (layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+         /* When we're in a render pass we have the clear color data from the
+          * VkRenderPassBeginInfo and we can use arbitrary clear colors.  They
+          * must get partially resolved before we leave the render pass.
+          */
+         return ANV_FAST_CLEAR_ANY;
+      } else if (image->planes[plane].aux_usage == ISL_AUX_USAGE_MCS ||
+                 image->planes[plane].aux_usage == ISL_AUX_USAGE_CCS_E) {
+         /* If the image has MCS or CCS_E enabled all the time then we can use
+          * fast-clear as long as the clear color is the default value of zero
+          * since this is the default value we program into every surface
+          * state used for texturing.
+          */
+         return ANV_FAST_CLEAR_DEFAULT_VALUE;
+      } else {
+         return ANV_FAST_CLEAR_NONE;
+      }
+
+   case ISL_AUX_STATE_COMPRESSED_NO_CLEAR:
+   case ISL_AUX_STATE_RESOLVED:
+   case ISL_AUX_STATE_PASS_THROUGH:
+   case ISL_AUX_STATE_AUX_INVALID:
       return ANV_FAST_CLEAR_NONE;
    }
 
-   default:
-      /* If the image has MCS or CCS_E enabled all the time then we can use
-       * fast-clear as long as the clear color is the default value of zero
-       * since this is the default value we program into every surface state
-       * used for texturing.
-       */
-      if (image->planes[plane].aux_usage == ISL_AUX_USAGE_MCS ||
-          image->planes[plane].aux_usage == ISL_AUX_USAGE_CCS_E)
-         return ANV_FAST_CLEAR_DEFAULT_VALUE;
-      else
-         return ANV_FAST_CLEAR_NONE;
-   }
+   unreachable("Invalid isl_aux_state");
 }
 
 
@@ -1745,9 +1833,11 @@ anv_CreateImageView(VkDevice _device,
 
          enum isl_aux_usage general_aux_usage =
             anv_layout_to_aux_usage(&device->info, image, 1UL << iaspect_bit,
+                                    VK_IMAGE_USAGE_SAMPLED_BIT,
                                     VK_IMAGE_LAYOUT_GENERAL);
          enum isl_aux_usage optimal_aux_usage =
             anv_layout_to_aux_usage(&device->info, image, 1UL << iaspect_bit,
+                                    VK_IMAGE_USAGE_SAMPLED_BIT,
                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
          anv_image_fill_surface_state(device, image, 1ULL << iaspect_bit,

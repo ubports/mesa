@@ -470,6 +470,8 @@ anv_physical_device_try_create(struct anv_instance *instance,
     */
    device->has_bindless_samplers = device->info.gen >= 8;
 
+   device->has_implicit_ccs = device->info.has_aux_map;
+
    device->has_mem_available = get_available_system_memory() != 0;
 
    device->always_flush_cache =
@@ -3201,40 +3203,24 @@ VkResult anv_DeviceWaitIdle(
    return anv_queue_submit_simple_batch(&device->queue, NULL);
 }
 
-bool
-anv_vma_alloc(struct anv_device *device, struct anv_bo *bo,
+uint64_t
+anv_vma_alloc(struct anv_device *device,
+              uint64_t size, uint64_t align,
+              enum anv_bo_alloc_flags alloc_flags,
               uint64_t client_address)
 {
-   const struct gen_device_info *devinfo = &device->info;
-   /* Gen12 CCS surface addresses need to be 64K aligned. We have no way of
-    * telling what this allocation is for so pick the largest alignment.
-    */
-   const uint32_t vma_alignment =
-      devinfo->gen >= 12 ? (64 * 1024) : (4 * 1024);
-
-   if (!(bo->flags & EXEC_OBJECT_PINNED)) {
-      assert(!(bo->has_client_visible_address));
-      return true;
-   }
-
    pthread_mutex_lock(&device->vma_mutex);
 
-   bo->offset = 0;
+   uint64_t addr = 0;
 
-   if (bo->has_client_visible_address) {
-      assert(bo->flags & EXEC_OBJECT_SUPPORTS_48B_ADDRESS);
+   if (alloc_flags & ANV_BO_ALLOC_CLIENT_VISIBLE_ADDRESS) {
       if (client_address) {
          if (util_vma_heap_alloc_addr(&device->vma_cva,
-                                      client_address, bo->size)) {
-            bo->offset = gen_canonical_address(client_address);
+                                      client_address, size)) {
+            addr = client_address;
          }
       } else {
-         uint64_t addr =
-            util_vma_heap_alloc(&device->vma_cva, bo->size, vma_alignment);
-         if (addr) {
-            bo->offset = gen_canonical_address(addr);
-            assert(addr == gen_48b_address(bo->offset));
-         }
+         addr = util_vma_heap_alloc(&device->vma_cva, size, align);
       }
       /* We don't want to fall back to other heaps */
       goto done;
@@ -3242,54 +3228,39 @@ anv_vma_alloc(struct anv_device *device, struct anv_bo *bo,
 
    assert(client_address == 0);
 
-   if (bo->flags & EXEC_OBJECT_SUPPORTS_48B_ADDRESS) {
-      uint64_t addr =
-         util_vma_heap_alloc(&device->vma_hi, bo->size, vma_alignment);
-      if (addr) {
-         bo->offset = gen_canonical_address(addr);
-         assert(addr == gen_48b_address(bo->offset));
-      }
-   }
+   if (!(alloc_flags & ANV_BO_ALLOC_32BIT_ADDRESS))
+      addr = util_vma_heap_alloc(&device->vma_hi, size, align);
 
-   if (bo->offset == 0) {
-      uint64_t addr =
-         util_vma_heap_alloc(&device->vma_lo, bo->size, vma_alignment);
-      if (addr) {
-         bo->offset = gen_canonical_address(addr);
-         assert(addr == gen_48b_address(bo->offset));
-      }
-   }
+   if (addr == 0)
+      addr = util_vma_heap_alloc(&device->vma_lo, size, align);
 
 done:
    pthread_mutex_unlock(&device->vma_mutex);
 
-   return bo->offset != 0;
+   assert(addr == gen_48b_address(addr));
+   return gen_canonical_address(addr);
 }
 
 void
-anv_vma_free(struct anv_device *device, struct anv_bo *bo)
+anv_vma_free(struct anv_device *device,
+             uint64_t address, uint64_t size)
 {
-   if (!(bo->flags & EXEC_OBJECT_PINNED))
-      return;
-
-   const uint64_t addr_48b = gen_48b_address(bo->offset);
+   const uint64_t addr_48b = gen_48b_address(address);
 
    pthread_mutex_lock(&device->vma_mutex);
 
    if (addr_48b >= LOW_HEAP_MIN_ADDRESS &&
        addr_48b <= LOW_HEAP_MAX_ADDRESS) {
-      util_vma_heap_free(&device->vma_lo, addr_48b, bo->size);
+      util_vma_heap_free(&device->vma_lo, addr_48b, size);
    } else if (addr_48b >= CLIENT_VISIBLE_HEAP_MIN_ADDRESS &&
               addr_48b <= CLIENT_VISIBLE_HEAP_MAX_ADDRESS) {
-      util_vma_heap_free(&device->vma_cva, addr_48b, bo->size);
+      util_vma_heap_free(&device->vma_cva, addr_48b, size);
    } else {
       assert(addr_48b >= HIGH_HEAP_MIN_ADDRESS);
-      util_vma_heap_free(&device->vma_hi, addr_48b, bo->size);
+      util_vma_heap_free(&device->vma_hi, addr_48b, size);
    }
 
    pthread_mutex_unlock(&device->vma_mutex);
-
-   bo->offset = 0;
 }
 
 VkResult anv_AllocateMemory(
@@ -3388,8 +3359,26 @@ VkResult anv_AllocateMemory(
       }
    }
 
+   /* By default, we want all VkDeviceMemory objects to support CCS */
+   if (device->physical->has_implicit_ccs)
+      alloc_flags |= ANV_BO_ALLOC_IMPLICIT_CCS;
+
    if (vk_flags & VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT_KHR)
       alloc_flags |= ANV_BO_ALLOC_CLIENT_VISIBLE_ADDRESS;
+
+   if ((export_info && export_info->handleTypes) ||
+       (fd_info && fd_info->handleType) ||
+       (host_ptr_info && host_ptr_info->handleType)) {
+      /* Anything imported or exported is EXTERNAL */
+      alloc_flags |= ANV_BO_ALLOC_EXTERNAL;
+
+      /* We can't have implicit CCS on external memory with an AUX-table.
+       * Doing so would require us to sync the aux tables across processes
+       * which is impractical.
+       */
+      if (device->info.has_aux_map)
+         alloc_flags &= ~ANV_BO_ALLOC_IMPLICIT_CCS;
+   }
 
    /* Check if we need to support Android HW buffer export. If so,
     * create AHardwareBuffer and import memory from it.
@@ -3434,9 +3423,6 @@ VkResult anv_AllocateMemory(
                                     client_address, &mem->bo);
       if (result != VK_SUCCESS)
          goto fail;
-
-      VkDeviceSize aligned_alloc_size =
-         align_u64(pAllocateInfo->allocationSize, 4096);
 
       /* For security purposes, we reject importing the bo if it's smaller
        * than the requested allocation size.  This prevents a malicious client
@@ -3493,9 +3479,6 @@ VkResult anv_AllocateMemory(
    }
 
    /* Regular allocate (not importing memory). */
-
-   if (export_info && export_info->handleTypes)
-      alloc_flags |= ANV_BO_ALLOC_EXTERNAL;
 
    result = anv_device_alloc_bo(device, pAllocateInfo->allocationSize,
                                 alloc_flags, client_address, &mem->bo);

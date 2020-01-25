@@ -243,53 +243,47 @@ bool si_shader_cache_load_shader(struct si_screen *sscreen,
 {
 	struct hash_entry *entry =
 		_mesa_hash_table_search(sscreen->shader_cache, ir_sha1_cache_key);
-	if (!entry) {
-		if (sscreen->disk_shader_cache) {
-			unsigned char sha1[CACHE_KEY_SIZE];
 
-			disk_cache_compute_key(sscreen->disk_shader_cache,
-					       ir_sha1_cache_key, 20, sha1);
-
-			size_t binary_size;
-			uint8_t *buffer =
-				disk_cache_get(sscreen->disk_shader_cache,
-					       sha1, &binary_size);
-			if (!buffer)
-				return false;
-
-			if (binary_size < sizeof(uint32_t) ||
-			    *((uint32_t*)buffer) != binary_size) {
-				 /* Something has gone wrong discard the item
-				  * from the cache and rebuild/link from
-				  * source.
-				  */
-				assert(!"Invalid radeonsi shader disk cache "
-				       "item!");
-
-				disk_cache_remove(sscreen->disk_shader_cache,
-						  sha1);
-				free(buffer);
-
-				return false;
-			}
-
-			if (!si_load_shader_binary(shader, buffer)) {
-				free(buffer);
-				return false;
-			}
-			free(buffer);
-
-			si_shader_cache_insert_shader(sscreen, ir_sha1_cache_key,
-						      shader, false);
-		} else {
-			return false;
+	if (entry) {
+		if (si_load_shader_binary(shader, entry->data)) {
+			p_atomic_inc(&sscreen->num_memory_shader_cache_hits);
+			return true;
 		}
-	} else {
-		if (!si_load_shader_binary(shader, entry->data))
-			return false;
 	}
-	p_atomic_inc(&sscreen->num_shader_cache_hits);
-	return true;
+	p_atomic_inc(&sscreen->num_memory_shader_cache_misses);
+
+	if (!sscreen->disk_shader_cache)
+		return false;
+
+	unsigned char sha1[CACHE_KEY_SIZE];
+	disk_cache_compute_key(sscreen->disk_shader_cache, ir_sha1_cache_key,
+			       20, sha1);
+
+	size_t binary_size;
+	uint8_t *buffer = disk_cache_get(sscreen->disk_shader_cache, sha1,
+					 &binary_size);
+	if (buffer) {
+		if (binary_size >= sizeof(uint32_t) &&
+		    *((uint32_t*)buffer) == binary_size) {
+			if (si_load_shader_binary(shader, buffer)) {
+				free(buffer);
+				si_shader_cache_insert_shader(sscreen, ir_sha1_cache_key,
+							      shader, false);
+				p_atomic_inc(&sscreen->num_disk_shader_cache_hits);
+				return true;
+			}
+		} else {
+			/* Something has gone wrong discard the item from the cache and
+			 * rebuild/link from source.
+			 */
+			assert(!"Invalid radeonsi shader disk cache item!");
+			disk_cache_remove(sscreen->disk_shader_cache, sha1);
+		}
+	}
+
+	free(buffer);
+	p_atomic_inc(&sscreen->num_disk_shader_cache_misses);
+	return false;
 }
 
 static uint32_t si_shader_cache_key_hash(const void *key)
@@ -2788,7 +2782,6 @@ static void *si_create_shader_selector(struct pipe_context *ctx,
 	if (!sel)
 		return NULL;
 
-	pipe_reference_init(&sel->reference, 1);
 	sel->screen = sscreen;
 	sel->compiler_ctx_state.debug = sctx->debug;
 	sel->compiler_ctx_state.is_debug_context = sctx->is_debug;
@@ -3053,6 +3046,14 @@ static void *si_create_shader_selector(struct pipe_context *ctx,
 				    &sel->compiler_ctx_state, sel,
 				    si_init_shader_selector_async);
 	return sel;
+}
+
+static void *si_create_shader(struct pipe_context *ctx,
+			      const struct pipe_shader_state *state)
+{
+	struct si_screen *sscreen = (struct si_screen *)ctx->screen;
+
+	return util_live_shader_cache_get(ctx, &sscreen->live_shader_cache, state);
 }
 
 static void si_update_streamout_state(struct si_context *sctx)
@@ -3358,9 +3359,10 @@ static void si_delete_shader(struct si_context *sctx, struct si_shader *shader)
 	free(shader);
 }
 
-void si_destroy_shader_selector(struct si_context *sctx,
-				struct si_shader_selector *sel)
+static void si_destroy_shader_selector(struct pipe_context *ctx, void *cso)
 {
+	struct si_context *sctx = (struct si_context*)ctx;
+	struct si_shader_selector *sel = (struct si_shader_selector *)cso;
 	struct si_shader *p = sel->first_variant, *c;
 	struct si_shader_ctx_state *current_shader[SI_NUM_SHADERS] = {
 		[PIPE_SHADER_VERTEX] = &sctx->vs_shader,
@@ -4242,16 +4244,23 @@ static void si_emit_scratch_state(struct si_context *sctx)
 	}
 }
 
+void si_init_screen_live_shader_cache(struct si_screen *sscreen)
+{
+	util_live_shader_cache_init(&sscreen->live_shader_cache,
+				    si_create_shader_selector,
+				    si_destroy_shader_selector);
+}
+
 void si_init_shader_functions(struct si_context *sctx)
 {
 	sctx->atoms.s.spi_map.emit = si_emit_spi_map;
 	sctx->atoms.s.scratch_state.emit = si_emit_scratch_state;
 
-	sctx->b.create_vs_state = si_create_shader_selector;
-	sctx->b.create_tcs_state = si_create_shader_selector;
-	sctx->b.create_tes_state = si_create_shader_selector;
-	sctx->b.create_gs_state = si_create_shader_selector;
-	sctx->b.create_fs_state = si_create_shader_selector;
+	sctx->b.create_vs_state = si_create_shader;
+	sctx->b.create_tcs_state = si_create_shader;
+	sctx->b.create_tes_state = si_create_shader;
+	sctx->b.create_gs_state = si_create_shader;
+	sctx->b.create_fs_state = si_create_shader;
 
 	sctx->b.bind_vs_state = si_bind_vs_shader;
 	sctx->b.bind_tcs_state = si_bind_tcs_shader;
