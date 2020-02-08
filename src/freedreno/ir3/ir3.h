@@ -102,6 +102,22 @@ struct ir3_register {
 
 	} flags;
 
+	/* used for cat5 instructions, but also for internal/IR level
+	 * tracking of what registers are read/written by an instruction.
+	 * wrmask may be a bad name since it is used to represent both
+	 * src and dst that touch multiple adjacent registers.
+	 */
+	unsigned wrmask : 16;  /* up to vec16 */
+
+	/* for relative addressing, 32bits for array size is too small,
+	 * but otoh we don't need to deal with disjoint sets, so instead
+	 * use a simple size field (number of scalar components).
+	 *
+	 * Note the size field isn't important for relative const (since
+	 * we don't have to do register allocation for constants).
+	 */
+	unsigned size : 15;
+
 	bool merged : 1;    /* half-regs conflict with full regs (ie >= a6xx) */
 
 	/* normal registers:
@@ -129,20 +145,6 @@ struct ir3_register {
 	 * back to a previous instruction that we depend on).
 	 */
 	struct ir3_instruction *instr;
-
-	union {
-		/* used for cat5 instructions, but also for internal/IR level
-		 * tracking of what registers are read/written by an instruction.
-		 * wrmask may be a bad name since it is used to represent both
-		 * src and dst that touch multiple adjacent registers.
-		 */
-		unsigned wrmask;
-		/* for relative addressing, 32bits for array size is too small,
-		 * but otoh we don't need to deal with disjoint sets, so instead
-		 * use a simple size field (number of scalar components).
-		 */
-		unsigned size;
-	};
 };
 
 /*
@@ -693,6 +695,25 @@ static inline bool is_same_type_mov(struct ir3_instruction *instr)
 	return true;
 }
 
+/* A move from const, which changes size but not type, can also be
+ * folded into dest instruction in some cases.
+ */
+static inline bool is_const_mov(struct ir3_instruction *instr)
+{
+	if (instr->opc != OPC_MOV)
+		return false;
+
+	if (!(instr->regs[1]->flags & IR3_REG_CONST))
+		return false;
+
+	type_t src_type = instr->cat1.src_type;
+	type_t dst_type = instr->cat1.dst_type;
+
+	return (type_float(src_type) && type_float(dst_type)) ||
+		(type_uint(src_type) && type_uint(dst_type)) ||
+		(type_sint(src_type) && type_sint(dst_type));
+}
+
 static inline bool is_alu(struct ir3_instruction *instr)
 {
 	return (1 <= opc_cat(instr->opc)) && (opc_cat(instr->opc) <= 3);
@@ -706,6 +727,11 @@ static inline bool is_sfu(struct ir3_instruction *instr)
 static inline bool is_tex(struct ir3_instruction *instr)
 {
 	return (opc_cat(instr->opc) == 5);
+}
+
+static inline bool is_tex_or_prefetch(struct ir3_instruction *instr)
+{
+	return is_tex(instr) || (instr->opc == OPC_META_TEX_PREFETCH);
 }
 
 static inline bool is_mem(struct ir3_instruction *instr)
@@ -792,7 +818,7 @@ static inline bool is_meta(struct ir3_instruction *instr)
 
 static inline unsigned dest_regs(struct ir3_instruction *instr)
 {
-	if ((instr->regs_count == 0) || is_store(instr))
+	if ((instr->regs_count == 0) || is_store(instr) || is_flow(instr))
 		return 0;
 
 	return util_last_bit(instr->regs[0]->wrmask);
@@ -1111,10 +1137,15 @@ static inline bool __is_false_dep(struct ir3_instruction *instr, unsigned n)
 void ir3_print(struct ir3 *ir);
 void ir3_print_instr(struct ir3_instruction *instr);
 
-/* depth calculation: */
-struct ir3_shader_variant;
+/* delay calculation: */
 int ir3_delayslots(struct ir3_instruction *assigner,
 		struct ir3_instruction *consumer, unsigned n);
+unsigned ir3_delay_calc(struct ir3_block *block, struct ir3_instruction *instr,
+		bool soft, bool pred);
+void ir3_remove_nops(struct ir3 *ir);
+
+/* depth calculation: */
+struct ir3_shader_variant;
 void ir3_insert_by_depth(struct ir3_instruction *instr, struct list_head *list);
 void ir3_depth(struct ir3 *ir, struct ir3_shader_variant *so);
 
@@ -1131,7 +1162,10 @@ void ir3_sun(struct ir3 *ir);
 void ir3_sched_add_deps(struct ir3 *ir);
 int ir3_sched(struct ir3 *ir);
 
-void ir3_a6xx_fixup_atomic_dests(struct ir3 *ir, struct ir3_shader_variant *so);
+struct ir3_context;
+int ir3_postsched(struct ir3_context *ctx);
+
+bool ir3_a6xx_fixup_atomic_dests(struct ir3 *ir, struct ir3_shader_variant *so);
 
 /* register assignment: */
 struct ir3_ra_reg_set * ir3_ra_alloc_reg_set(struct ir3_compiler *compiler);
@@ -1173,7 +1207,7 @@ create_immed_typed(struct ir3_block *block, uint32_t val, type_t type)
 	mov->cat1.src_type = type;
 	mov->cat1.dst_type = type;
 	__ssa_dst(mov)->flags |= flags;
-	ir3_reg_create(mov, 0, IR3_REG_IMMED)->uim_val = val;
+	ir3_reg_create(mov, 0, IR3_REG_IMMED | flags)->uim_val = val;
 
 	return mov;
 }
@@ -1350,7 +1384,7 @@ ir3_##name(struct ir3_block *block,                                      \
 #define INSTR4(name)        __INSTR4(0, name, OPC_##name)
 
 /* cat0 instructions: */
-INSTR0(BR)
+INSTR1(BR)
 INSTR0(JUMP)
 INSTR1(KILL)
 INSTR0(END)
@@ -1429,8 +1463,11 @@ INSTR3(SAD_S32)
 /* cat4 instructions: */
 INSTR1(RCP)
 INSTR1(RSQ)
+INSTR1(HRSQ)
 INSTR1(LOG2)
+INSTR1(HLOG2)
 INSTR1(EXP2)
+INSTR1(HEXP2)
 INSTR1(SIN)
 INSTR1(COS)
 INSTR1(SQRT)

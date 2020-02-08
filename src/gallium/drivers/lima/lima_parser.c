@@ -467,12 +467,14 @@ parse_rsw(FILE *fp, uint32_t *value, int i, uint32_t *helper)
       break;
    case 3: /* DEPTH TEST */
       if ((*value & 0x00000001) == 0x00000001)
-         fprintf(fp, ": depth test enabled && writes allowed");
+         fprintf(fp, "(1): depth test enabled && writes allowed");
       else
-         fprintf(fp, ": depth test disabled || writes not allowed");
+         fprintf(fp, "(1): depth test disabled || writes not allowed");
 
-      fprintf(fp, ", PIPE_FUNC_%d", *value & 0x0000000e);
-      fprintf(fp, ", offset_scale: %d", *value & 0xffff0000);
+      fprintf(fp, "\n\t\t\t\t\t\t/* %s(2)", render_state_infos[i].info);
+      fprintf(fp, ": PIPE_FUNC_%d", (*value & 0x0000000e) >> 1);
+      fprintf(fp, ", offset_scale: %d", (*value & 0x00ff0000) >> 16);
+      fprintf(fp, ", offset_units: %d", (*value & 0xff000000) >> 24);
       fprintf(fp, ", unknown bits 4-15: 0x%08x */\n", *value & 0x0000fff0);
       break;
    case 4: /* DEPTH RANGE */
@@ -533,7 +535,7 @@ parse_rsw(FILE *fp, uint32_t *value, int i, uint32_t *helper)
          fprintf(fp, ", UNKNOWN\n");
       break;
    case 9: /* SHADER ADDRESS */
-      fprintf(fp, ": fs shader @ 0x%08x, ((uint32_t *)ctx->fs->bo->map)[0] & 0x1f: 0x%08x */\n",
+      fprintf(fp, ": fs shader @ 0x%08x, first instr length %d */\n",
               *value & 0xffffffe0, *value & 0x0000001f);
       break;
    case 10: /* VARYING TYPES */
@@ -567,8 +569,40 @@ parse_rsw(FILE *fp, uint32_t *value, int i, uint32_t *helper)
       fprintf(fp, ": address: 0x%08x */\n", *value);
       break;
    case 13: /* AUX0 */
-      fprintf(fp, ": varying_stride: %d, tex_stateobj.num_samplers: %d */\n",
-              *value & 0x0000001f, (*value & 0xffffc000) >> 14);
+      fprintf(fp, "(1): varying_stride: %d", /* bits 0 - 4 varying stride, 8 aligned */
+              (*value & 0x0000001f) << 3);
+      if ((*value & 0x00000020) == 0x00000020) /* bit 5 has num_samplers */
+         fprintf(fp, ", num_samplers %d",
+                 (*value & 0xffffc000) >> 14); /* bits 14 - 31 num_samplers */
+
+      if ((*value & 0x00000080) == 0x00000080) /* bit 7 has_fs_uniforms */
+         fprintf(fp, ", has_fs_uniforms */");
+      else
+         fprintf(fp, " */");
+
+      fprintf(fp, "\n\t\t\t\t\t\t/* %s(2):", render_state_infos[i].info);
+      if ((*value & 0x00000200) == 0x00000200) /* bit 9 early-z */
+         fprintf(fp, " early-z enabled");
+      else
+         fprintf(fp, " early-z disabled");
+
+      if ((*value & 0x00001000) == 0x00001000) /* bit 12 pixel-kill */
+         fprintf(fp, ", pixel kill enabled");
+      else
+         fprintf(fp, ", pixel kill disabled");
+
+      if ((*value & 0x00000040) == 0x00000040) /* bit 6 unknown */
+         fprintf(fp, ", bit 6 set");
+
+      if ((*value & 0x00000100) == 0x00000100) /* bit 8 unknown */
+         fprintf(fp, ", bit 8 set");
+
+      if (((*value & 0x00000c00) >> 10) > 0) /* bit 10 - 11 unknown */
+         fprintf(fp, ", bit 10 - 11: %d", ((*value & 0x00000c00) >> 10));
+
+      if ((*value & 0x00002000) == 0x00002000) /* bit 13 unknown */
+         fprintf(fp, ", bit 13 set");
+      fprintf(fp, " */\n");
       break;
    case 14: /* AUX1 */
       fprintf(fp, ": ");

@@ -612,6 +612,9 @@ midgard_tex_register_select;
 #define TEXTURE_OP_LOD 0x12             /* textureLod */
 #define TEXTURE_OP_TEXEL_FETCH 0x14     /* texelFetch */
 
+/* Implements barrier() */
+#define TEXTURE_OP_BARRIER 0x0B
+
 /* Computes horizontal and vertical derivatives respectively. Use with a float
  * sampler and a "2D" texture.  Leave texture/sampler IDs as zero; they ought
  * to be ignored. Only works for fp32 on 64-bit at a time, so derivatives of a
@@ -742,9 +745,31 @@ __attribute__((__packed__))
 }
 midgard_texture_word;
 
-/* Up to 16 constant bytes can be embedded in a bundle. This union describes
- * all possible layouts.
- */
+/* Technically barriers are texture instructions but it's less work to add them
+ * as an explicitly zeroed special case, since most fields are forced to go to
+ * zero */
+
+typedef struct
+__attribute__((__packed__))
+{
+        unsigned type      : 4;
+        unsigned next_type : 4;
+
+        /* op = TEXTURE_OP_BARRIER */
+        unsigned op  : 6;
+        unsigned zero1    : 2;
+
+        /* Since helper invocations don't make any sense, these are forced to one */
+        unsigned cont  : 1;
+        unsigned last  : 1;
+        unsigned zero2 : 14;
+
+        unsigned zero3 : 24;
+        unsigned unknown4 : 1;
+        unsigned zero4 : 7;
+
+        uint64_t zero5;
+} midgard_texture_barrier_word;
 
 typedef union midgard_constants {
         double f64[2];

@@ -1141,7 +1141,7 @@
   <struct name="SO_DECL" length="1">
     <field name="Component Mask" start="0" end="3" type="uint" default="0"/>
     <field name="Register Index" start="4" end="9" type="uint"/>
-    <field name="Hole Flag" start="11" end="11" type="uint"/>
+    <field name="Hole Flag" start="11" end="11" type="bool"/>
     <field name="Output Buffer Slot" start="12" end="13" type="uint"/>
   </struct>
 
@@ -6997,7 +6997,6 @@
   </register>
 
   <register name="L3CNTLREG" length="1" num="0x7034">
-    <field name="SLM Enable" start="0" end="0" type="uint"/>
     <field name="URB Allocation" start="1" end="7" type="uint"/>
     <field name="Error Detection Behavior Control" start="9" end="9" type="bool"/>
     <field name="Use Full Ways" start="10" end="10" type="bool"/>

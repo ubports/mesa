@@ -446,6 +446,103 @@ midgard_nir_lower_fdot2(nir_shader *shader)
         return progress;
 }
 
+/* Midgard can't write depth and stencil separately. It has to happen in a
+ * single store operation containing both. Let's add a panfrost specific
+ * intrinsic and turn all depth/stencil stores into a packed depth+stencil
+ * one.
+ */
+static bool
+midgard_nir_lower_zs_store(nir_shader *nir)
+{
+        if (nir->info.stage != MESA_SHADER_FRAGMENT)
+                return false;
+
+        nir_variable *z_var = NULL, *s_var = NULL;
+
+        nir_foreach_variable(var, &nir->outputs) {
+                if (var->data.location == FRAG_RESULT_DEPTH)
+                        z_var = var;
+                else if (var->data.location == FRAG_RESULT_STENCIL)
+                        s_var = var;
+        }
+
+        if (!z_var && !s_var)
+                return false;
+
+        bool progress = false;
+
+        nir_foreach_function(function, nir) {
+                if (!function->impl) continue;
+
+                nir_intrinsic_instr *z_store = NULL, *s_store = NULL, *last_store = NULL;
+
+                nir_foreach_block(block, function->impl) {
+                        nir_foreach_instr_safe(instr, block) {
+                                if (instr->type != nir_instr_type_intrinsic)
+                                        continue;
+
+                                nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+                                if (intr->intrinsic != nir_intrinsic_store_output)
+                                        continue;
+
+                                if (z_var && nir_intrinsic_base(intr) == z_var->data.driver_location) {
+                                        assert(!z_store);
+                                        z_store = intr;
+                                        last_store = intr;
+                                }
+
+                                if (s_var && nir_intrinsic_base(intr) == s_var->data.driver_location) {
+                                        assert(!s_store);
+                                        s_store = intr;
+                                        last_store = intr;
+                                }
+                        }
+                }
+
+                if (!z_store && !s_store) continue;
+
+                nir_builder b;
+                nir_builder_init(&b, function->impl);
+
+                b.cursor = nir_before_instr(&last_store->instr);
+
+		nir_ssa_def *zs_store_src;
+
+                if (z_store && s_store) {
+                        nir_ssa_def *srcs[2] = {
+                                nir_ssa_for_src(&b, z_store->src[0], 1),
+                                nir_ssa_for_src(&b, s_store->src[0], 1),
+                        };
+
+                        zs_store_src = nir_vec(&b, srcs, 2);
+                } else {
+                        zs_store_src = nir_ssa_for_src(&b, last_store->src[0], 1);
+                }
+
+                nir_intrinsic_instr *zs_store;
+
+                zs_store = nir_intrinsic_instr_create(b.shader,
+                                                      nir_intrinsic_store_zs_output_pan);
+                zs_store->src[0] = nir_src_for_ssa(zs_store_src);
+                zs_store->num_components = z_store && s_store ? 2 : 1;
+                nir_intrinsic_set_component(zs_store, z_store ? 0 : 1);
+
+                /* Replace the Z and S store by a ZS store */
+                nir_builder_instr_insert(&b, &zs_store->instr);
+
+                if (z_store)
+                        nir_instr_remove(&z_store->instr);
+
+                if (s_store)
+                        nir_instr_remove(&s_store->instr);
+
+                nir_metadata_preserve(function->impl, nir_metadata_block_index | nir_metadata_dominance);
+                progress = true;
+        }
+
+        return progress;
+}
+
 /* Flushes undefined values to zero */
 
 static void
@@ -1347,8 +1444,14 @@ compute_builtin_arg(nir_op op)
 }
 
 static void
-emit_fragment_store(compiler_context *ctx, unsigned src, unsigned rt)
+emit_fragment_store(compiler_context *ctx, unsigned src, enum midgard_rt_id rt)
 {
+        assert(rt < ARRAY_SIZE(ctx->writeout_branch));
+
+        midgard_instruction *br = ctx->writeout_branch[rt];
+
+        assert(!br);
+
         emit_explicit_constant(ctx, src, src);
 
         struct midgard_instruction ins =
@@ -1358,14 +1461,12 @@ emit_fragment_store(compiler_context *ctx, unsigned src, unsigned rt)
 
         /* Add dependencies */
         ins.src[0] = src;
-        ins.constants.u32[0] = rt * 0x100;
+        ins.constants.u32[0] = rt == MIDGARD_ZS_RT ?
+                               0xFF : (rt - MIDGARD_COLOR_RT0) * 0x100;
 
         /* Emit the branch */
-        midgard_instruction *br = emit_mir_instruction(ctx, ins);
+        br = emit_mir_instruction(ctx, ins);
         schedule_barrier(ctx);
-
-        assert(rt < ARRAY_SIZE(ctx->writeout_branch));
-        assert(!ctx->writeout_branch[rt]);
         ctx->writeout_branch[rt] = br;
 
         /* Push our current location = current block count - 1 = where we'll
@@ -1402,6 +1503,17 @@ emit_vertex_builtin(compiler_context *ctx, nir_intrinsic_instr *instr)
 {
         unsigned reg = nir_dest_index(ctx, &instr->dest);
         emit_attr_read(ctx, reg, vertex_builtin_arg(instr->intrinsic), 1, nir_type_int);
+}
+
+static const nir_variable *
+search_var(struct exec_list *vars, unsigned driver_loc)
+{
+        nir_foreach_variable(var, vars) {
+                if (var->data.driver_location == driver_loc)
+                        return var;
+        }
+
+        return NULL;
 }
 
 static void
@@ -1501,6 +1613,7 @@ emit_intrinsic(compiler_context *ctx, nir_intrinsic_instr *instr)
 
         /* Artefact of load_interpolated_input. TODO: other barycentric modes */
         case nir_intrinsic_load_barycentric_pixel:
+        case nir_intrinsic_load_barycentric_centroid:
                 break;
 
         /* Reads 128-bit value raw off the tilebuffer during blending, tasty */
@@ -1547,6 +1660,22 @@ emit_intrinsic(compiler_context *ctx, nir_intrinsic_instr *instr)
                 break;
         }
 
+        case nir_intrinsic_store_zs_output_pan: {
+                assert(ctx->stage == MESA_SHADER_FRAGMENT);
+                emit_fragment_store(ctx, nir_src_index(ctx, &instr->src[0]),
+                                    MIDGARD_ZS_RT);
+
+                midgard_instruction *br = ctx->writeout_branch[MIDGARD_ZS_RT];
+
+                if (!nir_intrinsic_component(instr))
+                        br->writeout_depth = true;
+                if (nir_intrinsic_component(instr) ||
+                    instr->num_components)
+                        br->writeout_stencil = true;
+                assert(br->writeout_depth | br->writeout_stencil);
+                break;
+        }
+
         case nir_intrinsic_store_output:
                 assert(nir_src_is_const(instr->src[1]) && "no indirect outputs");
 
@@ -1555,7 +1684,21 @@ emit_intrinsic(compiler_context *ctx, nir_intrinsic_instr *instr)
                 reg = nir_src_index(ctx, &instr->src[0]);
 
                 if (ctx->stage == MESA_SHADER_FRAGMENT) {
-                        emit_fragment_store(ctx, reg, offset);
+                        const nir_variable *var;
+                        enum midgard_rt_id rt;
+
+                        var = search_var(&ctx->nir->outputs,
+                                         nir_intrinsic_base(instr));
+                        assert(var);
+                        if (var->data.location == FRAG_RESULT_COLOR)
+                                rt = MIDGARD_COLOR_RT0;
+                        else if (var->data.location >= FRAG_RESULT_DATA0)
+                                rt = MIDGARD_COLOR_RT0 + var->data.location -
+                                     FRAG_RESULT_DATA0;
+                        else
+                                assert(0);
+
+                        emit_fragment_store(ctx, reg, rt);
                 } else if (ctx->stage == MESA_SHADER_VERTEX) {
                         /* We should have been vectorized, though we don't
                          * currently check that st_vary is emitted only once
@@ -1672,7 +1815,7 @@ emit_intrinsic(compiler_context *ctx, nir_intrinsic_instr *instr)
                 break;
 
         default:
-                printf ("Unhandled intrinsic\n");
+                printf ("Unhandled intrinsic %s\n", nir_intrinsic_infos[instr->intrinsic].name);
                 assert(0);
                 break;
         }
@@ -1925,8 +2068,10 @@ emit_texop_native(compiler_context *ctx, nir_tex_instr *instr,
                         break;
                 }
 
-                default:
-                        unreachable("Unknown texture source type\n");
+                default: {
+                        printf ("Unknown texture source type: %d\n", instr->src[i].src_type);
+                        assert(0);
+                }
                 }
         }
 
@@ -1953,8 +2098,10 @@ emit_tex(compiler_context *ctx, nir_tex_instr *instr)
         case nir_texop_txs:
                 emit_sysval_read(ctx, &instr->instr, ~0, 4);
                 break;
-        default:
-                unreachable("Unhanlded texture op");
+        default: {
+                printf ("Unhandled texture op: %d\n", instr->op);
+                assert(0);
+        }
         }
 }
 
@@ -2322,11 +2469,13 @@ static unsigned
 emit_fragment_epilogue(compiler_context *ctx, unsigned rt)
 {
         /* Loop to ourselves */
-
+        midgard_instruction *br = ctx->writeout_branch[rt];
         struct midgard_instruction ins = v_branch(false, false);
         ins.writeout = true;
+        ins.writeout_depth = br->writeout_depth;
+        ins.writeout_stencil = br->writeout_stencil;
         ins.branch.target_block = ctx->block_count - 1;
-        ins.constants.u32[0] = rt * 0x100;
+        ins.constants.u32[0] = br->constants.u32[0];
         emit_mir_instruction(ctx, ins);
 
         ctx->current_block->epilogue = true;
@@ -2627,7 +2776,7 @@ midgard_compile_shader_nir(nir_shader *nir, midgard_program *program, bool is_bl
         ctx->stage = nir->info.stage;
         ctx->is_blend = is_blend;
         ctx->alpha_ref = program->alpha_ref;
-        ctx->blend_rt = blend_rt;
+        ctx->blend_rt = MIDGARD_COLOR_RT0 + blend_rt;
         ctx->quirks = midgard_get_quirks(gpu_id);
 
         /* Start off with a safe cutoff, allowing usage of all 16 work
@@ -2678,6 +2827,7 @@ midgard_compile_shader_nir(nir_shader *nir, midgard_program *program, bool is_bl
         NIR_PASS_V(nir, nir_lower_vars_to_ssa);
 
         NIR_PASS_V(nir, nir_lower_io, nir_var_all, glsl_type_size, 0);
+        NIR_PASS_V(nir, midgard_nir_lower_zs_store);
 
         /* Optimisation passes */
 

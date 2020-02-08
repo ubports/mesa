@@ -1132,6 +1132,7 @@ lima_calculate_depth_test(struct pipe_depth_state *depth, struct pipe_rasterizer
 static void
 lima_pack_render_state(struct lima_context *ctx, const struct pipe_draw_info *info)
 {
+   struct lima_fs_shader_state *fs = ctx->fs;
    struct lima_render_state *render =
       lima_ctx_buff_alloc(ctx, lima_ctx_buff_pp_plb_rsw,
                           sizeof(*render));
@@ -1239,10 +1240,14 @@ lima_pack_render_state(struct lima_context *ctx, const struct pipe_draw_info *in
    render->textures_address = 0x00000000;
 
    /* more investigation */
-   render->aux0 = 0x00000300 | (ctx->vs->varying_stride >> 3);
+   render->aux0 = 0x00000100 | (ctx->vs->varying_stride >> 3);
    render->aux1 = 0x00001000;
    if (ctx->blend->base.dither)
       render->aux1 |= 0x00002000;
+
+   /* Enable Early-Z if shader doesn't have discard */
+   if (!fs->uses_discard)
+      render->aux0 |= 0x200;
 
    if (ctx->tex_stateobj.num_samplers) {
       render->textures_address =
@@ -1787,7 +1792,7 @@ _lima_flush(struct lima_context *ctx, bool end_of_frame)
    gp_frame_reg->plbu_cmd_start = plbu_cmd_va;
    gp_frame_reg->plbu_cmd_end = plbu_cmd_va + plbu_cmd_size;
    gp_frame_reg->tile_heap_start = ctx->gp_tile_heap[ctx->plb_index]->va;
-   gp_frame_reg->tile_heap_end = ctx->gp_tile_heap[ctx->plb_index]->va + gp_tile_heap_size;
+   gp_frame_reg->tile_heap_end = ctx->gp_tile_heap[ctx->plb_index]->va + ctx->gp_tile_heap_size;
 
    lima_dump_command_stream_print(
       &gp_frame, sizeof(gp_frame), false, "add gp frame\n");

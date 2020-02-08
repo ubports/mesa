@@ -378,15 +378,18 @@ amdgpu_winsys_create(int fd, const struct pipe_screen_config *config,
        */
       amdgpu_device_deinitialize(dev);
 
+      simple_mtx_lock(&aws->sws_list_lock);
       for (sws_iter = aws->sws_list; sws_iter; sws_iter = sws_iter->next) {
-         if (os_same_file_description(sws_iter->fd, aws->fd)) {
+         if (os_same_file_description(sws_iter->fd, ws->fd)) {
             close(ws->fd);
             FREE(ws);
             ws = sws_iter;
             pipe_reference(NULL, &ws->reference);
+            simple_mtx_unlock(&aws->sws_list_lock);
             goto unlock;
          }
       }
+      simple_mtx_unlock(&aws->sws_list_lock);
 
       ws->kms_handles = _mesa_hash_table_create(NULL, kms_handle_hash,
                                                 kms_handle_equals);

@@ -55,6 +55,7 @@ struct lima_fs_shader_state {
    void *shader;
    int shader_size;
    int stack_size;
+   bool uses_discard;
    struct lima_bo *bo;
 };
 
@@ -224,7 +225,7 @@ struct lima_context {
 
    struct lima_bo *plb[LIMA_CTX_PLB_MAX_NUM];
    struct lima_bo *gp_tile_heap[LIMA_CTX_PLB_MAX_NUM];
-   #define gp_tile_heap_size         0x100000
+   uint32_t gp_tile_heap_size;
    struct lima_bo *plb_gp_stream;
    struct lima_bo *gp_output;
    uint32_t gp_output_varyings_offt;

@@ -22,7 +22,7 @@ project(
   'mesa',
   ['c', 'cpp'],
   version : run_command(
-    [find_program('python', 'python2', 'python3'), 'bin/meson_get_version.py']
+    [find_program('python', 'python3'), 'bin/meson_get_version.py']
   ).stdout(),
   license : 'MIT',
   meson_version : '>= 0.46',
@@ -243,10 +243,6 @@ with_intel_vk = _vulkan_drivers.contains('intel')
 with_amd_vk = _vulkan_drivers.contains('amd')
 with_freedreno_vk = _vulkan_drivers.contains('freedreno')
 with_any_vk = _vulkan_drivers.length() != 0 and _vulkan_drivers != ['']
-
-if with_freedreno_vk and get_option('I-love-half-baked-turnips') != true
-  error('Cannot enable freedreno vulkan driver')
-endif
 
 if with_dri_swrast and (with_gallium_softpipe or with_gallium_swr)
   error('Only one swrast provider can be built')

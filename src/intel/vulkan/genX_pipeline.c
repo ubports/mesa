@@ -259,25 +259,18 @@ void
 genX(emit_urb_setup)(struct anv_device *device, struct anv_batch *batch,
                      const struct gen_l3_config *l3_config,
                      VkShaderStageFlags active_stages,
-                     const unsigned entry_size[4])
+                     const unsigned entry_size[4],
+                     enum gen_urb_deref_block_size *deref_block_size)
 {
    const struct gen_device_info *devinfo = &device->info;
-#if GEN_IS_HASWELL
-   const unsigned push_constant_kb = devinfo->gt == 3 ? 32 : 16;
-#else
-   const unsigned push_constant_kb = GEN_GEN >= 8 ? 32 : 16;
-#endif
-
-   const unsigned urb_size_kb = gen_get_l3_config_urb_size(devinfo, l3_config);
 
    unsigned entries[4];
    unsigned start[4];
-   gen_get_urb_config(devinfo,
-                      1024 * push_constant_kb, 1024 * urb_size_kb,
+   gen_get_urb_config(devinfo, l3_config,
                       active_stages &
                          VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
                       active_stages & VK_SHADER_STAGE_GEOMETRY_BIT,
-                      entry_size, entries, start);
+                      entry_size, entries, start, deref_block_size);
 
 #if GEN_GEN == 7 && !GEN_IS_HASWELL
    /* From the IVB PRM Vol. 2, Part 1, Section 3.2.1:
@@ -306,7 +299,8 @@ genX(emit_urb_setup)(struct anv_device *device, struct anv_batch *batch,
 }
 
 static void
-emit_urb_setup(struct anv_pipeline *pipeline)
+emit_urb_setup(struct anv_pipeline *pipeline,
+               enum gen_urb_deref_block_size *deref_block_size)
 {
    unsigned entry_size[4];
    for (int i = MESA_SHADER_VERTEX; i <= MESA_SHADER_GEOMETRY; i++) {
@@ -319,7 +313,8 @@ emit_urb_setup(struct anv_pipeline *pipeline)
 
    genX(emit_urb_setup)(pipeline->device, &pipeline->batch,
                         pipeline->urb.l3_config,
-                        pipeline->active_stages, entry_size);
+                        pipeline->active_stages, entry_size,
+                        deref_block_size);
 }
 
 static void
@@ -573,7 +568,8 @@ emit_rs_state(struct anv_pipeline *pipeline,
               const VkPipelineMultisampleStateCreateInfo *ms_info,
               const VkPipelineRasterizationLineStateCreateInfoEXT *line_info,
               const struct anv_render_pass *pass,
-              const struct anv_subpass *subpass)
+              const struct anv_subpass *subpass,
+              enum gen_urb_deref_block_size urb_deref_block_size)
 {
    struct GENX(3DSTATE_SF) sf = {
       GENX(3DSTATE_SF_header),
@@ -589,6 +585,10 @@ emit_rs_state(struct anv_pipeline *pipeline,
 
 #if GEN_IS_HASWELL
    sf.LineStippleEnable = line_info && line_info->stippledLineEnable;
+#endif
+
+#if GEN_GEN >= 12
+   sf.DerefBlockSize = urb_deref_block_size;
 #endif
 
    const struct brw_vue_prog_data *last_vue_prog_data =
@@ -1408,11 +1408,23 @@ emit_3dstate_streamout(struct anv_pipeline *pipeline,
          next_offset[buffer] = output->offset +
                                __builtin_popcount(component_mask) * 4;
 
-         so_decl[stream][decls[stream]++] = (struct GENX(SO_DECL)) {
-            .OutputBufferSlot = buffer,
-            .RegisterIndex = vue_map->varying_to_slot[varying],
-            .ComponentMask = component_mask,
-         };
+         const int slot = vue_map->varying_to_slot[varying];
+         if (slot < 0) {
+            /* This can happen if the shader never writes to the varying.
+             * Insert a hole instead of actual varying data.
+             */
+            so_decl[stream][decls[stream]++] = (struct GENX(SO_DECL)) {
+               .HoleFlag = true,
+               .OutputBufferSlot = buffer,
+               .ComponentMask = component_mask,
+            };
+         } else {
+            so_decl[stream][decls[stream]++] = (struct GENX(SO_DECL)) {
+               .OutputBufferSlot = buffer,
+               .RegisterIndex = slot,
+               .ComponentMask = component_mask,
+            };
+         }
       }
 
       int max_decls = 0;
@@ -2136,18 +2148,20 @@ genX(graphics_pipeline_create)(
       vk_find_struct_const(pCreateInfo->pRasterizationState->pNext,
                            PIPELINE_RASTERIZATION_LINE_STATE_CREATE_INFO_EXT);
 
+   enum gen_urb_deref_block_size urb_deref_block_size;
+   emit_urb_setup(pipeline, &urb_deref_block_size);
+
    assert(pCreateInfo->pVertexInputState);
    emit_vertex_input(pipeline, pCreateInfo->pVertexInputState);
    assert(pCreateInfo->pRasterizationState);
    emit_rs_state(pipeline, pCreateInfo->pInputAssemblyState,
                            pCreateInfo->pRasterizationState,
-                           ms_info, line_info, pass, subpass);
+                           ms_info, line_info, pass, subpass,
+                           urb_deref_block_size);
    emit_ms_state(pipeline, ms_info);
    emit_ds_state(pipeline, ds_info, pass, subpass);
    emit_cb_state(pipeline, cb_info, ms_info);
    compute_kill_pixel(pipeline, ms_info, subpass);
-
-   emit_urb_setup(pipeline);
 
    emit_3dstate_clip(pipeline,
                      pCreateInfo->pInputAssemblyState,

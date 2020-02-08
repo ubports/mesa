@@ -23,6 +23,7 @@
 #define __MDG_HELPERS_H
 
 #include "util/macros.h"
+#include <stdio.h>
 #include <string.h>
 
 #define OP_IS_LOAD_VARY_F(op) (\
@@ -254,6 +255,28 @@ expand_writemask(unsigned mask, unsigned channels)
         return o;
 }
 
+/* Tansform an expanded writemask (duplicated 8-bit format) into its condensed
+ * form (one bit per component) */
+
+static inline unsigned
+condense_writemask(unsigned expanded_mask,
+                   unsigned bits_per_component)
+{
+        if (bits_per_component == 8)
+                unreachable("XXX TODO: sort out how 8-bit constant encoding works");
+
+        unsigned slots_per_component = bits_per_component / 16;
+        unsigned max_comp = (16 * 8) / bits_per_component;
+        unsigned condensed_mask = 0;
+
+        for (unsigned i = 0; i < max_comp; i++) {
+                if (expanded_mask & (1 << (i * slots_per_component)))
+                        condensed_mask |= (1 << i);
+        }
+
+        return condensed_mask;
+}
+
 /* Coerce structs to integer */
 
 static inline unsigned
@@ -321,5 +344,10 @@ midgard_is_branch_unit(unsigned unit)
 {
         return (unit == ALU_ENAB_BRANCH) || (unit == ALU_ENAB_BR_COMPACT);
 }
+
+void
+mir_print_constant_component(FILE *fp, const midgard_constants *consts,
+                             unsigned c, midgard_reg_mode reg_mode, bool half,
+                             unsigned mod, midgard_alu_op op);
 
 #endif

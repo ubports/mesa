@@ -40,7 +40,7 @@ struct ntv_context {
    size_t num_ubos;
    SpvId image_types[PIPE_MAX_SAMPLERS];
    SpvId samplers[PIPE_MAX_SAMPLERS];
-   size_t num_samplers;
+   unsigned samplers_used : PIPE_MAX_SAMPLERS;
    SpvId entry_ifaces[PIPE_MAX_SHADER_INPUTS * 4 + PIPE_MAX_SHADER_OUTPUTS * 4];
    size_t num_entry_ifaces;
 
@@ -57,7 +57,7 @@ struct ntv_context {
    bool block_started;
    SpvId loop_break, loop_cont;
 
-   SpvId front_face_var, vertex_id_var;
+   SpvId front_face_var, instance_id_var, vertex_id_var;
 };
 
 static SpvId
@@ -415,11 +415,12 @@ emit_sampler(struct ntv_context *ctx, struct nir_variable *var)
             spirv_builder_emit_name(&ctx->builder, var_id, var->name);
          }
 
-         assert(ctx->num_samplers < ARRAY_SIZE(ctx->image_types));
-         ctx->image_types[ctx->num_samplers] = image_type;
-
-         assert(ctx->num_samplers < ARRAY_SIZE(ctx->samplers));
-         ctx->samplers[ctx->num_samplers++] = var_id;
+         int index = var->data.driver_location + i;
+         assert(!(ctx->samplers_used & (1 << index)));
+         assert(!ctx->image_types[index]);
+         ctx->image_types[index] = image_type;
+         ctx->samplers[index] = var_id;
+         ctx->samplers_used |= 1 << index;
 
          spirv_builder_emit_descriptor_set(&ctx->builder, var_id,
                                            var->data.descriptor_set);
@@ -432,11 +433,12 @@ emit_sampler(struct ntv_context *ctx, struct nir_variable *var)
       if (var->name)
          spirv_builder_emit_name(&ctx->builder, var_id, var->name);
 
-      assert(ctx->num_samplers < ARRAY_SIZE(ctx->image_types));
-      ctx->image_types[ctx->num_samplers] = image_type;
-
-      assert(ctx->num_samplers < ARRAY_SIZE(ctx->samplers));
-      ctx->samplers[ctx->num_samplers++] = var_id;
+      int index = var->data.driver_location;
+      assert(!(ctx->samplers_used & (1 << index)));
+      assert(!ctx->image_types[index]);
+      ctx->image_types[index] = image_type;
+      ctx->samplers[index] = var_id;
+      ctx->samplers_used |= 1 << index;
 
       spirv_builder_emit_descriptor_set(&ctx->builder, var_id,
                                         var->data.descriptor_set);
@@ -911,7 +913,11 @@ emit_alu(struct ntv_context *ctx, nir_alu_instr *alu)
    UNOP(nir_op_ineg, SpvOpSNegate)
    UNOP(nir_op_fneg, SpvOpFNegate)
    UNOP(nir_op_fddx, SpvOpDPdx)
+   UNOP(nir_op_fddx_coarse, SpvOpDPdxCoarse)
+   UNOP(nir_op_fddx_fine, SpvOpDPdxFine)
    UNOP(nir_op_fddy, SpvOpDPdy)
+   UNOP(nir_op_fddy_coarse, SpvOpDPdyCoarse)
+   UNOP(nir_op_fddy_fine, SpvOpDPdyFine)
    UNOP(nir_op_f2i32, SpvOpConvertFToS)
    UNOP(nir_op_f2u32, SpvOpConvertFToU)
    UNOP(nir_op_i2f32, SpvOpConvertSToF)
@@ -1020,6 +1026,9 @@ emit_alu(struct ntv_context *ctx, nir_alu_instr *alu)
       assert(nir_op_infos[alu->op].num_inputs == 2);
       result = emit_binop(ctx, SpvOpDot, dest_type, src[0], src[1]);
       break;
+
+   case nir_op_fdph:
+      unreachable("should already be lowered away");
 
    case nir_op_seq:
    case nir_op_sne:
@@ -1314,6 +1323,22 @@ emit_load_front_face(struct ntv_context *ctx, nir_intrinsic_instr *intr)
 }
 
 static void
+emit_load_instance_id(struct ntv_context *ctx, nir_intrinsic_instr *intr)
+{
+   SpvId var_type = spirv_builder_type_uint(&ctx->builder, 32);
+   if (!ctx->instance_id_var)
+      ctx->instance_id_var = create_builtin_var(ctx, var_type,
+                                               SpvStorageClassInput,
+                                               "gl_InstanceId",
+                                               SpvBuiltInInstanceIndex);
+
+   SpvId result = spirv_builder_emit_load(&ctx->builder, var_type,
+                                          ctx->instance_id_var);
+   assert(1 == nir_dest_num_components(intr->dest));
+   store_dest_uint(ctx, &intr->dest, result);
+}
+
+static void
 emit_load_vertex_id(struct ntv_context *ctx, nir_intrinsic_instr *intr)
 {
    SpvId var_type = spirv_builder_type_uint(&ctx->builder, 32);
@@ -1351,6 +1376,10 @@ emit_intrinsic(struct ntv_context *ctx, nir_intrinsic_instr *intr)
 
    case nir_intrinsic_load_front_face:
       emit_load_front_face(ctx, intr);
+      break;
+
+   case nir_intrinsic_load_instance_id:
+      emit_load_instance_id(ctx, intr);
       break;
 
    case nir_intrinsic_load_vertex_id:
@@ -1473,7 +1502,7 @@ emit_tex(struct ntv_context *ctx, nir_tex_instr *tex)
    SpvId sampled_type = spirv_builder_type_sampled_image(&ctx->builder,
                                                          image_type);
 
-   assert(tex->texture_index < ctx->num_samplers);
+   assert(ctx->samplers_used & (1u << tex->texture_index));
    SpvId load = spirv_builder_emit_load(&ctx->builder, sampled_type,
                                         ctx->samplers[tex->texture_index]);
 
@@ -1826,6 +1855,7 @@ nir_to_spirv(struct nir_shader *s)
    if (s->info.stage == MESA_SHADER_FRAGMENT) {
       spirv_builder_emit_cap(&ctx.builder, SpvCapabilitySampled1D);
       spirv_builder_emit_cap(&ctx.builder, SpvCapabilityImageQuery);
+      spirv_builder_emit_cap(&ctx.builder, SpvCapabilityDerivativeControl);
    }
 
    ctx.stage = s->info.stage;

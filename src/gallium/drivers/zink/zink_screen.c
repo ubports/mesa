@@ -139,9 +139,8 @@ zink_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       return 0;
 #endif
 
+   case PIPE_CAP_TGSI_INSTANCEID:
    case PIPE_CAP_MIXED_COLORBUFFER_FORMATS:
-      return 1;
-
    case PIPE_CAP_SEAMLESS_CUBE_MAP:
       return 1;
 
@@ -176,6 +175,12 @@ zink_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_CUBE_MAP_ARRAY:
       return screen->feats.imageCubeArray;
 
+   case PIPE_CAP_TEXTURE_BUFFER_OBJECTS:
+      return 1;
+
+   case PIPE_CAP_TEXTURE_BUFFER_OFFSET_ALIGNMENT:
+      return screen->props.limits.minTexelBufferOffsetAlignment;
+
    case PIPE_CAP_PREFER_BLIT_BASED_TEXTURE_TRANSFER:
       return 0; /* unsure */
 
@@ -205,6 +210,9 @@ zink_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       return screen->props.limits.minTexelGatherOffset;
    case PIPE_CAP_MAX_TEXTURE_GATHER_OFFSET:
       return screen->props.limits.maxTexelGatherOffset;
+
+   case PIPE_CAP_TGSI_FS_FINE_DERIVATIVE:
+      return 1;
 
    case PIPE_CAP_VENDOR_ID:
       return screen->props.vendorID;

@@ -589,9 +589,8 @@ panfrost_upload_tex(
                 for (unsigned l = first_level; l <= last_level; ++l) {
                         for (unsigned f = first_face; f <= last_face; ++f) {
                                 pointers_and_strides[idx++] =
-                                        panfrost_get_texture_address(rsrc, l, w*face_mult + f)
+                                        panfrost_get_texture_address(rsrc, l, w * face_mult + f)
                                                 + afbc_bit + view->astc_stretch;
-
                                 if (has_manual_stride) {
                                         pointers_and_strides[idx++] =
                                                 rsrc->slices[l].stride;
@@ -844,7 +843,7 @@ panfrost_patch_shader_state(struct panfrost_context *ctx,
         ss->tripipe->texture_count = ctx->sampler_view_count[stage];
         ss->tripipe->sampler_count = ctx->sampler_count[stage];
 
-        ss->tripipe->midgard1.flags = 0x220;
+        ss->tripipe->midgard1.flags_lo = 0x220;
 
         unsigned ubo_count = panfrost_ubo_count(ctx, stage);
         ss->tripipe->midgard1.uniform_buffer_count = ubo_count;
@@ -936,8 +935,8 @@ panfrost_emit_for_draw(struct panfrost_context *ctx, bool with_vertex_data)
                 COPY(midgard1.uniform_count);
                 COPY(midgard1.uniform_buffer_count);
                 COPY(midgard1.work_count);
-                COPY(midgard1.flags);
-                COPY(midgard1.unknown2);
+                COPY(midgard1.flags_lo);
+                COPY(midgard1.flags_hi);
 
 #undef COPY
 
@@ -962,12 +961,19 @@ panfrost_emit_for_draw(struct panfrost_context *ctx, bool with_vertex_data)
                 /* Depending on whether it's legal to in the given shader, we
                  * try to enable early-z testing (or forward-pixel kill?) */
 
-                SET_BIT(ctx->fragment_shader_core.midgard1.flags, MALI_EARLY_Z, !variant->can_discard);
+                SET_BIT(ctx->fragment_shader_core.midgard1.flags_lo, MALI_EARLY_Z,
+                        !variant->can_discard && !variant->writes_depth);
+
+                /* Add the writes Z/S flags if needed. */
+                SET_BIT(ctx->fragment_shader_core.midgard1.flags_lo,
+                        MALI_WRITES_Z, variant->writes_depth);
+                SET_BIT(ctx->fragment_shader_core.midgard1.flags_hi,
+                        MALI_WRITES_S, variant->writes_stencil);
 
                 /* Any time texturing is used, derivatives are implicitly
                  * calculated, so we need to enable helper invocations */
 
-                SET_BIT(ctx->fragment_shader_core.midgard1.flags, MALI_HELPER_INVOCATIONS, variant->helper_invocations);
+                SET_BIT(ctx->fragment_shader_core.midgard1.flags_lo, MALI_HELPER_INVOCATIONS, variant->helper_invocations);
 
                 /* Assign the stencil refs late */
 
@@ -986,7 +992,7 @@ panfrost_emit_for_draw(struct panfrost_context *ctx, bool with_vertex_data)
                  */
 
                 SET_BIT(ctx->fragment_shader_core.unknown2_3, MALI_CAN_DISCARD, variant->can_discard);
-                SET_BIT(ctx->fragment_shader_core.midgard1.flags, 0x400, variant->can_discard);
+                SET_BIT(ctx->fragment_shader_core.midgard1.flags_lo, 0x400, variant->can_discard);
 
                 /* Even on MFBD, the shader descriptor gets blend shaders. It's
                  * *also* copied to the blend_meta appended (by convention),
@@ -1093,7 +1099,7 @@ panfrost_emit_for_draw(struct panfrost_context *ctx, bool with_vertex_data)
                 panfrost_upload_sysvals(ctx, transfer.cpu, ss, i);
 
                 /* Upload uniforms */
-                if (has_uniforms) {
+                if (has_uniforms && uniform_size) {
                         const void *cpu = panfrost_map_constant_buffer_cpu(buf, 0);
                         memcpy(transfer.cpu + sys_size, cpu, uniform_size);
                 }
@@ -1801,16 +1807,17 @@ panfrost_create_sampler_state(
          * essentially -- remember these are fixed point numbers, so
          * epsilon=1/256) */
 
-        if (cso->min_mip_filter == PIPE_TEX_MIPFILTER_NONE)
+        if (cso->min_mip_filter == PIPE_TEX_MIPFILTER_NONE) {
                 sampler_descriptor.max_lod = sampler_descriptor.min_lod;
 
-        /* Enforce that there is something in the middle by adding epsilon*/
+                /* Enforce that there is something in the middle by adding epsilon*/
 
-        if (sampler_descriptor.min_lod == sampler_descriptor.max_lod)
-                sampler_descriptor.max_lod++;
+                if (sampler_descriptor.min_lod == sampler_descriptor.max_lod)
+                        sampler_descriptor.max_lod++;
 
-        /* Sanity check */
-        assert(sampler_descriptor.max_lod > sampler_descriptor.min_lod);
+                /* Sanity check */
+                assert(sampler_descriptor.max_lod > sampler_descriptor.min_lod);
+        }
 
         so->hw = sampler_descriptor;
 
@@ -2506,7 +2513,7 @@ panfrost_begin_query(struct pipe_context *pipe, struct pipe_query *q)
                 break;
 
         default:
-                fprintf(stderr, "Skipping query %u\n", query->type);
+                DBG("Skipping query %u\n", query->type);
                 break;
         }
 

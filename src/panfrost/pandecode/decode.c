@@ -263,10 +263,16 @@ static const struct pandecode_flag_info mfbd_extra_flag_lo_info[] = {
 #undef FLAG_INFO
 
 #define FLAG_INFO(flag) { MALI_##flag, "MALI_" #flag }
-static const struct pandecode_flag_info shader_midgard1_flag_info [] = {
+static const struct pandecode_flag_info shader_midgard1_flag_lo_info [] = {
+        FLAG_INFO(WRITES_Z),
         FLAG_INFO(EARLY_Z),
         FLAG_INFO(READS_TILEBUFFER),
         FLAG_INFO(READS_ZS),
+        {}
+};
+
+static const struct pandecode_flag_info shader_midgard1_flag_hi_info [] = {
+        FLAG_INFO(WRITES_S),
         {}
 };
 #undef FLAG_INFO
@@ -1021,7 +1027,7 @@ pandecode_render_target(uint64_t gpu_va, unsigned job_no, const struct bifrost_f
 }
 
 static struct pandecode_fbd
-pandecode_mfbd_bfr(uint64_t gpu_va, int job_no, bool is_fragment)
+pandecode_mfbd_bfr(uint64_t gpu_va, int job_no, bool is_fragment, bool is_compute)
 {
         struct pandecode_mapped_memory *mem = pandecode_find_mapped_gpu_mem_containing(gpu_va);
         const struct bifrost_framebuffer *PANDECODE_PTR_VAR(fb, mem, (mali_ptr) gpu_va);
@@ -1099,7 +1105,10 @@ pandecode_mfbd_bfr(uint64_t gpu_va, int job_no, bool is_fragment)
         pandecode_prop("unknown2 = 0x%x", fb->unknown2);
         MEMORY_PROP(fb, scratchpad);
         const struct midgard_tiler_descriptor t = fb->tiler;
-        pandecode_midgard_tiler_descriptor(&t, fb->width1 + 1, fb->height1 + 1, is_fragment, true);
+        if (!is_compute)
+                pandecode_midgard_tiler_descriptor(&t, fb->width1 + 1, fb->height1 + 1, is_fragment, true);
+        else
+                pandecode_msg("XXX: skipping compute MFBD, fixme\n");
 
         if (fb->zero3 || fb->zero4) {
                 pandecode_msg("XXX: framebuffer zeros tripped\n");
@@ -1996,7 +2005,7 @@ pandecode_texture(mali_ptr u,
 
         if (!f.unknown2) {
                 pandecode_msg("XXX: expected unknown texture bit set\n");
-                pandecode_prop("unknown2 = %" PRId32, f.unknown1);
+                pandecode_prop("unknown2 = %" PRId32, f.unknown2);
         }
 
         if (t->swizzle_zero) {
@@ -2027,8 +2036,8 @@ pandecode_texture(mali_ptr u,
         /* Miptree for each face */
         if (f.type == MALI_TEX_CUBE)
                 bitmap_count *= 6;
-        else if (f.type == MALI_TEX_3D)
-                bitmap_count *= t->depth;
+        else if (f.type == MALI_TEX_3D && f.layout == MALI_TEXTURE_LINEAR)
+                bitmap_count *= (t->depth + 1);
 
         /* Array of textures */
         bitmap_count *= (t->array_size + 1);
@@ -2140,7 +2149,7 @@ pandecode_vertex_tiler_postfix_pre(
         if (is_bifrost)
                 pandecode_scratchpad(p->framebuffer & ~1, job_no, suffix);
         else if (p->framebuffer & MALI_MFBD)
-                fbd_info = pandecode_mfbd_bfr((u64) ((uintptr_t) p->framebuffer) & FBD_MASK, job_no, false);
+                fbd_info = pandecode_mfbd_bfr((u64) ((uintptr_t) p->framebuffer) & FBD_MASK, job_no, false, job_type == JOB_TYPE_COMPUTE);
         else if (job_type == JOB_TYPE_COMPUTE)
                 pandecode_compute_fbd((u64) (uintptr_t) p->framebuffer, job_no);
         else
@@ -2210,19 +2219,21 @@ pandecode_vertex_tiler_postfix_pre(
                 if (is_bifrost) {
                         pandecode_prop("bifrost1.unk1 = 0x%" PRIx32, s->bifrost1.unk1);
                 } else {
-                        bool helpers = s->midgard1.flags & MALI_HELPER_INVOCATIONS;
-                        s->midgard1.flags &= ~MALI_HELPER_INVOCATIONS;
+                        bool helpers = s->midgard1.flags_lo & MALI_HELPER_INVOCATIONS;
+                        s->midgard1.flags_lo &= ~MALI_HELPER_INVOCATIONS;
 
                         if (helpers != info.helper_invocations) {
                                 pandecode_msg("XXX: expected helpers %u but got %u\n",
                                                 info.helper_invocations, helpers);
                         }
 
-                        pandecode_log(".midgard1.flags = ");
-                        pandecode_log_decoded_flags(shader_midgard1_flag_info, s->midgard1.flags);
+                        pandecode_log(".midgard1.flags_lo = ");
+                        pandecode_log_decoded_flags(shader_midgard1_flag_lo_info, s->midgard1.flags_lo);
                         pandecode_log_cont(",\n");
 
-                        pandecode_prop("midgard1.unknown2 = 0x%" PRIx32, s->midgard1.unknown2);
+                        pandecode_log(".midgard1.flags_hi = ");
+                        pandecode_log_decoded_flags(shader_midgard1_flag_hi_info, s->midgard1.flags_hi);
+                        pandecode_log_cont(",\n");
                 }
 
                 if (s->depth_units || s->depth_factor) {
@@ -2766,7 +2777,7 @@ pandecode_fragment_job(const struct pandecode_mapped_memory *mem,
         struct pandecode_fbd info;
 
         if (is_mfbd)
-                info = pandecode_mfbd_bfr(s->framebuffer & FBD_MASK, job_no, true);
+                info = pandecode_mfbd_bfr(s->framebuffer & FBD_MASK, job_no, true, false);
         else
                 info = pandecode_sfbd(s->framebuffer & FBD_MASK, job_no, true, gpu_id);
 

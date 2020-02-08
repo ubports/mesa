@@ -777,9 +777,11 @@ panfrost_batch_draw_wallpaper(struct panfrost_batch *batch)
         damage.maxx = MIN2(batch->maxx,
                            rsrc->damage.biggest_rect.x +
                            rsrc->damage.biggest_rect.width);
+        damage.maxx = MAX2(damage.maxx, damage.minx);
         damage.maxy = MIN2(batch->maxy,
                            rsrc->damage.biggest_rect.y +
                            rsrc->damage.biggest_rect.height);
+        damage.maxy = MAX2(damage.maxy, damage.miny);
 
         /* One damage rectangle means we can end up with at most 4 reload
          * regions:
@@ -893,7 +895,7 @@ panfrost_batch_submit_ioctl(struct panfrost_batch *batch,
         free(in_syncs);
 
         if (ret) {
-                fprintf(stderr, "Error submitting: %m\n");
+                DBG("Error submitting: %m\n");
                 return errno;
         }
 
@@ -907,7 +909,7 @@ panfrost_batch_submit_ioctl(struct panfrost_batch *batch,
                 status = header->exception_status;
 
                 if (status && status != 0x1) {
-                        fprintf(stderr, "Job %" PRIx64 " failed: source ID: 0x%x access: %s exception: 0x%x (exception_status 0x%x) fault_pointer 0x%" PRIx64 " \n",
+                        DBG("Job %" PRIx64 " failed: source ID: 0x%x access: %s exception: 0x%x (exception_status 0x%x) fault_pointer 0x%" PRIx64 " \n",
                                first_job_desc,
                                (status >> 16) & 0xFFFF,
                                pandecode_exception_access((status >> 8) & 0x3),
@@ -995,7 +997,7 @@ panfrost_batch_submit(struct panfrost_batch *batch)
         ret = panfrost_batch_submit_jobs(batch);
 
         if (ret)
-                fprintf(stderr, "panfrost_batch_submit failed: %d\n", ret);
+                DBG("panfrost_batch_submit failed: %d\n", ret);
 
         /* We must reset the damage info of our render targets here even
          * though a damage reset normally happens when the DRI layer swaps

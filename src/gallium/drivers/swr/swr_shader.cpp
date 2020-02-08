@@ -79,7 +79,6 @@ constexpr bool verbose_shader = false;
 #endif
 
 using namespace SwrJit;
-using namespace llvm;
 
 static unsigned
 locate_linkage(ubyte name, ubyte index, struct tgsi_shader_info *info);
@@ -364,7 +363,7 @@ struct BuilderSWR : public Builder {
    void
    swr_gs_llvm_epilogue(const struct lp_build_gs_iface *gs_base,
                         LLVMValueRef total_emitted_vertices_vec,
-                        LLVMValueRef emitted_prims_vec);
+                        LLVMValueRef emitted_prims_vec, unsigned stream);
 
    // TCS-specific emit functions
    void swr_tcs_llvm_emit_prologue(struct lp_build_tgsi_soa_context* bld);
@@ -525,13 +524,13 @@ swr_gs_llvm_end_primitive(const struct lp_build_gs_iface *gs_base,
 static void
 swr_gs_llvm_epilogue(const struct lp_build_gs_iface *gs_base,
                         LLVMValueRef total_emitted_vertices_vec,
-                        LLVMValueRef emitted_prims_vec)
+                        LLVMValueRef emitted_prims_vec, unsigned stream)
 {
     swr_gs_llvm_iface *iface = (swr_gs_llvm_iface*)gs_base;
 
     iface->pBuilder->swr_gs_llvm_epilogue(gs_base,
                                          total_emitted_vertices_vec,
-                                         emitted_prims_vec);
+                                         emitted_prims_vec, stream);
 }
 
 static LLVMValueRef
@@ -910,7 +909,7 @@ BuilderSWR::swr_gs_llvm_end_primitive(const struct lp_build_gs_iface *gs_base,
 void
 BuilderSWR::swr_gs_llvm_epilogue(const struct lp_build_gs_iface *gs_base,
                         LLVMValueRef total_emitted_vertices_vec,
-                        LLVMValueRef emitted_prims_vec)
+                        LLVMValueRef emitted_prims_vec, unsigned stream)
 {
    swr_gs_llvm_iface *iface = (swr_gs_llvm_iface*)gs_base;
 
@@ -1511,6 +1510,7 @@ BuilderSWR::CompileGS(struct swr_context *ctx, swr_jit_gs_key &key)
 
    struct lp_build_sampler_soa *sampler =
       swr_sampler_soa_create(key.sampler, PIPE_SHADER_GEOMETRY);
+   assert(sampler != nullptr);
 
    struct lp_bld_tgsi_system_values system_values;
    memset(&system_values, 0, sizeof(system_values));
@@ -1524,6 +1524,7 @@ BuilderSWR::CompileGS(struct swr_context *ctx, swr_jit_gs_key &key)
       ubyte semantic_idx = info->input_semantic_index[slot];
 
       unsigned vs_slot = locate_linkage(semantic_name, semantic_idx, &ctx->vs->info.base);
+      assert(vs_slot < PIPE_MAX_SHADER_OUTPUTS);
 
       vs_slot += VERTEX_ATTRIB_START_SLOT;
 
@@ -1623,10 +1624,10 @@ BuilderSWR::CompileTES(struct swr_context *ctx, swr_jit_tes_key &key)
    unsigned tes_spacing = info->properties[TGSI_PROPERTY_TES_SPACING];
    bool tes_vertex_order_cw = info->properties[TGSI_PROPERTY_TES_VERTEX_ORDER_CW];
    bool tes_point_mode = info->properties[TGSI_PROPERTY_TES_POINT_MODE];
-   SWR_TS_DOMAIN type;
-   SWR_TS_PARTITIONING partitioning;
-   SWR_TS_OUTPUT_TOPOLOGY topology;
-   PRIMITIVE_TOPOLOGY postDSTopology;
+   SWR_TS_DOMAIN type = SWR_TS_ISOLINE;
+   SWR_TS_PARTITIONING partitioning = SWR_TS_EVEN_FRACTIONAL;
+   SWR_TS_OUTPUT_TOPOLOGY topology = SWR_TS_OUTPUT_POINT;
+   PRIMITIVE_TOPOLOGY postDSTopology = TOP_POINT_LIST;
 
    // TESS_TODO: move this to helper functions to improve readability
    switch (tes_prim_mode) {
@@ -1737,6 +1738,7 @@ BuilderSWR::CompileTES(struct swr_context *ctx, swr_jit_tes_key &key)
 
    struct lp_build_sampler_soa *sampler =
       swr_sampler_soa_create(key.sampler, PIPE_SHADER_TESS_EVAL);
+   assert(sampler != nullptr);
 
    struct lp_bld_tgsi_system_values system_values;
    memset(&system_values, 0, sizeof(system_values));
@@ -1831,6 +1833,7 @@ BuilderSWR::CompileTES(struct swr_context *ctx, swr_jit_tes_key &key)
       // Where in TCS output is my attribute?
       // TESS_TODO: revisit after implement pass-through TCS
       unsigned tcs_slot = locate_linkage(semantic_name, semantic_idx, pPrevShader);
+      assert(tcs_slot < PIPE_MAX_SHADER_OUTPUTS);
 
       // Skip tessellation levels - these go to the tessellator, not TES
       switch (semantic_name) {
@@ -2036,6 +2039,7 @@ BuilderSWR::CompileTCS(struct swr_context *ctx, swr_jit_tcs_key &key)
 
    struct lp_build_sampler_soa *sampler =
       swr_sampler_soa_create(key.sampler, PIPE_SHADER_TESS_CTRL);
+   assert(sampler != nullptr);
 
    struct lp_bld_tgsi_system_values system_values;
    memset(&system_values, 0, sizeof(system_values));
@@ -2070,6 +2074,7 @@ BuilderSWR::CompileTCS(struct swr_context *ctx, swr_jit_tcs_key &key)
 
       unsigned vs_slot =
          locate_linkage(semantic_name, semantic_idx, &ctx->vs->info.base);
+      assert(vs_slot < PIPE_MAX_SHADER_OUTPUTS);
 
       vs_slot += VERTEX_ATTRIB_START_SLOT;
 
@@ -2191,7 +2196,7 @@ swr_compile_gs(struct swr_context *ctx, swr_jit_gs_key &key)
       "GS");
    PFN_GS_FUNC func = builder.CompileGS(ctx, key);
 
-   ctx->gs->map.insert(std::make_pair(key, std::make_unique<VariantGS>(builder.gallivm, func)));
+   ctx->gs->map.insert(std::make_pair(key, std::unique_ptr<VariantGS>(new VariantGS(builder.gallivm, func))));
    return func;
 }
 
@@ -2204,7 +2209,7 @@ swr_compile_tcs(struct swr_context *ctx, swr_jit_tcs_key &key)
    PFN_TCS_FUNC func = builder.CompileTCS(ctx, key);
 
    ctx->tcs->map.insert(
-      std::make_pair(key, std::make_unique<VariantTCS>(builder.gallivm, func)));
+      std::make_pair(key, std::unique_ptr<VariantTCS>(new VariantTCS(builder.gallivm, func))));
 
    return func;
 }
@@ -2218,7 +2223,7 @@ swr_compile_tes(struct swr_context *ctx, swr_jit_tes_key &key)
    PFN_TES_FUNC func = builder.CompileTES(ctx, key);
 
    ctx->tes->map.insert(
-      std::make_pair(key, std::make_unique<VariantTES>(builder.gallivm, func)));
+      std::make_pair(key, std::unique_ptr<VariantTES>(new VariantTES(builder.gallivm, func))));
 
    return func;
 }
@@ -2312,6 +2317,7 @@ BuilderSWR::CompileVS(struct swr_context *ctx, swr_jit_vs_key &key)
 
    struct lp_build_sampler_soa *sampler =
       swr_sampler_soa_create(key.sampler, PIPE_SHADER_VERTEX);
+   assert(sampler != nullptr);
 
    struct lp_bld_tgsi_system_values system_values;
    memset(&system_values, 0, sizeof(system_values));
@@ -2398,6 +2404,7 @@ BuilderSWR::CompileVS(struct swr_context *ctx, swr_jit_vs_key &key)
             }
          }
       }
+      assert(cv < PIPE_MAX_SHADER_OUTPUTS);
       LLVMValueRef cx = LLVMBuildLoad(gallivm->builder, outputs[cv][0], "");
       LLVMValueRef cy = LLVMBuildLoad(gallivm->builder, outputs[cv][1], "");
       LLVMValueRef cz = LLVMBuildLoad(gallivm->builder, outputs[cv][2], "");
@@ -2420,6 +2427,7 @@ BuilderSWR::CompileVS(struct swr_context *ctx, swr_jit_vs_key &key)
          if ((pLastFE->clipdist_writemask & clip_mask & (1 << val)) ||
              ((pLastFE->culldist_writemask << pLastFE->num_written_clipdistance) & (1 << val))) {
             unsigned cv = locate_linkage(TGSI_SEMANTIC_CLIPDIST, val < 4 ? 0 : 1, pLastFE);
+            assert(cv < PIPE_MAX_SHADER_OUTPUTS);
             if (val < 4) {
                LLVMValueRef dist = LLVMBuildLoad(gallivm->builder, outputs[cv][val], "");
                WriteVS(unwrap(dist), pVsCtx, vtxOutput, VERTEX_CLIPCULL_DIST_LO_SLOT, val);
@@ -2492,7 +2500,7 @@ swr_compile_vs(struct swr_context *ctx, swr_jit_vs_key &key)
       "VS");
    PFN_VERTEX_FUNC func = builder.CompileVS(ctx, key);
 
-   ctx->vs->map.insert(std::make_pair(key, std::make_unique<VariantVS>(builder.gallivm, func)));
+   ctx->vs->map.insert(std::make_pair(key, std::unique_ptr<VariantVS>(new VariantVS(builder.gallivm, func))));
    return func;
 }
 
@@ -2712,7 +2720,7 @@ BuilderSWR::CompileFS(struct swr_context *ctx, swr_jit_fs_key &key)
          linkedAttrib = pPrevShader->num_outputs + extraAttribs - 1;
          swr_fs->pointSpriteMask |= (1 << linkedAttrib);
          extraAttribs++;
-      } else if (linkedAttrib == 0xFFFFFFFF) {
+      } else if (linkedAttrib + 1 == 0xFFFFFFFF) {
          inputs[attrib][0] = wrap(VIMMED1(0.0f));
          inputs[attrib][1] = wrap(VIMMED1(0.0f));
          inputs[attrib][2] = wrap(VIMMED1(0.0f));
@@ -2734,15 +2742,16 @@ BuilderSWR::CompileFS(struct swr_context *ctx, swr_jit_fs_key &key)
       Value *offset = NULL;
       if (semantic_name == TGSI_SEMANTIC_COLOR && key.light_twoside) {
          bcolorAttrib = locate_linkage(
-               TGSI_SEMANTIC_BCOLOR, semantic_idx, pPrevShader) - 1;
+               TGSI_SEMANTIC_BCOLOR, semantic_idx, pPrevShader);
          /* Neither front nor back colors were available. Nothing to load. */
          if (bcolorAttrib == 0xFFFFFFFF && linkedAttrib == 0xFFFFFFFF)
             continue;
          /* If there is no front color, just always use the back color. */
-         if (linkedAttrib == 0xFFFFFFFF)
+         if (linkedAttrib + 1 == 0xFFFFFFFF)
             linkedAttrib = bcolorAttrib;
 
          if (bcolorAttrib != 0xFFFFFFFF) {
+            bcolorAttrib -= 1;
             if (interpMode == TGSI_INTERPOLATE_CONSTANT) {
                swr_fs->constantMask |= 1 << bcolorAttrib;
             } else if (interpMode == TGSI_INTERPOLATE_COLOR) {
@@ -2798,6 +2807,7 @@ BuilderSWR::CompileFS(struct swr_context *ctx, swr_jit_fs_key &key)
    }
 
    sampler = swr_sampler_soa_create(key.sampler, PIPE_SHADER_FRAGMENT);
+   assert(sampler != nullptr);
 
    struct lp_bld_tgsi_system_values system_values;
    memset(&system_values, 0, sizeof(system_values));
@@ -2961,6 +2971,6 @@ swr_compile_fs(struct swr_context *ctx, swr_jit_fs_key &key)
       "FS");
    PFN_PIXEL_KERNEL func = builder.CompileFS(ctx, key);
 
-   ctx->fs->map.insert(std::make_pair(key, std::make_unique<VariantFS>(builder.gallivm, func)));
+   ctx->fs->map.insert(std::make_pair(key, std::unique_ptr<VariantFS>(new VariantFS(builder.gallivm, func))));
    return func;
 }

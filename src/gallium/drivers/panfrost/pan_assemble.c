@@ -114,6 +114,10 @@ panfrost_shader_compile(
         case MESA_SHADER_FRAGMENT:
                 meta->attribute_count = 0;
                 meta->varying_count = util_bitcount64(s->info.inputs_read);
+                if (s->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_DEPTH))
+                        state->writes_depth = true;
+                if (s->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_STENCIL))
+                        state->writes_stencil = true;
                 break;
         case MESA_SHADER_COMPUTE:
                 /* TODO: images */
@@ -136,7 +140,7 @@ panfrost_shader_compile(
         /* Separate as primary uniform count is truncated */
         state->uniform_count = program.uniform_count;
 
-        meta->midgard1.unknown2 = 8; /* XXX */
+        meta->midgard1.flags_hi = 8; /* XXX */
 
         unsigned default_vec1_swizzle = panfrost_get_default_swizzle(1);
         unsigned default_vec2_swizzle = panfrost_get_default_swizzle(2);

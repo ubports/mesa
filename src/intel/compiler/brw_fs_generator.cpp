@@ -452,8 +452,17 @@ fs_generator::generate_mov_indirect(fs_inst *inst,
        * In the end, while base_offset is nice to look at in the generated
        * code, using it saves us 0 instructions and would require quite a bit
        * of case-by-case work.  It's just not worth it.
+       *
+       * There's some sort of HW bug on Gen12 which causes issues if we write
+       * to the address register in control-flow.  Since we only ever touch
+       * the address register from the generator, we can easily enough work
+       * around it by setting NoMask on the add.
        */
+      brw_push_insn_state(p);
+      if (devinfo->gen == 12)
+         brw_set_default_mask_control(p, BRW_MASK_DISABLE);
       brw_ADD(p, addr, indirect_byte_offset, brw_imm_uw(imm_byte_offset));
+      brw_pop_insn_state(p);
       brw_set_default_swsb(p, tgl_swsb_regdist(1));
 
       if (type_sz(reg.type) > 4 &&
@@ -1711,6 +1720,7 @@ fs_generator::generate_code(const cfg_t *cfg, int dispatch_width,
     */
    int spill_count = 0, fill_count = 0;
    int loop_count = 0, send_count = 0;
+   bool is_accum_used = false;
 
    struct disasm_info *disasm_info = disasm_initialize(devinfo, cfg);
 
@@ -1739,6 +1749,23 @@ fs_generator::generate_code(const cfg_t *cfg, int dispatch_width,
           inst->dst.component_size(inst->exec_size) > REG_SIZE) {
          brw_NOP(p);
          last_insn_offset = p->next_insn_offset;
+      }
+
+      /* GEN:BUG:14010017096:
+       *
+       * Clear accumulator register before end of thread.
+       */
+      if (inst->eot && is_accum_used && devinfo->gen >= 12) {
+         brw_set_default_exec_size(p, BRW_EXECUTE_16);
+         brw_set_default_mask_control(p, BRW_MASK_DISABLE);
+         brw_set_default_predicate_control(p, BRW_PREDICATE_NONE);
+         brw_MOV(p, brw_acc_reg(8), brw_imm_f(0.0f));
+         last_insn_offset = p->next_insn_offset;
+      }
+
+      if (!is_accum_used && !inst->eot) {
+         is_accum_used = inst->writes_accumulator_implicitly(devinfo) ||
+                         inst->dst.is_accumulator();
       }
 
       if (unlikely(debug_flag))

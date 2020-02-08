@@ -548,7 +548,7 @@ tu6_emit_render_cntl(struct tu_cmd_buffer *cmd,
       cntl |= A6XX_RB_RENDER_CNTL_BINNING;
 
    tu_cs_emit_pkt7(cs, CP_REG_WRITE, 3);
-   tu_cs_emit(cs, 0x2);
+   tu_cs_emit(cs, CP_REG_WRITE_0_TRACKER(TRACK_RENDER_CNTL));
    tu_cs_emit(cs, REG_A6XX_RB_RENDER_CNTL);
    tu_cs_emit(cs, cntl);
 }
@@ -597,12 +597,12 @@ tu6_emit_blit_info(struct tu_cmd_buffer *cmd,
                       .samples = tu_msaa_samples(iview->image->samples),
                       .color_format = format->rb,
                       .color_swap = format->swap,
-                      .flags = iview->image->layout.ubwc_size != 0),
+                      .flags = iview->image->layout.ubwc_layer_size != 0),
                    A6XX_RB_BLIT_DST(tu_image_view_base_ref(iview)),
                    A6XX_RB_BLIT_DST_PITCH(tu_image_stride(iview->image, iview->base_mip)),
                    A6XX_RB_BLIT_DST_ARRAY_PITCH(iview->image->layout.layer_size));
 
-   if (iview->image->layout.ubwc_size) {
+   if (iview->image->layout.ubwc_layer_size) {
       tu_cs_emit_regs(cs,
                       A6XX_RB_BLIT_FLAG_DST(tu_image_view_ubwc_base_ref(iview)),
                       A6XX_RB_BLIT_FLAG_DST_PITCH(tu_image_view_ubwc_pitches(iview)));
@@ -1092,7 +1092,8 @@ update_vsc_pipe(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
    tu_cs_emit_regs(cs,
                    A6XX_VSC_BIN_SIZE(.width = tiling->tile0.extent.width,
                                      .height = tiling->tile0.extent.height),
-                   A6XX_VSC_SIZE_ADDRESS(.bo = &cmd->vsc_data, .bo_offset = cmd->vsc_data_pitch));
+                   A6XX_VSC_SIZE_ADDRESS(.bo = &cmd->vsc_data,
+                                         .bo_offset = 32 * cmd->vsc_data_pitch));
 
    tu_cs_emit_regs(cs,
                    A6XX_VSC_BIN_COUNT(.nx = tiling->tile_count.width,
@@ -1667,29 +1668,18 @@ tu_create_cmd_buffer(struct tu_device *device,
 
    VkResult result = tu_bo_init_new(device, &cmd_buffer->scratch_bo, 0x1000);
    if (result != VK_SUCCESS)
-      return result;
+      goto fail_scratch_bo;
 
-#define VSC_DATA_SIZE(pitch)  ((pitch) * 32 + 0x100)  /* extra size to store VSC_SIZE */
-#define VSC_DATA2_SIZE(pitch) ((pitch) * 32)
-
-   /* TODO: resize on overflow or compute a max size from # of vertices in renderpass?? */
-   cmd_buffer->vsc_data_pitch = 0x440 * 4;
-   cmd_buffer->vsc_data2_pitch = 0x1040 * 4;
-
-   result = tu_bo_init_new(device, &cmd_buffer->vsc_data, VSC_DATA_SIZE(cmd_buffer->vsc_data_pitch));
-   if (result != VK_SUCCESS)
-      goto fail_vsc_data;
-
-   result = tu_bo_init_new(device, &cmd_buffer->vsc_data2, VSC_DATA2_SIZE(cmd_buffer->vsc_data2_pitch));
-   if (result != VK_SUCCESS)
-      goto fail_vsc_data2;
+   /* TODO: resize on overflow */
+   cmd_buffer->vsc_data_pitch = device->vsc_data_pitch;
+   cmd_buffer->vsc_data2_pitch = device->vsc_data2_pitch;
+   cmd_buffer->vsc_data = device->vsc_data;
+   cmd_buffer->vsc_data2 = device->vsc_data2;
 
    return VK_SUCCESS;
 
-fail_vsc_data2:
-   tu_bo_finish(cmd_buffer->device, &cmd_buffer->vsc_data);
-fail_vsc_data:
-   tu_bo_finish(cmd_buffer->device, &cmd_buffer->scratch_bo);
+fail_scratch_bo:
+   list_del(&cmd_buffer->pool_link);
    return result;
 }
 
@@ -1697,8 +1687,6 @@ static void
 tu_cmd_buffer_destroy(struct tu_cmd_buffer *cmd_buffer)
 {
    tu_bo_finish(cmd_buffer->device, &cmd_buffer->scratch_bo);
-   tu_bo_finish(cmd_buffer->device, &cmd_buffer->vsc_data);
-   tu_bo_finish(cmd_buffer->device, &cmd_buffer->vsc_data2);
 
    list_del(&cmd_buffer->pool_link);
 
@@ -1728,7 +1716,6 @@ tu_reset_cmd_buffer(struct tu_cmd_buffer *cmd_buffer)
    tu_cs_reset(cmd_buffer->device, &cmd_buffer->sub_cs);
 
    for (unsigned i = 0; i < VK_PIPELINE_BIND_POINT_RANGE_SIZE; i++) {
-      cmd_buffer->descriptors[i].dirty = 0;
       cmd_buffer->descriptors[i].valid = 0;
       cmd_buffer->descriptors[i].push_dirty = false;
    }
@@ -3867,11 +3854,23 @@ tu_CmdPipelineBarrier(VkCommandBuffer commandBuffer,
 }
 
 static void
-write_event(struct tu_cmd_buffer *cmd_buffer,
-            struct tu_event *event,
-            VkPipelineStageFlags stageMask,
-            unsigned value)
+write_event(struct tu_cmd_buffer *cmd, struct tu_event *event, unsigned value)
 {
+   struct tu_cs *cs = &cmd->cs;
+
+   VkResult result = tu_cs_reserve_space(cmd->device, cs, 4);
+   if (result != VK_SUCCESS) {
+      cmd->record_result = result;
+      return;
+   }
+
+   tu_bo_list_add(&cmd->bo_list, &event->bo, MSM_SUBMIT_BO_WRITE);
+
+   /* TODO: any flush required before/after ? */
+
+   tu_cs_emit_pkt7(cs, CP_MEM_WRITE, 3);
+   tu_cs_emit_qw(cs, event->bo.iova); /* ADDR_LO/HI */
+   tu_cs_emit(cs, value);
 }
 
 void
@@ -3879,10 +3878,10 @@ tu_CmdSetEvent(VkCommandBuffer commandBuffer,
                VkEvent _event,
                VkPipelineStageFlags stageMask)
 {
-   TU_FROM_HANDLE(tu_cmd_buffer, cmd_buffer, commandBuffer);
+   TU_FROM_HANDLE(tu_cmd_buffer, cmd, commandBuffer);
    TU_FROM_HANDLE(tu_event, event, _event);
 
-   write_event(cmd_buffer, event, stageMask, 1);
+   write_event(cmd, event, 1);
 }
 
 void
@@ -3890,10 +3889,10 @@ tu_CmdResetEvent(VkCommandBuffer commandBuffer,
                  VkEvent _event,
                  VkPipelineStageFlags stageMask)
 {
-   TU_FROM_HANDLE(tu_cmd_buffer, cmd_buffer, commandBuffer);
+   TU_FROM_HANDLE(tu_cmd_buffer, cmd, commandBuffer);
    TU_FROM_HANDLE(tu_event, event, _event);
 
-   write_event(cmd_buffer, event, stageMask, 0);
+   write_event(cmd, event, 0);
 }
 
 void
@@ -3909,16 +3908,30 @@ tu_CmdWaitEvents(VkCommandBuffer commandBuffer,
                  uint32_t imageMemoryBarrierCount,
                  const VkImageMemoryBarrier *pImageMemoryBarriers)
 {
-   TU_FROM_HANDLE(tu_cmd_buffer, cmd_buffer, commandBuffer);
-   struct tu_barrier_info info;
+   TU_FROM_HANDLE(tu_cmd_buffer, cmd, commandBuffer);
+   struct tu_cs *cs = &cmd->cs;
 
-   info.eventCount = eventCount;
-   info.pEvents = pEvents;
-   info.srcStageMask = 0;
+   VkResult result = tu_cs_reserve_space(cmd->device, cs, eventCount * 7);
+   if (result != VK_SUCCESS) {
+      cmd->record_result = result;
+      return;
+   }
 
-   tu_barrier(cmd_buffer, memoryBarrierCount, pMemoryBarriers,
-              bufferMemoryBarrierCount, pBufferMemoryBarriers,
-              imageMemoryBarrierCount, pImageMemoryBarriers, &info);
+   /* TODO: any flush required before/after? (CP_WAIT_FOR_ME?) */
+
+   for (uint32_t i = 0; i < eventCount; i++) {
+      const struct tu_event *event = (const struct tu_event*) pEvents[i];
+
+      tu_bo_list_add(&cmd->bo_list, &event->bo, MSM_SUBMIT_BO_READ);
+
+      tu_cs_emit_pkt7(cs, CP_WAIT_REG_MEM, 6);
+      tu_cs_emit(cs, CP_WAIT_REG_MEM_0_FUNCTION(WRITE_EQ) |
+                     CP_WAIT_REG_MEM_0_POLL_MEMORY);
+      tu_cs_emit_qw(cs, event->bo.iova); /* POLL_ADDR_LO/HI */
+      tu_cs_emit(cs, CP_WAIT_REG_MEM_3_REF(1));
+      tu_cs_emit(cs, CP_WAIT_REG_MEM_4_MASK(~0u));
+      tu_cs_emit(cs, CP_WAIT_REG_MEM_5_DELAY_LOOP_CYCLES(20));
+   }
 }
 
 void

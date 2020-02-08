@@ -45,7 +45,7 @@ image_level_linear(struct tu_image *image, int level, bool ubwc)
 enum a6xx_tile_mode
 tu6_get_image_tile_mode(struct tu_image *image, int level)
 {
-   if (image_level_linear(image, level, !!image->layout.ubwc_size))
+   if (image_level_linear(image, level, !!image->layout.ubwc_layer_size))
       return TILE6_LINEAR;
    else
       return image->layout.tile_mode;
@@ -150,6 +150,8 @@ tu_image_create(VkDevice _device,
    /* expect UBWC enabled if we asked for it */
    assert(modifier != DRM_FORMAT_MOD_QCOM_COMPRESSED || ubwc_enabled);
 
+   image->layout.ubwc = ubwc_enabled;
+
    fdl6_layout(&image->layout, vk_format_to_pipe_format(image->vk_format),
                image->samples,
                pCreateInfo->extent.width,
@@ -157,8 +159,7 @@ tu_image_create(VkDevice _device,
                pCreateInfo->extent.depth,
                pCreateInfo->mipLevels,
                pCreateInfo->arrayLayers,
-               pCreateInfo->imageType == VK_IMAGE_TYPE_3D,
-               ubwc_enabled);
+               pCreateInfo->imageType == VK_IMAGE_TYPE_3D);
 
    *pImage = tu_image_to_handle(image);
 
@@ -307,7 +308,7 @@ tu_image_view_init(struct tu_image_view *iview,
    iview->descriptor[4] = base_addr;
    iview->descriptor[5] = (base_addr >> 32) | A6XX_TEX_CONST_5_DEPTH(depth);
 
-   if (image->layout.ubwc_size) {
+   if (image->layout.ubwc_layer_size) {
       uint32_t block_width, block_height;
       fdl6_get_ubwc_blockwidth(&image->layout,
                                &block_width, &block_height);
@@ -344,7 +345,7 @@ tu_image_view_init(struct tu_image_view *iview,
       iview->storage_descriptor[4] = base_addr;
       iview->storage_descriptor[5] = (base_addr >> 32) | A6XX_IBO_5_DEPTH(depth);
 
-      if (image->layout.ubwc_size) {
+      if (image->layout.ubwc_layer_size) {
          iview->storage_descriptor[3] |= A6XX_IBO_3_FLAG | A6XX_IBO_3_UNK27;
          iview->storage_descriptor[7] |= ubwc_addr;
          iview->storage_descriptor[8] |= ubwc_addr >> 32;
@@ -441,7 +442,7 @@ tu_GetImageSubresourceLayout(VkDevice _device,
    pLayout->arrayPitch = image->layout.layer_size;
    pLayout->depthPitch = slice->size0;
 
-   if (image->layout.ubwc_size) {
+   if (image->layout.ubwc_layer_size) {
       /* UBWC starts at offset 0 */
       pLayout->offset = 0;
       /* UBWC scanout won't match what the kernel wants if we have levels/layers */
@@ -463,7 +464,7 @@ VkResult tu_GetImageDrmFormatModifierPropertiesEXT(
 
    if (!image->layout.tile_mode)
       pProperties->drmFormatModifier = DRM_FORMAT_MOD_LINEAR;
-   else if (image->layout.ubwc_size)
+   else if (image->layout.ubwc_layer_size)
       pProperties->drmFormatModifier = DRM_FORMAT_MOD_QCOM_COMPRESSED;
    else
       pProperties->drmFormatModifier = DRM_FORMAT_MOD_INVALID;

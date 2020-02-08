@@ -3,8 +3,7 @@ variables:
 
 include:
   - project: 'wayland/ci-templates'
-    # Must be the same as in .gitlab-ci/lava-gitlab-ci.yml
-    ref: 0a9bdd33a98f05af6761ab118b5074952242aab0
+    ref: b7030c2cd0d6ccc5f6d4f8299bafa4daa9240d71
     file: '/templates/debian.yml'
   - local: '.gitlab-ci/lava-gitlab-ci.yml'
 
@@ -113,7 +112,7 @@ x86_build:
     - .debian@container-ifnot-exists
     - .container
   variables:
-    DEBIAN_TAG: &x86_build "2020-01-14"
+    DEBIAN_TAG: &x86_build "2020-02-05"
 
 .use-x86_build:
   variables:
@@ -126,7 +125,7 @@ x86_build:
 x86_test-gl:
   extends: x86_build
   variables:
-    DEBIAN_TAG: &x86_test-gl "2020-01-14"
+    DEBIAN_TAG: &x86_test-gl "2020-01-30"
 
 # Debian 10 based x86 test image for VK
 x86_test-vk:
@@ -166,7 +165,7 @@ arm_build:
     - .debian@container-ifnot-exists@arm64v8
     - .container
   variables:
-    DEBIAN_TAG: &arm_build "2020-01-14"
+    DEBIAN_TAG: &arm_build "2020-02-05"
 
 .use-arm_build:
   variables:
@@ -179,7 +178,7 @@ arm_build:
 arm_test:
   extends: arm_build
   variables:
-    DEBIAN_TAG: &arm_test "2019-12-18"
+    DEBIAN_TAG: &arm_test "2020-01-30"
 
 .use-arm_test:
   variables:
@@ -313,6 +312,7 @@ meson-main:
       -D gallium-va=false
       -D gallium-xa=false
       -D gallium-nine=false
+    LLVM_VERSION: "8"
 
 .meson-arm:
   extends:
@@ -322,8 +322,6 @@ meson-main:
     VULKAN_DRIVERS: freedreno
     GALLIUM_DRIVERS: "etnaviv,freedreno,kmsro,lima,nouveau,panfrost,swrast,tegra,v3d,vc4"
     BUILDTYPE: "debugoptimized"
-    EXTRA_OPTION: >
-      -D I-love-half-baked-turnips=true
   tags:
     - aarch64
 
@@ -343,7 +341,6 @@ meson-arm64:
     - .meson-arm
     - .ci-deqp-artifacts
   variables:
-    LLVM_VERSION: "8"
     VULKAN_DRIVERS: "freedreno,amd"
   script:
     - .gitlab-ci/meson-build.sh
@@ -466,6 +463,27 @@ meson-i386:
       -D vulkan-overlay-layer=true
       -D llvm=false
       -D osmesa=classic
+      -D werror=true
+
+meson-s390x:
+  extends:
+    - .meson-cross
+  variables:
+    CROSS: s390x
+    GALLIUM_DRIVERS: "swrast"
+    LLVM_VERSION: "7"
+  script:
+    - dpkg -i /var/cache/apt/archives/$CROSS/*.deb
+    - .gitlab-ci/meson-build.sh
+
+meson-ppc64el:
+  extends:
+    - meson-s390x
+  variables:
+    CROSS: ppc64el
+    GALLIUM_DRIVERS: "nouveau,radeonsi,swrast,virgl"
+    LLVM_VERSION: "8"
+    VULKAN_DRIVERS: "amd"
 
 meson-mingw32-x86_64:
   extends: .meson-build
