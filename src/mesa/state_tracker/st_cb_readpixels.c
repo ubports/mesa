@@ -28,7 +28,7 @@
 #include "main/bufferobj.h"
 #include "main/image.h"
 #include "main/pbo.h"
-#include "main/imports.h"
+#include "util/imports.h"
 #include "main/readpix.h"
 #include "main/enums.h"
 #include "main/framebuffer.h"
@@ -470,7 +470,7 @@ st_ReadPixels(struct gl_context *ctx, GLint x, GLint y,
       goto fallback;
    }
 
-   if (st->pbo.download_enabled && _mesa_is_bufferobj(pack->BufferObj)) {
+   if (st->pbo.download_enabled && pack->BufferObj) {
       if (try_pbo_readpixels(st, strb,
                              st_fb_orientation(ctx->ReadBuffer) == Y_0_TOP,
                              x, y, width, height,

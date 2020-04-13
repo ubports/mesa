@@ -79,7 +79,7 @@ ir3_instr_depth(struct ir3_instruction *instr, unsigned boost, bool falsedep)
 
 	instr->depth = 0;
 
-	foreach_ssa_src_n(src, i, instr) {
+	foreach_ssa_src_n (src, i, instr) {
 		unsigned sd;
 
 		/* visit child to compute it's depth: */
@@ -89,7 +89,7 @@ ir3_instr_depth(struct ir3_instruction *instr, unsigned boost, bool falsedep)
 		if (i == 0)
 			continue;
 
-		sd = ir3_delayslots(src, instr, i) + src->depth;
+		sd = ir3_delayslots(src, instr, i, true) + src->depth;
 		sd += boost;
 
 		instr->depth = MAX2(instr->depth, sd);
@@ -165,7 +165,7 @@ compute_depth_and_remove_unused(struct ir3 *ir, struct ir3_shader_variant *so)
 	}
 
 	struct ir3_instruction *out;
-	foreach_output(out, ir)
+	foreach_output (out, ir)
 		ir3_instr_depth(out, 0, false);
 
 	foreach_block (block, &ir->block_list) {
@@ -177,23 +177,45 @@ compute_depth_and_remove_unused(struct ir3 *ir, struct ir3_shader_variant *so)
 			ir3_instr_depth(block->condition, 6, false);
 	}
 
-	/* mark un-used instructions: */
+	/* remove un-used instructions: */
 	foreach_block (block, &ir->block_list) {
 		progress |= remove_unused_by_block(block);
+	}
+
+	/* fixup wrmask of split instructions to account for adjusted tex
+	 * wrmask's:
+	 */
+	foreach_block (block, &ir->block_list) {
+		foreach_instr (instr, &block->instr_list) {
+			if (instr->opc != OPC_META_SPLIT)
+				continue;
+
+			struct ir3_instruction *src = ssa(instr->regs[1]);
+			if (!is_tex_or_prefetch(src))
+				continue;
+
+			instr->regs[1]->wrmask = src->regs[0]->wrmask;
+		}
 	}
 
 	/* note that we can end up with unused indirects, but we should
 	 * not end up with unused predicates.
 	 */
-	for (i = 0; i < ir->indirects_count; i++) {
-		struct ir3_instruction *instr = ir->indirects[i];
+	for (i = 0; i < ir->a0_users_count; i++) {
+		struct ir3_instruction *instr = ir->a0_users[i];
 		if (instr && (instr->flags & IR3_INSTR_UNUSED))
-			ir->indirects[i] = NULL;
+			ir->a0_users[i] = NULL;
+	}
+
+	for (i = 0; i < ir->a1_users_count; i++) {
+		struct ir3_instruction *instr = ir->a1_users[i];
+		if (instr && (instr->flags & IR3_INSTR_UNUSED))
+			ir->a1_users[i] = NULL;
 	}
 
 	/* cleanup unused inputs: */
 	struct ir3_instruction *in;
-	foreach_input_n(in, n, ir)
+	foreach_input_n (in, n, ir)
 		if (in->flags & IR3_INSTR_UNUSED)
 			ir->inputs[n] = NULL;
 

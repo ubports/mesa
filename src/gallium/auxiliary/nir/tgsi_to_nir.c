@@ -72,6 +72,10 @@ struct ttn_compile {
    nir_variable *images[PIPE_MAX_SHADER_IMAGES];
    nir_variable *ssbo[PIPE_MAX_SHADER_BUFFERS];
 
+   unsigned num_samplers;
+   unsigned num_images;
+   unsigned num_msaa_images;
+
    nir_variable *input_var_face;
    nir_variable *input_var_position;
    nir_variable *input_var_point;
@@ -1325,7 +1329,9 @@ get_sampler_var(struct ttn_compile *c, int binding,
                                 "sampler");
       var->data.binding = binding;
       var->data.explicit_binding = true;
+
       c->samplers[binding] = var;
+      c->num_samplers = MAX2(c->num_samplers, binding + 1);
 
       /* Record textures used */
       unsigned mask = 1 << binding;
@@ -1357,7 +1363,11 @@ get_image_var(struct ttn_compile *c, int binding,
       var->data.explicit_binding = true;
       var->data.access = access;
       var->data.image.format = format;
+
       c->images[binding] = var;
+      c->num_images = MAX2(c->num_images, binding + 1);
+      if (dim == GLSL_SAMPLER_DIM_MS)
+         c->num_msaa_images = c->num_images;
    }
 
    return var;
@@ -1475,25 +1485,8 @@ ttn_tex(struct ttn_compile *c, nir_alu_dest dest, nir_ssa_def **src)
    get_texture_info(tgsi_inst->Texture.Texture,
                     &instr->sampler_dim, &instr->is_shadow, &instr->is_array);
 
-   switch (instr->sampler_dim) {
-   case GLSL_SAMPLER_DIM_1D:
-   case GLSL_SAMPLER_DIM_BUF:
-      instr->coord_components = 1;
-      break;
-   case GLSL_SAMPLER_DIM_2D:
-   case GLSL_SAMPLER_DIM_RECT:
-   case GLSL_SAMPLER_DIM_EXTERNAL:
-   case GLSL_SAMPLER_DIM_MS:
-      instr->coord_components = 2;
-      break;
-   case GLSL_SAMPLER_DIM_3D:
-   case GLSL_SAMPLER_DIM_CUBE:
-      instr->coord_components = 3;
-      break;
-   case GLSL_SAMPLER_DIM_SUBPASS:
-   case GLSL_SAMPLER_DIM_SUBPASS_MS:
-      unreachable("invalid sampler_dim");
-   }
+   instr->coord_components =
+      glsl_get_sampler_dim_coordinate_components(instr->sampler_dim);
 
    if (instr->is_array)
       instr->coord_components++;
@@ -2309,7 +2302,7 @@ static void
 ttn_parse_tgsi(struct ttn_compile *c, const void *tgsi_tokens)
 {
    struct tgsi_parse_context parser;
-   int ret;
+   ASSERTED int ret;
 
    ret = tgsi_parse_init(&parser, tgsi_tokens);
    assert(ret == TGSI_PARSE_OK);
@@ -2559,6 +2552,10 @@ ttn_finalize_nir(struct ttn_compile *c, struct pipe_screen *screen)
       ttn_optimize_nir(nir);
       nir_shader_gather_info(nir, c->build.impl);
    }
+
+   nir->info.num_images = c->num_images;
+   nir->info.num_textures = c->num_samplers;
+   nir->info.last_msaa_image = c->num_msaa_images - 1;
 
    nir_validate_shader(nir, "TTN: after all optimizations");
 }

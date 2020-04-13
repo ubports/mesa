@@ -111,79 +111,15 @@ copy_vertices(struct gl_context *ctx,
               const fi_type * src_buffer)
 {
    struct vbo_save_context *save = &vbo_context(ctx)->save;
-   const struct _mesa_prim *prim = &node->prims[node->prim_count - 1];
-   GLuint nr = prim->count;
+   struct _mesa_prim *prim = &node->prims[node->prim_count - 1];
    GLuint sz = save->vertex_size;
    const fi_type *src = src_buffer + prim->start * sz;
    fi_type *dst = save->copied.buffer;
-   GLuint ovf, i;
 
    if (prim->end)
       return 0;
 
-   switch (prim->mode) {
-   case GL_POINTS:
-      return 0;
-   case GL_LINES:
-      ovf = nr & 1;
-      for (i = 0; i < ovf; i++)
-         memcpy(dst + i * sz, src + (nr - ovf + i) * sz,
-                sz * sizeof(GLfloat));
-      return i;
-   case GL_TRIANGLES:
-      ovf = nr % 3;
-      for (i = 0; i < ovf; i++)
-         memcpy(dst + i * sz, src + (nr - ovf + i) * sz,
-                sz * sizeof(GLfloat));
-      return i;
-   case GL_QUADS:
-      ovf = nr & 3;
-      for (i = 0; i < ovf; i++)
-         memcpy(dst + i * sz, src + (nr - ovf + i) * sz,
-                sz * sizeof(GLfloat));
-      return i;
-   case GL_LINE_STRIP:
-      if (nr == 0)
-         return 0;
-      else {
-         memcpy(dst, src + (nr - 1) * sz, sz * sizeof(GLfloat));
-         return 1;
-      }
-   case GL_LINE_LOOP:
-   case GL_TRIANGLE_FAN:
-   case GL_POLYGON:
-      if (nr == 0)
-         return 0;
-      else if (nr == 1) {
-         memcpy(dst, src + 0, sz * sizeof(GLfloat));
-         return 1;
-      }
-      else {
-         memcpy(dst, src + 0, sz * sizeof(GLfloat));
-         memcpy(dst + sz, src + (nr - 1) * sz, sz * sizeof(GLfloat));
-         return 2;
-      }
-   case GL_TRIANGLE_STRIP:
-   case GL_QUAD_STRIP:
-      switch (nr) {
-      case 0:
-         ovf = 0;
-         break;
-      case 1:
-         ovf = 1;
-         break;
-      default:
-         ovf = 2 + (nr & 1);
-         break;
-      }
-      for (i = 0; i < ovf; i++)
-         memcpy(dst + i * sz, src + (nr - ovf + i) * sz,
-                sz * sizeof(GLfloat));
-      return i;
-   default:
-      unreachable("Unexpected primitive type");
-      return 0;
-   }
+   return vbo_copy_vertices(ctx, prim->mode, prim, sz, true, dst, src);
 }
 
 
@@ -337,7 +273,7 @@ reset_counters(struct gl_context *ctx)
  * previous prim.
  */
 static void
-merge_prims(struct _mesa_prim *prim_list,
+merge_prims(struct gl_context *ctx, struct _mesa_prim *prim_list,
             GLuint *prim_count)
 {
    GLuint i;
@@ -348,11 +284,10 @@ merge_prims(struct _mesa_prim *prim_list,
 
       vbo_try_prim_conversion(this_prim);
 
-      if (vbo_can_merge_prims(prev_prim, this_prim)) {
+      if (vbo_merge_draws(ctx, true, prev_prim, this_prim)) {
          /* We've found a prim that just extend the previous one.  Tack it
           * onto the previous one, and let this primitive struct get dropped.
           */
-         vbo_merge_prims(prev_prim, this_prim);
          continue;
       }
 
@@ -642,7 +577,7 @@ compile_vertex_list(struct gl_context *ctx)
       convert_line_loop_to_strip(save, node);
    }
 
-   merge_prims(node->prims, &node->prim_count);
+   merge_prims(ctx, node->prims, &node->prim_count);
 
    /* Correct the primitive starts, we can only do this here as copy_vertices
     * and convert_line_loop_to_strip above consume the uncorrected starts.
@@ -737,12 +672,8 @@ wrap_buffers(struct gl_context *ctx)
    save->prims[0].mode = mode;
    save->prims[0].begin = 0;
    save->prims[0].end = 0;
-   save->prims[0].pad = 0;
    save->prims[0].start = 0;
    save->prims[0].count = 0;
-   save->prims[0].num_instances = 1;
-   save->prims[0].base_instance = 0;
-   save->prims[0].is_indirect = 0;
    save->prim_count = 1;
 }
 
@@ -1218,12 +1149,8 @@ vbo_save_NotifyBegin(struct gl_context *ctx, GLenum mode,
    save->prims[i].mode = mode & VBO_SAVE_PRIM_MODE_MASK;
    save->prims[i].begin = 1;
    save->prims[i].end = 0;
-   save->prims[i].pad = 0;
    save->prims[i].start = save->vert_count;
    save->prims[i].count = 0;
-   save->prims[i].num_instances = 1;
-   save->prims[i].base_instance = 0;
-   save->prims[i].is_indirect = 0;
 
    save->no_current_update = no_current_update;
 
@@ -1402,7 +1329,7 @@ array_element(struct gl_context *ctx,
     * then we call PrimitiveRestartNV and return.
     */
    if (ctx->Array._PrimitiveRestart &&
-       elt == _mesa_primitive_restart_index(ctx, index_size)) {
+       elt == ctx->Array._RestartIndex[index_size - 1]) {
       CALL_PrimitiveRestartNV(GET_DISPATCH(), ());
       return;
    }
@@ -1447,7 +1374,7 @@ _save_OBE_DrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type,
 
    _mesa_vao_map(ctx, vao, GL_MAP_READ_BIT);
 
-   if (_mesa_is_bufferobj(indexbuf))
+   if (indexbuf)
       indices =
          ADD_POINTERS(indexbuf->Mappings[MAP_INTERNAL].Pointer, indices);
 

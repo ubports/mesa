@@ -127,16 +127,6 @@
 #define UNIT_ADD 1
 #define UNIT_LUT 2
 
-/* 4-bit type tags */
-
-#define TAG_TEXTURE_4_VTX 0x2
-#define TAG_TEXTURE_4 0x3
-#define TAG_LOAD_STORE_4 0x5
-#define TAG_ALU_4 0x8
-#define TAG_ALU_8 0x9
-#define TAG_ALU_12 0xA
-#define TAG_ALU_16 0xB
-
 #define IS_ALU(tag) (tag >= TAG_ALU_4)
 
 /* Special register aliases */
@@ -222,6 +212,11 @@ struct mir_ldst_op_props {
         unsigned props;
 };
 
+struct mir_tag_props {
+        const char *name;
+        unsigned size;
+};
+
 /* Lower 2-bits are a midgard_reg_mode */
 #define GET_LDST_SIZE(c) (c & 3)
 
@@ -234,6 +229,9 @@ struct mir_ldst_op_props {
 /* Non-store operation has side effects and should not be eliminated even if
  * its mask is 0 */
 #define LDST_SIDE_FX (1 << 4)
+
+/* Computes an address according to indirects/zext/shift/etc */
+#define LDST_ADDRESS (1 << 5)
 
 /* This file is common, so don't define the tables themselves. #include
  * midgard_op.h if you need that, or edit midgard_ops.c directly */

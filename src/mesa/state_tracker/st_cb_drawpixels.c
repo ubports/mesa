@@ -31,7 +31,7 @@
   */
 
 #include "main/errors.h"
-#include "main/imports.h"
+#include "util/imports.h"
 #include "main/image.h"
 #include "main/bufferobj.h"
 #include "main/blit.h"
@@ -503,7 +503,7 @@ search_drawpixels_cache(struct st_context *st,
        unpack->SkipPixels != 0 ||
        unpack->SkipRows != 0 ||
        unpack->SwapBytes ||
-       _mesa_is_bufferobj(unpack->BufferObj)) {
+       unpack->BufferObj) {
       /* we don't allow non-default pixel unpacking values */
       return NULL;
    }
@@ -896,7 +896,8 @@ draw_textured_quad(struct gl_context *ctx, GLint x, GLint y, GLfloat z,
    /* viewport state: viewport matching window dims */
    cso_set_viewport_dims(cso, fb_width, fb_height, TRUE);
 
-   cso_set_vertex_elements(cso, 3, st->util_velems);
+   st->util_velems.count = 3;
+   cso_set_vertex_elements(cso, &st->util_velems);
    cso_set_stream_outputs(cso, 0, NULL, NULL);
 
    /* Compute Gallium window coords (y=0=top) with pixel zoom.
@@ -1915,12 +1916,11 @@ st_destroy_drawpix(struct st_context *st)
 
    for (i = 0; i < ARRAY_SIZE(st->drawpix.zs_shaders); i++) {
       if (st->drawpix.zs_shaders[i])
-         cso_delete_fragment_shader(st->cso_context,
-                                    st->drawpix.zs_shaders[i]);
+         st->pipe->delete_fs_state(st->pipe, st->drawpix.zs_shaders[i]);
    }
 
    if (st->passthrough_vs)
-      cso_delete_vertex_shader(st->cso_context, st->passthrough_vs);
+      st->pipe->delete_vs_state(st->pipe, st->passthrough_vs);
 
    /* Free cache data */
    for (i = 0; i < ARRAY_SIZE(st->drawpix_cache.entries); i++) {

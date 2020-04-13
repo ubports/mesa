@@ -76,6 +76,7 @@ is_expression(const fs_visitor *v, const fs_inst *const inst)
    case FS_OPCODE_VARYING_PULL_CONSTANT_LOAD_LOGICAL:
    case FS_OPCODE_LINTERP:
    case SHADER_OPCODE_FIND_LIVE_CHANNEL:
+   case FS_OPCODE_LOAD_LIVE_CHANNELS:
    case SHADER_OPCODE_BROADCAST:
    case SHADER_OPCODE_MOV_INDIRECT:
    case SHADER_OPCODE_TEX_LOGICAL:
@@ -242,7 +243,7 @@ create_copy_instr(const fs_builder &bld, fs_inst *inst, fs_reg src, bool negate)
 }
 
 bool
-fs_visitor::opt_cse_local(bblock_t *block, int &ip)
+fs_visitor::opt_cse_local(const fs_live_variables &live, bblock_t *block, int &ip)
 {
    bool progress = false;
    exec_list aeb;
@@ -317,6 +318,16 @@ fs_visitor::opt_cse_local(bblock_t *block, int &ip)
          }
       }
 
+      /* Discard jumps aren't represented in the CFG unfortunately, so we need
+       * to make sure that they behave as a CSE barrier, since we lack global
+       * dataflow information.  This is particularly likely to cause problems
+       * with instructions dependent on the current execution mask like
+       * SHADER_OPCODE_FIND_LIVE_CHANNEL.
+       */
+      if (inst->opcode == FS_OPCODE_DISCARD_JUMP ||
+          inst->opcode == FS_OPCODE_PLACEHOLDER_HALT)
+         aeb.make_empty();
+
       foreach_in_list_safe(aeb_entry, entry, &aeb) {
          /* Kill all AEB entries that write a different value to or read from
           * the flag register if we just wrote it.
@@ -349,7 +360,7 @@ fs_visitor::opt_cse_local(bblock_t *block, int &ip)
             /* Kill any AEB entries using registers that don't get reused any
              * more -- a sure sign they'll fail operands_match().
              */
-            if (src_reg->file == VGRF && virtual_grf_end[src_reg->nr] < ip) {
+            if (src_reg->file == VGRF && live.vgrf_end[src_reg->nr] < ip) {
                entry->remove();
                ralloc_free(entry);
                break;
@@ -368,17 +379,16 @@ fs_visitor::opt_cse_local(bblock_t *block, int &ip)
 bool
 fs_visitor::opt_cse()
 {
+   const fs_live_variables &live = live_analysis.require();
    bool progress = false;
    int ip = 0;
 
-   calculate_live_intervals();
-
    foreach_block (block, cfg) {
-      progress = opt_cse_local(block, ip) || progress;
+      progress = opt_cse_local(live, block, ip) || progress;
    }
 
    if (progress)
-      invalidate_live_intervals();
+      invalidate_analysis(DEPENDENCY_INSTRUCTIONS | DEPENDENCY_VARIABLES);
 
    return progress;
 }

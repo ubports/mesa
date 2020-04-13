@@ -367,6 +367,8 @@ struct dri2_egl_surface
 #ifdef HAVE_RS_PLATFORM
    void* sc;
 #endif
+   /* swrast device */
+   char *swrast_device_buffer;
 };
 
 struct dri2_egl_config
@@ -443,10 +445,17 @@ dri2_get_render_type_float(const __DRIcoreExtension *core,
                            const __DRIconfig *config,
                            bool *is_float);
 
+unsigned int
+dri2_image_format_for_pbuffer_config(struct dri2_egl_display *dri2_dpy,
+                                     const __DRIconfig *config);
+
 struct dri2_egl_config *
 dri2_add_config(_EGLDisplay *disp, const __DRIconfig *dri_config, int id,
                 EGLint surface_type, const EGLint *attr_list,
                 const int *rgba_shifts, const unsigned int *rgba_sizes);
+
+EGLBoolean
+dri2_add_pbuffer_configs_for_visuals(_EGLDriver *drv, _EGLDisplay *disp);
 
 _EGLImage *
 dri2_create_image_khr(_EGLDriver *drv, _EGLDisplay *disp,

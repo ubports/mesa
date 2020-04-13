@@ -51,8 +51,7 @@
 #include "util/u_queue.h"
 #include "util/mesa-sha1.h"
 #include "util/ralloc.h"
-#include "main/compiler.h"
-#include "main/errors.h"
+#include "util/compiler.h"
 
 #include "disk_cache.h"
 
@@ -453,6 +452,12 @@ disk_cache_destroy(struct disk_cache *cache)
    }
 
    ralloc_free(cache);
+}
+
+void
+disk_cache_wait_for_idle(struct disk_cache *cache)
+{
+   util_queue_finish(&cache->cache_queue);
 }
 
 /* Return a filename within the cache's directory corresponding to 'key'. The

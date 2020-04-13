@@ -72,7 +72,7 @@ v3d_screen_destroy(struct pipe_screen *pscreen)
 {
         struct v3d_screen *screen = v3d_screen(pscreen);
 
-        util_hash_table_destroy(screen->bo_handles);
+        _mesa_hash_table_destroy(screen->bo_handles, NULL);
         v3d_bufmgr_destroy(pscreen);
         slab_destroy_parent(&screen->transfer_pool);
         free(screen->ro);
@@ -144,6 +144,9 @@ v3d_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
                  * intrinsics across a 16b boundary, but v3d's TMU general
                  * memory accesses wrap on 16b boundaries.
                  */
+                return 0;
+
+        case PIPE_CAP_NIR_IMAGES_AS_DEREF:
                 return 0;
 
         case PIPE_CAP_PREFER_BLIT_BASED_TEXTURE_TRANSFER:
@@ -609,18 +612,6 @@ v3d_screen_is_format_supported(struct pipe_screen *pscreen,
         return true;
 }
 
-#define PTR_TO_UINT(x) ((unsigned)((intptr_t)(x)))
-
-static unsigned handle_hash(void *key)
-{
-    return PTR_TO_UINT(key);
-}
-
-static int handle_compare(void *key1, void *key2)
-{
-    return PTR_TO_UINT(key1) != PTR_TO_UINT(key2);
-}
-
 static const void *
 v3d_screen_get_compiler_options(struct pipe_screen *pscreen,
                                 enum pipe_shader_ir ir, unsigned shader)
@@ -683,7 +674,7 @@ v3d_screen_create(int fd, const struct pipe_screen_config *config,
         }
         list_inithead(&screen->bo_cache.time_list);
         (void)mtx_init(&screen->bo_handles_mutex, mtx_plain);
-        screen->bo_handles = util_hash_table_create(handle_hash, handle_compare);
+        screen->bo_handles = util_hash_table_create_ptr_keys();
 
 #if defined(USE_V3D_SIMULATOR)
         v3d_simulator_init(screen);

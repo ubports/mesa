@@ -69,7 +69,7 @@
 #include "main/context.h"
 #include "main/extensions.h"
 #include "main/framebuffer.h"
-#include "main/imports.h"
+#include "util/imports.h"
 #include "main/macros.h"
 #include "main/renderbuffer.h"
 #include "main/teximage.h"
@@ -941,7 +941,7 @@ XMesaContext XMesaCreateContext( XMesaVisual v, XMesaContext share_list )
    /* Initialize the software rasterizer and helper modules.
     */
    if (!_swrast_CreateContext( mesaCtx ) ||
-       !_vbo_CreateContext( mesaCtx ) ||
+       !_vbo_CreateContext( mesaCtx, false ) ||
        !_tnl_CreateContext( mesaCtx ) ||
        !_swsetup_CreateContext( mesaCtx )) {
       _mesa_free_context_data(&c->mesa);

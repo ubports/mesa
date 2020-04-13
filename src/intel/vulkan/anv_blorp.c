@@ -51,7 +51,7 @@ lookup_blorp_shader(struct blorp_batch *batch,
 }
 
 static bool
-upload_blorp_shader(struct blorp_batch *batch,
+upload_blorp_shader(struct blorp_batch *batch, uint32_t stage,
                     const void *key, uint32_t key_size,
                     const void *kernel, uint32_t kernel_size,
                     const struct brw_stage_prog_data *prog_data,
@@ -70,7 +70,7 @@ upload_blorp_shader(struct blorp_batch *batch,
    };
 
    struct anv_shader_bin *bin =
-      anv_pipeline_cache_upload_kernel(&device->default_pipeline_cache,
+      anv_pipeline_cache_upload_kernel(&device->default_pipeline_cache, stage,
                                        key, key_size, kernel, kernel_size,
                                        NULL, 0,
                                        prog_data, prog_data_size,
@@ -1580,7 +1580,7 @@ anv_image_clear_depth_stencil(struct anv_cmd_buffer *cmd_buffer,
     * cache before rendering to it.
     */
    cmd_buffer->state.pending_pipe_bits |=
-      ANV_PIPE_DEPTH_CACHE_FLUSH_BIT | ANV_PIPE_CS_STALL_BIT;
+      ANV_PIPE_DEPTH_CACHE_FLUSH_BIT | ANV_PIPE_END_OF_PIPE_SYNC_BIT;
 
    blorp_clear_depth_stencil(&batch, &depth, &stencil,
                              level, base_layer, layer_count,
@@ -1597,7 +1597,7 @@ anv_image_clear_depth_stencil(struct anv_cmd_buffer *cmd_buffer,
     * cache before someone starts trying to do stencil on it.
     */
    cmd_buffer->state.pending_pipe_bits |=
-      ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT | ANV_PIPE_CS_STALL_BIT;
+      ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT | ANV_PIPE_END_OF_PIPE_SYNC_BIT;
 
    struct blorp_surf stencil_shadow;
    if ((aspects & VK_IMAGE_ASPECT_STENCIL_BIT) &&
@@ -1732,7 +1732,7 @@ anv_image_hiz_clear(struct anv_cmd_buffer *cmd_buffer,
 void
 anv_image_mcs_op(struct anv_cmd_buffer *cmd_buffer,
                  const struct anv_image *image,
-                 enum isl_format format,
+                 enum isl_format format, struct isl_swizzle swizzle,
                  VkImageAspectFlagBits aspect,
                  uint32_t base_layer, uint32_t layer_count,
                  enum isl_aux_op mcs_op, union isl_color_value *clear_value,
@@ -1778,11 +1778,11 @@ anv_image_mcs_op(struct anv_cmd_buffer *cmd_buffer,
     * that it is completed before any additional drawing occurs.
     */
    cmd_buffer->state.pending_pipe_bits |=
-      ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT | ANV_PIPE_CS_STALL_BIT;
+      ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT | ANV_PIPE_END_OF_PIPE_SYNC_BIT;
 
    switch (mcs_op) {
    case ISL_AUX_OP_FAST_CLEAR:
-      blorp_fast_clear(&batch, &surf, format,
+      blorp_fast_clear(&batch, &surf, format, swizzle,
                        0, base_layer, layer_count,
                        0, 0, image->extent.width, image->extent.height);
       break;
@@ -1797,7 +1797,7 @@ anv_image_mcs_op(struct anv_cmd_buffer *cmd_buffer,
    }
 
    cmd_buffer->state.pending_pipe_bits |=
-      ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT | ANV_PIPE_CS_STALL_BIT;
+      ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT | ANV_PIPE_END_OF_PIPE_SYNC_BIT;
 
    blorp_batch_finish(&batch);
 }
@@ -1805,7 +1805,7 @@ anv_image_mcs_op(struct anv_cmd_buffer *cmd_buffer,
 void
 anv_image_ccs_op(struct anv_cmd_buffer *cmd_buffer,
                  const struct anv_image *image,
-                 enum isl_format format,
+                 enum isl_format format, struct isl_swizzle swizzle,
                  VkImageAspectFlagBits aspect, uint32_t level,
                  uint32_t base_layer, uint32_t layer_count,
                  enum isl_aux_op ccs_op, union isl_color_value *clear_value,
@@ -1859,11 +1859,11 @@ anv_image_ccs_op(struct anv_cmd_buffer *cmd_buffer,
     * that it is completed before any additional drawing occurs.
     */
    cmd_buffer->state.pending_pipe_bits |=
-      ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT | ANV_PIPE_CS_STALL_BIT;
+      ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT | ANV_PIPE_END_OF_PIPE_SYNC_BIT;
 
    switch (ccs_op) {
    case ISL_AUX_OP_FAST_CLEAR:
-      blorp_fast_clear(&batch, &surf, format,
+      blorp_fast_clear(&batch, &surf, format, swizzle,
                        level, base_layer, layer_count,
                        0, 0, level_width, level_height);
       break;
@@ -1883,7 +1883,7 @@ anv_image_ccs_op(struct anv_cmd_buffer *cmd_buffer,
    }
 
    cmd_buffer->state.pending_pipe_bits |=
-      ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT | ANV_PIPE_CS_STALL_BIT;
+      ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT | ANV_PIPE_END_OF_PIPE_SYNC_BIT;
 
    blorp_batch_finish(&batch);
 }

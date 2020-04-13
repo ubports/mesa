@@ -721,11 +721,44 @@ emit_alu(struct ir3_context *ctx, nir_alu_instr *alu)
 	ir3_put_dst(ctx, &alu->dest.dest);
 }
 
+static void
+emit_intrinsic_load_ubo_ldc(struct ir3_context *ctx, nir_intrinsic_instr *intr,
+							struct ir3_instruction **dst)
+{
+	struct ir3_block *b = ctx->block;
+
+	unsigned ncomp = intr->num_components;
+	struct ir3_instruction *offset = ir3_get_src(ctx, &intr->src[1])[0];
+	struct ir3_instruction *idx = ir3_get_src(ctx, &intr->src[0])[0];
+	struct ir3_instruction *ldc = ir3_LDC(b, idx, 0, offset, 0);
+	ldc->regs[0]->wrmask = MASK(ncomp);
+	ldc->cat6.iim_val = intr->num_components;
+	ldc->cat6.d = 1;
+	ldc->cat6.type = TYPE_U32;
+
+	nir_intrinsic_instr *bindless = ir3_bindless_resource(intr->src[0]);
+	if (bindless) {
+		ldc->flags |= IR3_INSTR_B;
+		ldc->cat6.base = nir_intrinsic_desc_set(bindless);
+		ctx->so->bindless_ubo = true;
+	}
+
+	ir3_split_dest(b, dst, ldc, 0, ncomp);
+}
+
+
 /* handles direct/indirect UBO reads: */
 static void
 emit_intrinsic_load_ubo(struct ir3_context *ctx, nir_intrinsic_instr *intr,
 		struct ir3_instruction **dst)
 {
+	if (ir3_bindless_resource(intr->src[0])) {
+		/* TODO: We should be using ldc for non-bindless things on a6xx as
+		 * well.
+		 */
+		emit_intrinsic_load_ubo_ldc(ctx, intr, dst);
+		return;
+	}
 	struct ir3_block *b = ctx->block;
 	struct ir3_instruction *base_lo, *base_hi, *addr, *src0, *src1;
 	/* UBO addresses are the first driver params, but subtract 2 here to
@@ -744,8 +777,8 @@ emit_intrinsic_load_ubo(struct ir3_context *ctx, nir_intrinsic_instr *intr,
 		base_lo = create_uniform(b, ubo + (src0->regs[1]->iim_val * ptrsz));
 		base_hi = create_uniform(b, ubo + (src0->regs[1]->iim_val * ptrsz) + 1);
 	} else {
-		base_lo = create_uniform_indirect(b, ubo, ir3_get_addr(ctx, src0, ptrsz));
-		base_hi = create_uniform_indirect(b, ubo + 1, ir3_get_addr(ctx, src0, ptrsz));
+		base_lo = create_uniform_indirect(b, ubo, ir3_get_addr0(ctx, src0, ptrsz));
+		base_hi = create_uniform_indirect(b, ubo + 1, ir3_get_addr0(ctx, src0, ptrsz));
 
 		/* NOTE: since relative addressing is used, make sure constlen is
 		 * at least big enough to cover all the UBO addresses, since the
@@ -1034,23 +1067,102 @@ emit_intrinsic_atomic_shared(struct ir3_context *ctx, nir_intrinsic_instr *intr)
 	return atomic;
 }
 
+struct tex_src_info {
+	/* For prefetch */
+	unsigned tex_base, samp_base, tex_idx, samp_idx;
+	/* For normal tex instructions */
+	unsigned base, combined_idx, a1_val, flags;
+	struct ir3_instruction *samp_tex;
+};
+
 /* TODO handle actual indirect/dynamic case.. which is going to be weird
  * to handle with the image_mapping table..
  */
-static struct ir3_instruction *
+static struct tex_src_info
 get_image_samp_tex_src(struct ir3_context *ctx, nir_intrinsic_instr *intr)
 {
-	unsigned slot = ir3_get_image_slot(nir_src_as_deref(intr->src[0]));
-	unsigned tex_idx = ir3_image_to_tex(&ctx->so->image_mapping, slot);
-	struct ir3_instruction *texture, *sampler;
+	struct ir3_block *b = ctx->block;
+	struct tex_src_info info = { 0 };
+	nir_intrinsic_instr *bindless_tex = ir3_bindless_resource(intr->src[0]);
+	ctx->so->bindless_tex = true;
 
-	texture = create_immed_typed(ctx->block, tex_idx, TYPE_U16);
-	sampler = create_immed_typed(ctx->block, tex_idx, TYPE_U16);
+	if (bindless_tex) {
+		/* Bindless case */
+		info.flags |= IR3_INSTR_B;
 
-	return ir3_create_collect(ctx, (struct ir3_instruction*[]){
-		sampler,
-		texture,
-	}, 2);
+		/* Gather information required to determine which encoding to
+		 * choose as well as for prefetch.
+		 */
+		info.tex_base = nir_intrinsic_desc_set(bindless_tex);
+		bool tex_const = nir_src_is_const(bindless_tex->src[0]);
+		if (tex_const)
+			info.tex_idx = nir_src_as_uint(bindless_tex->src[0]);
+		info.samp_idx = 0;
+
+		/* Choose encoding. */
+		if (tex_const && info.tex_idx < 256) {
+			if (info.tex_idx < 16) {
+				/* Everything fits within the instruction */
+				info.base = info.tex_base;
+				info.combined_idx = info.samp_idx | (info.tex_idx << 4);
+			} else {
+				info.base = info.tex_base;
+				info.a1_val = info.tex_idx << 3;
+				info.combined_idx = 0;
+				info.flags |= IR3_INSTR_A1EN;
+			}
+			info.samp_tex = NULL;
+		} else {
+			info.flags |= IR3_INSTR_S2EN;
+			info.base = info.tex_base;
+
+			/* Note: the indirect source is now a vec2 instead of hvec2 */
+			struct ir3_instruction *texture, *sampler;
+
+			texture = ir3_get_src(ctx, &intr->src[0])[0];
+			sampler = create_immed(b, 0);
+			info.samp_tex = ir3_create_collect(ctx, (struct ir3_instruction*[]){
+				texture,
+				sampler,
+			}, 2);
+		}
+	} else {
+		info.flags |= IR3_INSTR_S2EN;
+		unsigned slot = nir_src_as_uint(intr->src[0]);
+		unsigned tex_idx = ir3_image_to_tex(&ctx->so->image_mapping, slot);
+		struct ir3_instruction *texture, *sampler;
+
+		texture = create_immed_typed(ctx->block, tex_idx, TYPE_U16);
+		sampler = create_immed_typed(ctx->block, tex_idx, TYPE_U16);
+
+		info.samp_tex = ir3_create_collect(ctx, (struct ir3_instruction*[]){
+			sampler,
+			texture,
+		}, 2);
+	}
+	
+	return info;
+}
+
+static struct ir3_instruction *
+emit_sam(struct ir3_context *ctx, opc_t opc, struct tex_src_info info,
+		 type_t type, unsigned wrmask, struct ir3_instruction *src0,
+		 struct ir3_instruction *src1)
+{
+	struct ir3_instruction *sam, *addr;
+	if (info.flags & IR3_INSTR_A1EN) {
+		addr = ir3_get_addr1(ctx, info.a1_val);
+	}
+	sam = ir3_SAM(ctx->block, opc, type, 0b1111, info.flags,
+			info.samp_tex, src0, src1);
+	if (info.flags & IR3_INSTR_A1EN) {
+		ir3_instr_set_address(sam, addr);
+	}
+	if (info.flags & IR3_INSTR_B) {
+		sam->cat5.tex_base = info.base;
+		sam->cat5.samp = info.combined_idx;
+	}
+	return sam;
 }
 
 /* src[] = { deref, coord, sample_index }. const_index[] = {} */
@@ -1059,13 +1171,12 @@ emit_intrinsic_load_image(struct ir3_context *ctx, nir_intrinsic_instr *intr,
 		struct ir3_instruction **dst)
 {
 	struct ir3_block *b = ctx->block;
-	const nir_variable *var = nir_intrinsic_get_var(intr, 0);
-	struct ir3_instruction *samp_tex = get_image_samp_tex_src(ctx, intr);
+	struct tex_src_info info = get_image_samp_tex_src(ctx, intr);
 	struct ir3_instruction *sam;
 	struct ir3_instruction * const *src0 = ir3_get_src(ctx, &intr->src[1]);
 	struct ir3_instruction *coords[4];
-	unsigned flags, ncoords = ir3_get_image_coords(var, &flags);
-	type_t type = ir3_get_image_type(var);
+	unsigned flags, ncoords = ir3_get_image_coords(intr, &flags);
+	type_t type = ir3_get_type_for_image_intrinsic(intr);
 
 	/* hmm, this seems a bit odd, but it is what blob does and (at least
 	 * a5xx) just faults on bogus addresses otherwise:
@@ -1074,6 +1185,7 @@ emit_intrinsic_load_image(struct ir3_context *ctx, nir_intrinsic_instr *intr,
 		flags &= ~IR3_INSTR_3D;
 		flags |= IR3_INSTR_A;
 	}
+	info.flags |= flags;
 
 	for (unsigned i = 0; i < ncoords; i++)
 		coords[i] = src0[i];
@@ -1081,8 +1193,8 @@ emit_intrinsic_load_image(struct ir3_context *ctx, nir_intrinsic_instr *intr,
 	if (ncoords == 1)
 		coords[ncoords++] = create_immed(b, 0);
 
-	sam = ir3_SAM(b, OPC_ISAM, type, 0b1111, flags,
-			samp_tex, ir3_create_collect(ctx, coords, ncoords), NULL);
+	sam = emit_sam(ctx, OPC_ISAM, info, type, 0b1111,
+				   ir3_create_collect(ctx, coords, ncoords), NULL);
 
 	sam->barrier_class = IR3_BARRIER_IMAGE_R;
 	sam->barrier_conflict = IR3_BARRIER_IMAGE_W;
@@ -1095,16 +1207,15 @@ emit_intrinsic_image_size(struct ir3_context *ctx, nir_intrinsic_instr *intr,
 		struct ir3_instruction **dst)
 {
 	struct ir3_block *b = ctx->block;
-	const nir_variable *var = nir_intrinsic_get_var(intr, 0);
-	struct ir3_instruction *samp_tex = get_image_samp_tex_src(ctx, intr);
+	struct tex_src_info info = get_image_samp_tex_src(ctx, intr);
 	struct ir3_instruction *sam, *lod;
-	unsigned flags, ncoords = ir3_get_image_coords(var, &flags);
+	unsigned flags, ncoords = ir3_get_image_coords(intr, &flags);
 	type_t dst_type = nir_dest_bit_size(intr->dest) < 32 ?
 			TYPE_U16 : TYPE_U32;
 
+	info.flags |= flags;
 	lod = create_immed(b, 0);
-	sam = ir3_SAM(b, OPC_GETSIZE, dst_type, 0b1111, flags,
-			samp_tex, lod, NULL);
+	sam = emit_sam(ctx, OPC_GETSIZE, info, dst_type, 0b1111, lod, NULL);
 
 	/* Array size actually ends up in .w rather than .z. This doesn't
 	 * matter for miplevel 0, but for higher mips the value in z is
@@ -1126,9 +1237,7 @@ emit_intrinsic_image_size(struct ir3_context *ctx, nir_intrinsic_instr *intr,
 	 *
 	 * TODO: This is at least true on a5xx. Check other gens.
 	 */
-	enum glsl_sampler_dim dim =
-		glsl_get_sampler_dim(glsl_without_array(var->type));
-	if (dim == GLSL_SAMPLER_DIM_BUF) {
+	if (nir_intrinsic_image_dim(intr) == GLSL_SAMPLER_DIM_BUF) {
 		/* Since all the possible values the divisor can take are
 		 * power-of-two (4, 8, or 16), the division is implemented
 		 * as a shift-right.
@@ -1138,7 +1247,7 @@ emit_intrinsic_image_size(struct ir3_context *ctx, nir_intrinsic_instr *intr,
 		 */
 		struct ir3_const_state *const_state = &ctx->so->shader->const_state;
 		unsigned cb = regid(const_state->offsets.image_dims, 0) +
-			const_state->image_dims.off[var->data.driver_location];
+			const_state->image_dims.off[nir_src_as_uint(intr->src[0])];
 		struct ir3_instruction *aux = create_uniform(b, cb + 1);
 
 		tmp[0] = ir3_SHR_B(b, tmp[0], 0, aux, 0);
@@ -1323,11 +1432,8 @@ get_frag_coord(struct ir3_context *ctx)
 		 *
 		 */
 		for (int i = 0; i < 2; i++) {
-			xyzw[i] = ir3_SUB_S(b, xyzw[i], 0,
-					create_immed(b, 8), 0);
-			xyzw[i] = ir3_SHR_B(b, xyzw[i], 0,
-					create_immed(b, 4), 0);
 			xyzw[i] = ir3_COV(b, xyzw[i], TYPE_U32, TYPE_F32);
+			xyzw[i] = ir3_MUL_F(b, xyzw[i], 0, create_immed(b, fui(1.0 / 16.0)), 0);
 		}
 
 		ctx->frag_coord = ir3_create_collect(ctx, xyzw, 4);
@@ -1369,7 +1475,7 @@ emit_intrinsic(struct ir3_context *ctx, nir_intrinsic_instr *intr)
 			src = ir3_get_src(ctx, &intr->src[0]);
 			for (int i = 0; i < intr->num_components; i++) {
 				dst[i] = create_uniform_indirect(b, idx + i,
-						ir3_get_addr(ctx, src[0], 1));
+						ir3_get_addr0(ctx, src[0], 1));
 			}
 			/* NOTE: if relative addressing is used, we set
 			 * constlen in the compiler (to worst-case value)
@@ -1544,6 +1650,7 @@ emit_intrinsic(struct ir3_context *ctx, nir_intrinsic_instr *intr)
 					 * nir_variable to figure out what it is.
 					 */
 					dst[i] = ctx->inputs[inloc];
+					compile_assert(ctx, dst[i]);
 				}
 			}
 		} else {
@@ -1564,7 +1671,7 @@ emit_intrinsic(struct ir3_context *ctx, nir_intrinsic_instr *intr)
 			src = ir3_get_src(ctx, &intr->src[0]);
 			struct ir3_instruction *collect =
 					ir3_create_collect(ctx, ctx->ir->inputs, ctx->ninputs);
-			struct ir3_instruction *addr = ir3_get_addr(ctx, src[0], 4);
+			struct ir3_instruction *addr = ir3_get_addr0(ctx, src[0], 4);
 			for (int i = 0; i < intr->num_components; i++) {
 				unsigned n = idx * 4 + i + comp;
 				dst[i] = create_indirect_load(ctx, ctx->ninputs,
@@ -1621,28 +1728,48 @@ emit_intrinsic(struct ir3_context *ctx, nir_intrinsic_instr *intr)
 	case nir_intrinsic_shared_atomic_comp_swap:
 		dst[0] = emit_intrinsic_atomic_shared(ctx, intr);
 		break;
-	case nir_intrinsic_image_deref_load:
+	case nir_intrinsic_image_load:
 		emit_intrinsic_load_image(ctx, intr, dst);
 		break;
-	case nir_intrinsic_image_deref_store:
+	case nir_intrinsic_bindless_image_load:
+		/* Bindless uses the IBO state, which doesn't have swizzle filled out,
+		 * so using isam doesn't work.
+		 *
+		 * TODO: can we use isam if we fill out more fields?
+		 */
+		ctx->funcs->emit_intrinsic_load_image(ctx, intr, dst);
+		break;
+	case nir_intrinsic_image_store:
+	case nir_intrinsic_bindless_image_store:
 		if ((ctx->so->type == MESA_SHADER_FRAGMENT) &&
 				!ctx->s->info.fs.early_fragment_tests)
 			ctx->so->no_earlyz = true;
 		ctx->funcs->emit_intrinsic_store_image(ctx, intr);
 		break;
-	case nir_intrinsic_image_deref_size:
+	case nir_intrinsic_image_size:
+	case nir_intrinsic_bindless_image_size:
 		emit_intrinsic_image_size(ctx, intr, dst);
 		break;
-	case nir_intrinsic_image_deref_atomic_add:
-	case nir_intrinsic_image_deref_atomic_imin:
-	case nir_intrinsic_image_deref_atomic_umin:
-	case nir_intrinsic_image_deref_atomic_imax:
-	case nir_intrinsic_image_deref_atomic_umax:
-	case nir_intrinsic_image_deref_atomic_and:
-	case nir_intrinsic_image_deref_atomic_or:
-	case nir_intrinsic_image_deref_atomic_xor:
-	case nir_intrinsic_image_deref_atomic_exchange:
-	case nir_intrinsic_image_deref_atomic_comp_swap:
+	case nir_intrinsic_image_atomic_add:
+	case nir_intrinsic_bindless_image_atomic_add:
+	case nir_intrinsic_image_atomic_imin:
+	case nir_intrinsic_bindless_image_atomic_imin:
+	case nir_intrinsic_image_atomic_umin:
+	case nir_intrinsic_bindless_image_atomic_umin:
+	case nir_intrinsic_image_atomic_imax:
+	case nir_intrinsic_bindless_image_atomic_imax:
+	case nir_intrinsic_image_atomic_umax:
+	case nir_intrinsic_bindless_image_atomic_umax:
+	case nir_intrinsic_image_atomic_and:
+	case nir_intrinsic_bindless_image_atomic_and:
+	case nir_intrinsic_image_atomic_or:
+	case nir_intrinsic_bindless_image_atomic_or:
+	case nir_intrinsic_image_atomic_xor:
+	case nir_intrinsic_bindless_image_atomic_xor:
+	case nir_intrinsic_image_atomic_exchange:
+	case nir_intrinsic_bindless_image_atomic_exchange:
+	case nir_intrinsic_image_atomic_comp_swap:
+	case nir_intrinsic_bindless_image_atomic_comp_swap:
 		if ((ctx->so->type == MESA_SHADER_FRAGMENT) &&
 				!ctx->s->info.fs.early_fragment_tests)
 			ctx->so->no_earlyz = true;
@@ -1818,6 +1945,9 @@ emit_intrinsic(struct ir3_context *ctx, nir_intrinsic_instr *intr)
 	case nir_intrinsic_store_shared_ir3:
 		emit_intrinsic_store_shared_ir3(ctx, intr);
 		break;
+	case nir_intrinsic_bindless_resource_ir3:
+		dst[0] = ir3_get_src(ctx, &intr->src[0])[0];
+		break;
 	default:
 		ir3_context_error(ctx, "Unhandled intrinsic type: %s\n",
 				nir_intrinsic_infos[intr->intrinsic].name);
@@ -1893,33 +2023,15 @@ get_tex_dest_type(nir_tex_instr *tex)
 static void
 tex_info(nir_tex_instr *tex, unsigned *flagsp, unsigned *coordsp)
 {
-	unsigned coords, flags = 0;
+	unsigned coords = glsl_get_sampler_dim_coordinate_components(tex->sampler_dim);
+	unsigned flags = 0;
 
 	/* note: would use tex->coord_components.. except txs.. also,
 	 * since array index goes after shadow ref, we don't want to
 	 * count it:
 	 */
-	switch (tex->sampler_dim) {
-	case GLSL_SAMPLER_DIM_1D:
-	case GLSL_SAMPLER_DIM_BUF:
-		coords = 1;
-		break;
-	case GLSL_SAMPLER_DIM_2D:
-	case GLSL_SAMPLER_DIM_RECT:
-	case GLSL_SAMPLER_DIM_EXTERNAL:
-	case GLSL_SAMPLER_DIM_MS:
-	case GLSL_SAMPLER_DIM_SUBPASS:
-	case GLSL_SAMPLER_DIM_SUBPASS_MS:
-		coords = 2;
-		break;
-	case GLSL_SAMPLER_DIM_3D:
-	case GLSL_SAMPLER_DIM_CUBE:
-		coords = 3;
+	if (coords == 3)
 		flags |= IR3_INSTR_3D;
-		break;
-	default:
-		unreachable("bad sampler_dim");
-	}
 
 	if (tex->is_shadow && tex->op != nir_texop_lod)
 		flags |= IR3_INSTR_S;
@@ -1935,37 +2047,135 @@ tex_info(nir_tex_instr *tex, unsigned *flagsp, unsigned *coordsp)
  * or immediate (in which case it will get lowered later to a non .s2en
  * version of the tex instruction which encode tex/samp as immediates:
  */
-static struct ir3_instruction *
+static struct tex_src_info
 get_tex_samp_tex_src(struct ir3_context *ctx, nir_tex_instr *tex)
 {
-	int texture_idx = nir_tex_instr_src_index(tex, nir_tex_src_texture_offset);
-	int sampler_idx = nir_tex_instr_src_index(tex, nir_tex_src_sampler_offset);
+	struct ir3_block *b = ctx->block;
+	struct tex_src_info info = { 0 };
+	int texture_idx = nir_tex_instr_src_index(tex, nir_tex_src_texture_handle);
+	int sampler_idx = nir_tex_instr_src_index(tex, nir_tex_src_sampler_handle);
 	struct ir3_instruction *texture, *sampler;
 
-	if (texture_idx >= 0) {
-		texture = ir3_get_src(ctx, &tex->src[texture_idx].src)[0];
-		texture = ir3_COV(ctx->block, texture, TYPE_U32, TYPE_U16);
-	} else {
-		/* TODO what to do for dynamic case? I guess we only need the
-		 * max index for astc srgb workaround so maybe not a problem
-		 * to worry about if we don't enable indirect samplers for
-		 * a4xx?
+	if (texture_idx >= 0 || sampler_idx >= 0) {
+		/* Bindless case */
+		info.flags |= IR3_INSTR_B;
+
+		/* Gather information required to determine which encoding to
+		 * choose as well as for prefetch.
 		 */
-		ctx->max_texture_index = MAX2(ctx->max_texture_index, tex->texture_index);
-		texture = create_immed_typed(ctx->block, tex->texture_index, TYPE_U16);
-	}
+		nir_intrinsic_instr *bindless_tex = NULL;
+		bool tex_const;
+		if (texture_idx >= 0) {
+			ctx->so->bindless_tex = true;
+			bindless_tex = ir3_bindless_resource(tex->src[texture_idx].src);
+			assert(bindless_tex);
+			info.tex_base = nir_intrinsic_desc_set(bindless_tex);
+			tex_const = nir_src_is_const(bindless_tex->src[0]);
+			if (tex_const)
+				info.tex_idx = nir_src_as_uint(bindless_tex->src[0]);
+		} else {
+			/* To simplify some of the logic below, assume the index is
+			 * constant 0 when it's not enabled.
+			 */
+			tex_const = true;
+			info.tex_idx = 0;
+		}
+		nir_intrinsic_instr *bindless_samp = NULL;
+		bool samp_const;
+		if (sampler_idx >= 0) {
+			ctx->so->bindless_samp = true;
+			bindless_samp = ir3_bindless_resource(tex->src[sampler_idx].src);
+			assert(bindless_samp);
+			info.samp_base = nir_intrinsic_desc_set(bindless_samp);
+			samp_const = nir_src_is_const(bindless_samp->src[0]);
+			if (samp_const)
+				info.samp_idx = nir_src_as_uint(bindless_samp->src[0]);
+		} else {
+			samp_const = true;
+			info.samp_idx = 0;
+		}
 
-	if (sampler_idx >= 0) {
-		sampler = ir3_get_src(ctx, &tex->src[sampler_idx].src)[0];
-		sampler = ir3_COV(ctx->block, sampler, TYPE_U32, TYPE_U16);
+		/* Choose encoding. */
+		if (tex_const && samp_const && info.tex_idx < 256 && info.samp_idx < 256) {
+			if (info.tex_idx < 16 && info.samp_idx < 16 &&
+				(!bindless_tex || !bindless_samp || info.tex_base == info.samp_base)) {
+				/* Everything fits within the instruction */
+				info.base = info.tex_base;
+				info.combined_idx = info.samp_idx | (info.tex_idx << 4);
+			} else {
+				info.base = info.tex_base;
+				info.a1_val = info.tex_idx << 3 | info.samp_base;
+				info.combined_idx = info.samp_idx;
+				info.flags |= IR3_INSTR_A1EN;
+			}
+			info.samp_tex = NULL;
+		} else {
+			info.flags |= IR3_INSTR_S2EN;
+			/* In the indirect case, we only use a1.x to store the sampler
+			 * base if it differs from the texture base.
+			 */
+			if (!bindless_tex || !bindless_samp || info.tex_base == info.samp_base) {
+				info.base = info.tex_base;
+			} else {
+				info.base = info.tex_base;
+				info.a1_val = info.samp_base;
+				info.flags |= IR3_INSTR_A1EN;
+			}
+
+			/* Note: the indirect source is now a vec2 instead of hvec2, and
+			 * for some reason the texture and sampler are swapped.
+			 */
+			struct ir3_instruction *texture, *sampler;
+
+			if (bindless_tex) {
+				texture = ir3_get_src(ctx, &tex->src[texture_idx].src)[0];
+			} else {
+				texture = create_immed(b, 0);
+			}
+
+			if (bindless_samp) {
+				sampler = ir3_get_src(ctx, &tex->src[sampler_idx].src)[0];
+			} else {
+				sampler = create_immed(b, 0);
+			}
+			info.samp_tex = ir3_create_collect(ctx, (struct ir3_instruction*[]){
+				texture,
+				sampler,
+			}, 2);
+		}
 	} else {
-		sampler = create_immed_typed(ctx->block, tex->sampler_index, TYPE_U16);
-	}
+		info.flags |= IR3_INSTR_S2EN;
+		texture_idx = nir_tex_instr_src_index(tex, nir_tex_src_texture_offset);
+		sampler_idx = nir_tex_instr_src_index(tex, nir_tex_src_sampler_offset);
+		if (texture_idx >= 0) {
+			texture = ir3_get_src(ctx, &tex->src[texture_idx].src)[0];
+			texture = ir3_COV(ctx->block, texture, TYPE_U32, TYPE_U16);
+		} else {
+			/* TODO what to do for dynamic case? I guess we only need the
+			 * max index for astc srgb workaround so maybe not a problem
+			 * to worry about if we don't enable indirect samplers for
+			 * a4xx?
+			 */
+			ctx->max_texture_index = MAX2(ctx->max_texture_index, tex->texture_index);
+			texture = create_immed_typed(ctx->block, tex->texture_index, TYPE_U16);
+			info.tex_idx = tex->texture_index;
+		}
 
-	return ir3_create_collect(ctx, (struct ir3_instruction*[]){
-		sampler,
-		texture,
-	}, 2);
+		if (sampler_idx >= 0) {
+			sampler = ir3_get_src(ctx, &tex->src[sampler_idx].src)[0];
+			sampler = ir3_COV(ctx->block, sampler, TYPE_U32, TYPE_U16);
+		} else {
+			sampler = create_immed_typed(ctx->block, tex->sampler_index, TYPE_U16);
+			info.samp_idx = tex->texture_index;
+		}
+
+		info.samp_tex = ir3_create_collect(ctx, (struct ir3_instruction*[]){
+			sampler,
+			texture,
+		}, 2);
+	}
+	
+	return info;
 }
 
 static void
@@ -1975,6 +2185,7 @@ emit_tex(struct ir3_context *ctx, nir_tex_instr *tex)
 	struct ir3_instruction **dst, *sam, *src0[12], *src1[4];
 	struct ir3_instruction * const *coord, * const *off, * const *ddx, * const *ddy;
 	struct ir3_instruction *lod, *compare, *proj, *sample_index;
+	struct tex_src_info info = { 0 };
 	bool has_bias = false, has_lod = false, has_proj = false, has_off = false;
 	unsigned i, coords, flags, ncomp;
 	unsigned nsrc0 = 0, nsrc1 = 0;
@@ -2023,6 +2234,8 @@ emit_tex(struct ir3_context *ctx, nir_tex_instr *tex)
 			break;
 		case nir_tex_src_texture_offset:
 		case nir_tex_src_sampler_offset:
+		case nir_tex_src_texture_handle:
+		case nir_tex_src_sampler_handle:
 			/* handled in get_tex_samp_src() */
 			break;
 		default:
@@ -2193,7 +2406,6 @@ emit_tex(struct ir3_context *ctx, nir_tex_instr *tex)
 	if (opc == OPC_GETLOD)
 		type = TYPE_S32;
 
-	struct ir3_instruction *samp_tex;
 
 	if (tex->op == nir_texop_txf_ms_fb) {
 		/* only expect a single txf_ms_fb per shader: */
@@ -2201,14 +2413,15 @@ emit_tex(struct ir3_context *ctx, nir_tex_instr *tex)
 		compile_assert(ctx, ctx->so->type == MESA_SHADER_FRAGMENT);
 
 		ctx->so->fb_read = true;
-		samp_tex = ir3_create_collect(ctx, (struct ir3_instruction*[]){
+		info.samp_tex = ir3_create_collect(ctx, (struct ir3_instruction*[]){
 			create_immed_typed(ctx->block, ctx->so->num_samp, TYPE_U16),
 			create_immed_typed(ctx->block, ctx->so->num_samp, TYPE_U16),
 		}, 2);
+		info.flags = IR3_INSTR_S2EN;
 
 		ctx->so->num_samp++;
 	} else {
-		samp_tex = get_tex_samp_tex_src(ctx, tex);
+		info = get_tex_samp_tex_src(ctx, tex);
 	}
 
 	struct ir3_instruction *col0 = ir3_create_collect(ctx, src0, nsrc0);
@@ -2221,13 +2434,18 @@ emit_tex(struct ir3_context *ctx, nir_tex_instr *tex)
 
 		sam = ir3_META_TEX_PREFETCH(b);
 		__ssa_dst(sam)->wrmask = MASK(ncomp);   /* dst */
+		__ssa_src(sam, get_barycentric_pixel(ctx), 0);
 		sam->prefetch.input_offset =
 				ir3_nir_coord_offset(tex->src[idx].src.ssa);
-		sam->prefetch.tex  = tex->texture_index;
-		sam->prefetch.samp = tex->sampler_index;
+		/* make sure not to add irrelevant flags like S2EN */
+		sam->flags = flags | (info.flags & IR3_INSTR_B);
+		sam->prefetch.tex  = info.tex_idx;
+		sam->prefetch.samp = info.samp_idx;
+		sam->prefetch.tex_base = info.tex_base;
+		sam->prefetch.samp_base = info.samp_base;
 	} else {
-		sam = ir3_SAM(b, opc, type, MASK(ncomp), flags,
-				samp_tex, col0, col1);
+		info.flags |= flags;
+		sam = emit_sam(ctx, opc, info, type, MASK(ncomp), col0, col1);
 	}
 
 	if ((ctx->astc_srgb & (1 << tex->texture_index)) && !nir_tex_instr_is_query(tex)) {
@@ -2240,8 +2458,8 @@ emit_tex(struct ir3_context *ctx, nir_tex_instr *tex)
 		/* we need to sample the alpha separately with a non-ASTC
 		 * texture state:
 		 */
-		sam = ir3_SAM(b, opc, type, 0b1000, flags,
-				samp_tex, col0, col1);
+		sam = ir3_SAM(b, opc, type, 0b1000, flags | info.flags,
+				info.samp_tex, col0, col1);
 
 		array_insert(ctx->ir, ctx->ir->astc_srgb, sam);
 
@@ -2272,11 +2490,11 @@ emit_tex_info(struct ir3_context *ctx, nir_tex_instr *tex, unsigned idx)
 	struct ir3_block *b = ctx->block;
 	struct ir3_instruction **dst, *sam;
 	type_t dst_type = get_tex_dest_type(tex);
+	struct tex_src_info info = get_tex_samp_tex_src(ctx, tex);
 
 	dst = ir3_get_dst(ctx, &tex->dest, 1);
 
-	sam = ir3_SAM(b, OPC_GETINFO, dst_type, 1 << idx, 0,
-			get_tex_samp_tex_src(ctx, tex), NULL, NULL);
+	sam = emit_sam(ctx, OPC_GETINFO, info, dst_type, 1 << idx, NULL, NULL);
 
 	/* even though there is only one component, since it ends
 	 * up in .y/.z/.w rather than .x, we need a split_dest()
@@ -2301,8 +2519,10 @@ emit_tex_txs(struct ir3_context *ctx, nir_tex_instr *tex)
 	struct ir3_instruction *lod;
 	unsigned flags, coords;
 	type_t dst_type = get_tex_dest_type(tex);
+	struct tex_src_info info = get_tex_samp_tex_src(ctx, tex);
 
 	tex_info(tex, &flags, &coords);
+	info.flags |= flags;
 
 	/* Actually we want the number of dimensions, not coordinates. This
 	 * distinction only matters for cubes.
@@ -2317,9 +2537,7 @@ emit_tex_txs(struct ir3_context *ctx, nir_tex_instr *tex)
 
 	lod = ir3_get_src(ctx, &tex->src[0].src)[0];
 
-	sam = ir3_SAM(b, OPC_GETSIZE, dst_type, 0b1111, flags,
-			get_tex_samp_tex_src(ctx, tex), lod, NULL);
-
+	sam = emit_sam(ctx, OPC_GETSIZE, info, dst_type, 0b1111, lod, NULL);
 	ir3_split_dest(b, dst, sam, 0, 4);
 
 	/* Array size actually ends up in .w rather than .z. This doesn't
@@ -2447,12 +2665,15 @@ emit_block(struct ir3_context *ctx, nir_block *nblock)
 	list_addtail(&block->node, &ctx->ir->block_list);
 
 	/* re-emit addr register in each block if needed: */
-	for (int i = 0; i < ARRAY_SIZE(ctx->addr_ht); i++) {
-		_mesa_hash_table_destroy(ctx->addr_ht[i], NULL);
-		ctx->addr_ht[i] = NULL;
+	for (int i = 0; i < ARRAY_SIZE(ctx->addr0_ht); i++) {
+		_mesa_hash_table_destroy(ctx->addr0_ht[i], NULL);
+		ctx->addr0_ht[i] = NULL;
 	}
 
-	nir_foreach_instr(instr, nblock) {
+	_mesa_hash_table_u64_destroy(ctx->addr1_ht, NULL);
+	ctx->addr1_ht = NULL;
+
+	nir_foreach_instr (instr, nblock) {
 		ctx->cur_instr = instr;
 		emit_instr(ctx, instr);
 		ctx->cur_instr = NULL;
@@ -2499,7 +2720,7 @@ stack_pop(struct ir3_context *ctx)
 static void
 emit_cf_list(struct ir3_context *ctx, struct exec_list *list)
 {
-	foreach_list_typed(nir_cf_node, node, node, list) {
+	foreach_list_typed (nir_cf_node, node, node, list) {
 		switch (node->type) {
 		case nir_cf_node_block:
 			emit_block(ctx, nir_cf_node_as_block(node));
@@ -2780,7 +3001,7 @@ setup_input(struct ir3_context *ctx, nir_variable *in)
 		struct ir3_instruction *components[4];
 		unsigned mask = (1 << (ncomp + frac)) - 1;
 
-		foreach_input(in, ctx->ir) {
+		foreach_input (in, ctx->ir) {
 			if (in->input.inidx == n) {
 				input = in;
 				break;
@@ -3008,7 +3229,7 @@ static int
 max_drvloc(struct exec_list *vars)
 {
 	int drvloc = -1;
-	nir_foreach_variable(var, vars) {
+	nir_foreach_variable (var, vars) {
 		drvloc = MAX2(drvloc, (int)var->data.driver_location);
 	}
 	return drvloc;
@@ -3041,27 +3262,21 @@ emit_instructions(struct ir3_context *ctx)
 	 * only need ij_pixel for "old style" varying inputs (ie.
 	 * tgsi_to_nir)
 	 */
-	struct ir3_instruction *vcoord = NULL;
 	if (ctx->so->type == MESA_SHADER_FRAGMENT) {
-		struct ir3_instruction *xy[2];
-
-		vcoord = create_input(ctx, 0x3);
-		ir3_split_dest(ctx->block, xy, vcoord, 0, 2);
-
-		ctx->ij_pixel = ir3_create_collect(ctx, xy, 2);
+		ctx->ij_pixel = create_input(ctx, 0x3);
 	}
 
 	/* Setup inputs: */
-	nir_foreach_variable(var, &ctx->s->inputs) {
+	nir_foreach_variable (var, &ctx->s->inputs) {
 		setup_input(ctx, var);
 	}
 
 	/* Defer add_sysval_input() stuff until after setup_inputs(),
 	 * because sysvals need to be appended after varyings:
 	 */
-	if (vcoord) {
+	if (ctx->ij_pixel) {
 		add_sysval_input_compmask(ctx, SYSTEM_VALUE_BARYCENTRIC_PERSP_PIXEL,
-				0x3, vcoord);
+				0x3, ctx->ij_pixel);
 	}
 
 
@@ -3100,12 +3315,12 @@ emit_instructions(struct ir3_context *ctx)
 	}
 
 	/* Setup outputs: */
-	nir_foreach_variable(var, &ctx->s->outputs) {
+	nir_foreach_variable (var, &ctx->s->outputs) {
 		setup_output(ctx, var);
 	}
 
 	/* Find # of samplers: */
-	nir_foreach_variable(var, &ctx->s->uniforms) {
+	nir_foreach_variable (var, &ctx->s->uniforms) {
 		ctx->so->num_samp += glsl_type_get_sampler_count(var->type);
 		/* just assume that we'll be reading from images.. if it
 		 * is write-only we don't have to count it, but not sure
@@ -3115,7 +3330,7 @@ emit_instructions(struct ir3_context *ctx)
 	}
 
 	/* NOTE: need to do something more clever when we support >1 fxn */
-	nir_foreach_register(reg, &fxn->registers) {
+	nir_foreach_register (reg, &fxn->registers) {
 		ir3_declare_array(ctx, reg);
 	}
 	/* And emit the body: */
@@ -3191,7 +3406,7 @@ fixup_binning_pass(struct ir3_context *ctx)
 
 			/* fixup outidx to point to new output table entry: */
 			struct ir3_instruction *out;
-			foreach_output(out, ir) {
+			foreach_output (out, ir) {
 				if (out->collect.outidx == i) {
 					out->collect.outidx = j;
 					break;
@@ -3218,10 +3433,19 @@ collect_tex_prefetches(struct ir3_context *ctx, struct ir3 *ir)
 					&ctx->so->sampler_prefetch[idx];
 				idx++;
 
-				fetch->cmd = IR3_SAMPLER_PREFETCH_CMD;
+				if (instr->flags & IR3_INSTR_B) {
+					fetch->cmd = IR3_SAMPLER_BINDLESS_PREFETCH_CMD;
+					/* In bindless mode, the index is actually the base */
+					fetch->tex_id = instr->prefetch.tex_base;
+					fetch->samp_id = instr->prefetch.samp_base;
+					fetch->tex_bindless_id = instr->prefetch.tex;
+					fetch->samp_bindless_id = instr->prefetch.samp;
+				} else {
+					fetch->cmd = IR3_SAMPLER_PREFETCH_CMD;
+					fetch->tex_id = instr->prefetch.tex;
+					fetch->samp_id = instr->prefetch.samp;
+				}
 				fetch->wrmask = instr->regs[0]->wrmask;
-				fetch->tex_id = instr->prefetch.tex;
-				fetch->samp_id = instr->prefetch.samp;
 				fetch->dst = instr->regs[0]->num;
 				fetch->src = instr->prefetch.input_offset;
 
@@ -3345,6 +3569,10 @@ ir3_compile_shader_nir(struct ir3_compiler *compiler,
 	if (so->binning_pass && (ctx->compiler->gpu_id < 600))
 		fixup_binning_pass(ctx);
 
+	ir3_debug_print(ir, "BEFORE CF");
+
+	ir3_cf(ir);
+
 	ir3_debug_print(ir, "BEFORE CP");
 
 	ir3_cp(ir, so);
@@ -3458,7 +3686,7 @@ ir3_compile_shader_nir(struct ir3_compiler *compiler,
 		struct ir3_instruction *instr, *precolor[2];
 		int idx = 0;
 
-		foreach_input(instr, ir) {
+		foreach_input (instr, ir) {
 			if (instr->input.sysval != SYSTEM_VALUE_BARYCENTRIC_PERSP_PIXEL)
 				continue;
 
@@ -3506,7 +3734,7 @@ ir3_compile_shader_nir(struct ir3_compiler *compiler,
 		so->outputs[i].regid = INVALID_REG;
 
 	struct ir3_instruction *out;
-	foreach_output(out, ir) {
+	foreach_output (out, ir) {
 		assert(out->opc == OPC_META_COLLECT);
 		unsigned outidx = out->collect.outidx;
 
@@ -3515,7 +3743,7 @@ ir3_compile_shader_nir(struct ir3_compiler *compiler,
 	}
 
 	struct ir3_instruction *in;
-	foreach_input(in, ir) {
+	foreach_input (in, ir) {
 		assert(in->opc == OPC_META_INPUT);
 		unsigned inidx = in->input.inidx;
 
@@ -3567,6 +3795,10 @@ ir3_compile_shader_nir(struct ir3_compiler *compiler,
 
 	/* Collect sampling instructions eligible for pre-dispatch. */
 	collect_tex_prefetches(ctx, ir);
+
+	if (so->type == MESA_SHADER_FRAGMENT &&
+			ctx->s->info.fs.needs_helper_invocations)
+		so->need_pixlod = true;
 
 out:
 	if (ret) {

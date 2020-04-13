@@ -86,7 +86,7 @@
 #include "util/u_string.h"
 #include "util/u_math.h"
 
-#include "main/imports.h"
+#include "util/imports.h"
 #include "main/shaderobj.h"
 #include "main/enums.h"
 #include "main/mtypes.h"
@@ -4040,8 +4040,10 @@ build_program_resource_list(struct gl_context *ctx,
          return;
    }
 
-   if (add_packed_varyings_only)
+   if (add_packed_varyings_only) {
+      _mesa_set_destroy(resource_set, NULL);
       return;
+   }
 
    if (!add_fragdata_arrays(ctx, shProg, resource_set))
       return;

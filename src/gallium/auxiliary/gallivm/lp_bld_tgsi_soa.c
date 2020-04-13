@@ -1548,6 +1548,7 @@ emit_fetch_system_value(
 
    case TGSI_SEMANTIC_FACE:
       res = lp_build_broadcast_scalar(&bld_base->uint_bld, bld->system_values.front_facing);
+      atype = TGSI_TYPE_UNSIGNED;
       break;
 
   case TGSI_SEMANTIC_DRAWID:
@@ -1763,7 +1764,8 @@ emit_store_tcs_output(struct lp_build_tgsi_context *bld_base,
                                           reg->Register.Indirect,
                                           attrib_index,
                                           channel_index,
-                                          value);
+                                          value,
+                                          mask_vec(bld_base));
 }
 
 static void
@@ -3376,6 +3378,7 @@ static void target_to_dims_layer(unsigned target,
       break;
    default:
       assert(0);
+      *dims = 0;
       return;
    }
 }
@@ -3482,7 +3485,7 @@ load_emit(
 
       scalar_ptr = is_shared ? bld->shared_ptr : bld->ssbos[buf];
 
-      LLVMValueRef ssbo_limit;
+      LLVMValueRef ssbo_limit = NULL;
 
       if (!is_shared) {
          ssbo_limit = LLVMBuildAShr(gallivm->builder, bld->ssbo_sizes[buf], lp_build_const_int32(gallivm, 2), "");
@@ -3601,7 +3604,7 @@ store_emit(
 
       scalar_ptr = is_shared ? bld->shared_ptr : bld->ssbos[buf];
 
-      LLVMValueRef ssbo_limit;
+      LLVMValueRef ssbo_limit = NULL;
 
       if (!is_shared) {
          ssbo_limit = LLVMBuildAShr(gallivm->builder, bld->ssbo_sizes[buf], lp_build_const_int32(gallivm, 2), "");
@@ -3742,7 +3745,7 @@ atomic_emit(
    unsigned buf = bufreg->Register.Index;
    bool is_shared = bufreg->Register.File == TGSI_FILE_MEMORY;
 
-   LLVMAtomicRMWBinOp op;
+   LLVMAtomicRMWBinOp op = -1;
    switch (emit_data->inst->Instruction.Opcode) {
    case TGSI_OPCODE_ATOMUADD:
       op = LLVMAtomicRMWBinOpAdd;
@@ -3943,11 +3946,13 @@ emit_vertex(
    LLVMBuilderRef builder = bld->bld_base.base.gallivm->builder;
 
    if (bld->gs_iface->emit_vertex) {
-      uint32_t imms_idx = emit_data->inst->Src[0].Register.SwizzleX;
-      LLVMValueRef stream_id = bld->immediates[0][imms_idx];
+      LLVMValueRef stream_id = emit_fetch_immediate(bld_base, &emit_data->inst->Src[0],
+                                                    TGSI_TYPE_UNSIGNED,
+                                                    emit_data->inst->Src[0].Register.SwizzleX);
       LLVMValueRef mask = mask_vec(bld_base);
       LLVMValueRef total_emitted_vertices_vec =
          LLVMBuildLoad(builder, bld->total_emitted_vertices_vec_ptr, "");
+
       mask = clamp_mask_to_max_output_vertices(bld, mask,
                                                total_emitted_vertices_vec);
       gather_outputs(bld);

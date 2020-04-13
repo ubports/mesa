@@ -46,6 +46,7 @@ static const VAImageFormat formats[] =
    {VA_FOURCC('I','4','2','0')},
    {VA_FOURCC('Y','V','1','2')},
    {VA_FOURCC('Y','U','Y','V')},
+   {VA_FOURCC('Y','U','Y','2')},
    {VA_FOURCC('U','Y','V','Y')},
    {.fourcc = VA_FOURCC('B','G','R','A'), .byte_order = VA_LSB_FIRST, 32, 32,
     0x00ff0000, 0x0000ff00, 0x000000ff, 0xff000000},
@@ -65,7 +66,7 @@ vlVaVideoSurfaceSize(vlVaSurface *p_surf, int component,
    *height = p_surf->templat.height;
 
    vl_video_buffer_adjust_size(width, height, component,
-                               p_surf->templat.chroma_format,
+                               pipe_format_to_chroma_format(p_surf->templat.buffer_format),
                                p_surf->templat.interlaced);
 }
 
@@ -160,6 +161,7 @@ vlVaCreateImage(VADriverContextP ctx, VAImageFormat *format, int width, int heig
 
    case VA_FOURCC('U','Y','V','Y'):
    case VA_FOURCC('Y','U','Y','V'):
+   case VA_FOURCC('Y','U','Y','2'):
       img->num_planes = 1;
       img->pitches[0] = w * 2;
       img->offsets[0] = 0;
@@ -223,8 +225,7 @@ vlVaDeriveImage(VADriverContextP ctx, VASurfaceID surface, VAImage *image)
    if (!surf || !surf->buffer)
       return VA_STATUS_ERROR_INVALID_SURFACE;
 
-   if (surf->buffer->interlaced &&
-      surf->buffer->buffer_format != PIPE_FORMAT_NV12)
+   if (surf->buffer->interlaced)
      return VA_STATUS_ERROR_OPERATION_FAILED;
 
    surfaces = surf->buffer->get_surfaces(surf->buffer);
@@ -261,10 +262,6 @@ vlVaDeriveImage(VADriverContextP ctx, VASurfaceID surface, VAImage *image)
          offset = 0;
    }
 
-   img->num_planes = 1;
-   img->offsets[0] = offset;
-   img->data_size  = img->pitches[0] * h;
-
    switch (img->format.fourcc) {
    case VA_FOURCC('U','Y','V','Y'):
    case VA_FOURCC('Y','U','Y','V'):
@@ -280,51 +277,6 @@ vlVaDeriveImage(VADriverContextP ctx, VASurfaceID surface, VAImage *image)
       assert(img->pitches[0] >= (w * 4));
       break;
 
-   case VA_FOURCC('P','0','1','0'):
-   case VA_FOURCC('P','0','1','6'):
-   case VA_FOURCC('N','V','1','2'):
-      if (surf->buffer->interlaced) {
-         struct pipe_video_buffer *new_buffer;
-         struct u_rect src_rect, dst_rect;
-
-         surf->templat.interlaced = false;
-         new_buffer = drv->pipe->create_video_buffer(drv->pipe, &surf->templat);
-
-         /* convert the interlaced to the progressive */
-         src_rect.x0 = dst_rect.x0 = 0;
-         src_rect.x1 = dst_rect.x1 = surf->templat.width;
-         src_rect.y0 = dst_rect.y0 = 0;
-         src_rect.y1 = dst_rect.y1 = surf->templat.height;
-
-         vl_compositor_yuv_deint_full(&drv->cstate, &drv->compositor,
-                           surf->buffer, new_buffer,
-                           &src_rect, &dst_rect,
-                           VL_COMPOSITOR_WEAVE);
-
-         surf->buffer->destroy(surf->buffer);
-         surf->buffer = new_buffer;
-
-         /* recalculate the values now that we have a new surface */
-         surfaces = surf->buffer->get_surfaces(surf->buffer);
-         if (screen->resource_get_info) {
-            screen->resource_get_info(screen, surfaces[0]->texture, &stride,
-                                    &offset);
-            if (!stride)
-               offset = 0;
-         }
-
-         w = align(surf->buffer->width, 2);
-         h = align(surf->buffer->height, 2);
-      }
-
-      img->num_planes = 2;
-      img->pitches[0] = stride > 0 ? stride : w;
-      img->offsets[0] = 0;
-      img->pitches[1] = stride > 0 ? stride : w;
-      img->offsets[1] = (stride > 0 ? stride : w) * h;
-      img->data_size  = (stride > 0 ? stride : w) * h * 3 / 2;
-      break;
-
    default:
       /* VaDeriveImage only supports contiguous planes. But there is now a
          more generic api vlVaExportSurfaceHandle. */
@@ -333,6 +285,9 @@ vlVaDeriveImage(VADriverContextP ctx, VASurfaceID surface, VAImage *image)
       return VA_STATUS_ERROR_OPERATION_FAILED;
    }
 
+   img->num_planes = 1;
+   img->offsets[0] = offset;
+   img->data_size  = img->pitches[0] * h;
 
    img_buf = CALLOC(1, sizeof(vlVaBuffer));
    if (!img_buf) {
@@ -500,10 +455,10 @@ vlVaGetImage(VADriverContextP ctx, VASurfaceID surface, int x, int y,
       unsigned box_y = y & ~1;
       if (!views[i]) continue;
       vl_video_buffer_adjust_size(&box_w, &box_h, i,
-                                  surf->templat.chroma_format,
+                                  pipe_format_to_chroma_format(surf->templat.buffer_format),
                                   surf->templat.interlaced);
       vl_video_buffer_adjust_size(&box_x, &box_y, i,
-                                  surf->templat.chroma_format,
+                                  pipe_format_to_chroma_format(surf->templat.buffer_format),
                                   surf->templat.interlaced);
       for (j = 0; j < views[i]->texture->array_size; ++j) {
          struct pipe_box box = {box_x, box_y, j, box_w, box_h, 1};

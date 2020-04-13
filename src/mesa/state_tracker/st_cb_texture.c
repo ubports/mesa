@@ -34,7 +34,7 @@
 #include "main/format_utils.h"
 #include "main/glformats.h"
 #include "main/image.h"
-#include "main/imports.h"
+#include "util/imports.h"
 #include "main/macros.h"
 #include "main/mipmap.h"
 #include "main/pack.h"
@@ -1487,7 +1487,7 @@ st_TexSubImage(struct gl_context *ctx, GLuint dims,
 
    /* Try texture_subdata, which should be the fastest memcpy path. */
    if (pixels &&
-       !_mesa_is_bufferobj(unpack->BufferObj) &&
+       !unpack->BufferObj &&
        _mesa_texstore_can_use_memcpy(ctx, texImage->_BaseFormat,
                                      texImage->TexFormat, format, type,
                                      unpack)) {
@@ -1511,7 +1511,7 @@ st_TexSubImage(struct gl_context *ctx, GLuint dims,
       }
 
       util_throttle_memory_usage(pipe, &st->throttle,
-                                 width * height * depth *
+                                 (uint64_t) width * height * depth *
                                  util_format_get_blocksize(dst->format));
 
       u_box_3d(xoffset, yoffset, zoffset + dstz, width, height, depth, &box);
@@ -1557,7 +1557,7 @@ st_TexSubImage(struct gl_context *ctx, GLuint dims,
       goto fallback;
    }
 
-   if (_mesa_is_bufferobj(unpack->BufferObj)) {
+   if (unpack->BufferObj) {
       if (try_pbo_upload(ctx, dims, texImage, format, type, dst_format,
                          xoffset, yoffset, zoffset,
                          width, height, depth, pixels, unpack))
@@ -1620,7 +1620,7 @@ st_TexSubImage(struct gl_context *ctx, GLuint dims,
    }
 
    util_throttle_memory_usage(pipe, &st->throttle,
-                              width * height * depth *
+                              (uint64_t) width * height * depth *
                               util_format_get_blocksize(src_templ.format));
    throttled = true;
 
@@ -1716,7 +1716,7 @@ st_TexSubImage(struct gl_context *ctx, GLuint dims,
 fallback:
    if (!throttled) {
       util_throttle_memory_usage(pipe, &st->throttle,
-                                 width * height * depth *
+                                 (uint64_t) width * height * depth *
                                  _mesa_get_format_bytes(texImage->TexFormat));
    }
    _mesa_store_texsubimage(ctx, dims, texImage, xoffset, yoffset, zoffset,
@@ -1777,7 +1777,7 @@ st_CompressedTexSubImage(struct gl_context *ctx, GLuint dims,
       goto fallback;
    }
 
-   if (!_mesa_is_bufferobj(ctx->Unpack.BufferObj))
+   if (!ctx->Unpack.BufferObj)
       goto fallback;
 
    if (st_compressed_format_fallback(st, texImage->TexFormat))

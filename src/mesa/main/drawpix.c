@@ -23,7 +23,7 @@
  */
 
 #include "glheader.h"
-#include "imports.h"
+#include "util/imports.h"
 #include "draw_validate.h"
 #include "bufferobj.h"
 #include "context.h"
@@ -143,7 +143,7 @@ _mesa_DrawPixels( GLsizei width, GLsizei height,
          GLint x = IROUND(ctx->Current.RasterPos[0]);
          GLint y = IROUND(ctx->Current.RasterPos[1]);
 
-         if (_mesa_is_bufferobj(ctx->Unpack.BufferObj)) {
+         if (ctx->Unpack.BufferObj) {
             /* unpack from PBO */
             if (!_mesa_validate_pbo_access(2, &ctx->Unpack, width, height,
                                            1, format, type, INT_MAX, pixels)) {
@@ -326,7 +326,7 @@ _mesa_Bitmap( GLsizei width, GLsizei height,
          GLint x = IFLOOR(ctx->Current.RasterPos[0] + epsilon - xorig);
          GLint y = IFLOOR(ctx->Current.RasterPos[1] + epsilon - yorig);
 
-         if (_mesa_is_bufferobj(ctx->Unpack.BufferObj)) {
+         if (ctx->Unpack.BufferObj) {
             /* unpack from PBO */
             if (!_mesa_validate_pbo_access(2, &ctx->Unpack, width, height,
                                            1, GL_COLOR_INDEX, GL_BITMAP,

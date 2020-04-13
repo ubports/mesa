@@ -364,6 +364,24 @@ create_batch(struct iris_batch *batch)
 }
 
 static void
+iris_batch_maybe_noop(struct iris_batch *batch)
+{
+   /* We only insert the NOOP at the beginning of the batch. */
+   assert(iris_batch_bytes_used(batch) == 0);
+
+   if (batch->noop_enabled) {
+      /* Emit MI_BATCH_BUFFER_END to prevent any further command to be
+       * executed.
+       */
+      uint32_t *map = batch->map_next;
+
+      map[0] = (0xA << 23);
+
+      batch->map_next += 4;
+   }
+}
+
+static void
 iris_batch_reset(struct iris_batch *batch)
 {
    struct iris_screen *screen = batch->screen;
@@ -382,6 +400,8 @@ iris_batch_reset(struct iris_batch *batch)
    iris_syncpt_reference(screen, &syncpt, NULL);
 
    iris_cache_sets_clear(batch);
+
+   iris_batch_maybe_noop(batch);
 }
 
 void
@@ -650,6 +670,10 @@ _iris_batch_flush(struct iris_batch *batch, const char *file, int line)
 
    if (unlikely(INTEL_DEBUG &
                 (DEBUG_BATCH | DEBUG_SUBMIT | DEBUG_PIPE_CONTROL))) {
+      const char *basefile = strstr(file, "iris/");
+      if (basefile)
+         file = basefile + 5;
+
       fprintf(stderr, "%19s:%-3d: %s batch [%u] flush with %5db (%0.1f%%) "
               "(cmds), %4d BOs (%0.1fMb aperture)\n",
               file, line, batch_name_to_string(batch->name), batch->hw_ctx_id,
@@ -724,4 +748,27 @@ bool
 iris_batch_references(struct iris_batch *batch, struct iris_bo *bo)
 {
    return find_validation_entry(batch, bo) != NULL;
+}
+
+/**
+ * Updates the state of the noop feature.
+ */
+uint64_t
+iris_batch_prepare_noop(struct iris_batch *batch, bool noop_enable, uint64_t dirty_flags)
+{
+   if (batch->noop_enabled == noop_enable)
+      return 0;
+
+   batch->noop_enabled = noop_enable;
+
+   iris_batch_flush(batch);
+
+   /* If the batch was empty, flush had no effect, so insert our noop. */
+   if (iris_batch_bytes_used(batch) == 0)
+      iris_batch_maybe_noop(batch);
+
+   /* We only need to update the entire state if we transition from noop ->
+    * not-noop.
+    */
+   return !batch->noop_enabled ? dirty_flags : 0;
 }

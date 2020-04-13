@@ -308,7 +308,7 @@ anv_physical_device_free_disk_cache(struct anv_physical_device *device)
 static uint64_t
 get_available_system_memory()
 {
-   char *meminfo = os_read_file("/proc/meminfo");
+   char *meminfo = os_read_file("/proc/meminfo", NULL);
    if (!meminfo)
       return 0;
 
@@ -476,19 +476,6 @@ anv_physical_device_try_create(struct anv_instance *instance,
 
    device->always_flush_cache =
       driQueryOptionb(&instance->dri_options, "always_flush_cache");
-
-   /* Starting with Gen10, the timestamp frequency of the command streamer may
-    * vary from one part to another. We can query the value from the kernel.
-    */
-   if (device->info.gen >= 10) {
-      int timestamp_frequency =
-         anv_gem_get_param(fd, I915_PARAM_CS_TIMESTAMP_FREQUENCY);
-
-      if (timestamp_frequency < 0)
-         intel_logw("Kernel 4.16-rc1+ required to properly query CS timestamp frequency");
-      else
-         device->info.timestamp_frequency = timestamp_frequency;
-   }
 
    /* GENs prior to 8 do not support EU/Subslice info */
    if (device->info.gen >= 8) {
@@ -2630,6 +2617,23 @@ static struct gen_mapped_pinned_buffer_alloc aux_map_allocator = {
    .free = gen_aux_map_buffer_free,
 };
 
+static VkResult
+check_physical_device_features(VkPhysicalDevice physicalDevice,
+                               const VkPhysicalDeviceFeatures *features)
+{
+   VkPhysicalDeviceFeatures supported_features;
+   anv_GetPhysicalDeviceFeatures(physicalDevice, &supported_features);
+   VkBool32 *supported_feature = (VkBool32 *)&supported_features;
+   VkBool32 *enabled_feature = (VkBool32 *)features;
+   unsigned num_features = sizeof(VkPhysicalDeviceFeatures) / sizeof(VkBool32);
+   for (uint32_t i = 0; i < num_features; i++) {
+      if (enabled_feature[i] && !supported_feature[i])
+         return vk_error(VK_ERROR_FEATURE_NOT_PRESENT);
+   }
+
+   return VK_SUCCESS;
+}
+
 VkResult anv_CreateDevice(
     VkPhysicalDevice                            physicalDevice,
     const VkDeviceCreateInfo*                   pCreateInfo,
@@ -2661,15 +2665,34 @@ VkResult anv_CreateDevice(
    }
 
    /* Check enabled features */
+   bool robust_buffer_access = false;
    if (pCreateInfo->pEnabledFeatures) {
-      VkPhysicalDeviceFeatures supported_features;
-      anv_GetPhysicalDeviceFeatures(physicalDevice, &supported_features);
-      VkBool32 *supported_feature = (VkBool32 *)&supported_features;
-      VkBool32 *enabled_feature = (VkBool32 *)pCreateInfo->pEnabledFeatures;
-      unsigned num_features = sizeof(VkPhysicalDeviceFeatures) / sizeof(VkBool32);
-      for (uint32_t i = 0; i < num_features; i++) {
-         if (enabled_feature[i] && !supported_feature[i])
-            return vk_error(VK_ERROR_FEATURE_NOT_PRESENT);
+      result = check_physical_device_features(physicalDevice,
+                                              pCreateInfo->pEnabledFeatures);
+      if (result != VK_SUCCESS)
+         return result;
+
+      if (pCreateInfo->pEnabledFeatures->robustBufferAccess)
+         robust_buffer_access = true;
+   }
+
+   vk_foreach_struct_const(ext, pCreateInfo->pNext) {
+      switch (ext->sType) {
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2: {
+         const VkPhysicalDeviceFeatures2 *features = (const void *)ext;
+         result = check_physical_device_features(physicalDevice,
+                                                 &features->features);
+         if (result != VK_SUCCESS)
+            return result;
+
+         if (features->features.robustBufferAccess)
+            robust_buffer_access = true;
+         break;
+      }
+
+      default:
+         /* Don't warn */
+         break;
       }
    }
 
@@ -2786,8 +2809,7 @@ VkResult anv_CreateDevice(
     */
    device->can_chain_batches = device->info.gen >= 8;
 
-   device->robust_buffer_access = pCreateInfo->pEnabledFeatures &&
-      pCreateInfo->pEnabledFeatures->robustBufferAccess;
+   device->robust_buffer_access = robust_buffer_access;
    device->enabled_extensions = enabled_extensions;
 
    anv_device_init_dispatch(device);

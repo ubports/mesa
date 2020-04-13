@@ -223,6 +223,10 @@ isl_device_init(struct isl_device *dev,
       dev->ds.hiz_offset = 0;
    }
 
+   if (ISL_DEV_GEN(dev) >= 12) {
+      dev->ds.size += GEN12_MI_LOAD_REGISTER_IMM_length * 4 * 2;
+   }
+
    isl_device_setup_mocs(dev);
 }
 
@@ -818,8 +822,8 @@ isl_calc_phys_level0_extent_sa(const struct isl_device *dev,
 {
    const struct isl_format_layout *fmtl = isl_format_get_layout(info->format);
 
-   if (isl_format_is_yuv(info->format))
-      isl_finishme("%s:%s: YUV format", __FILE__, __func__);
+   if (isl_format_is_planar(info->format))
+      unreachable("Planar formats unsupported");
 
    switch (info->dim) {
    case ISL_SURF_DIM_1D:
@@ -1368,10 +1372,19 @@ isl_calc_row_pitch_alignment(const struct isl_device *dev,
    if (tile_info->tiling != ISL_TILING_LINEAR) {
       /* According to BSpec: 44930, Gen12's CCS-compressed surface pitches must
        * be 512B-aligned. CCS is only support on Y tilings.
+       *
+       * Only consider 512B alignment when :
+       *    - AUX is not explicitly disabled
+       *    - the caller has specified no pitch
+       *
+       * isl_surf_get_ccs_surf() will check that the main surface alignment
+       * matches CCS expectations.
        */
       if (ISL_DEV_GEN(dev) >= 12 &&
           isl_format_supports_ccs_e(dev->info, surf_info->format) &&
-          tile_info->tiling != ISL_TILING_X) {
+          tile_info->tiling != ISL_TILING_X &&
+          !(surf_info->usage & ISL_SURF_USAGE_DISABLE_AUX_BIT) &&
+          surf_info->row_pitch_B == 0) {
          return isl_align(tile_info->phys_extent_B.width, 512);
       }
 
@@ -1394,16 +1407,27 @@ isl_calc_row_pitch_alignment(const struct isl_device *dev,
     */
    const struct isl_format_layout *fmtl = isl_format_get_layout(surf_info->format);
    const uint32_t bs = fmtl->bpb / 8;
+   uint32_t alignment;
 
    if (surf_info->usage & ISL_SURF_USAGE_RENDER_TARGET_BIT) {
       if (isl_format_is_yuv(surf_info->format)) {
-         return 2 * bs;
+         alignment = 2 * bs;
       } else  {
-         return bs;
+         alignment = bs;
       }
+   } else {
+      alignment = 1;
    }
 
-   return 1;
+   /* From the Broadwell PRM >> Volume 2c: Command Reference: Registers >>
+    * PRI_STRIDE Stride (p1254):
+    *
+    *    "When using linear memory, this must be at least 64 byte aligned."
+    */
+   if (surf_info->usage & ISL_SURF_USAGE_DISPLAY_BIT)
+      alignment = isl_align(alignment, 64);
+
+   return alignment;
 }
 
 static uint32_t
@@ -1647,10 +1671,19 @@ isl_surf_init_s(const struct isl_device *dev,
        */
       if (tiling == ISL_TILING_GEN12_CCS)
          base_alignment_B = MAX(base_alignment_B, 4096);
-   }
 
-   if (ISL_DEV_GEN(dev) >= 12) {
-      base_alignment_B = MAX(base_alignment_B, 64 * 1024);
+      /* Gen12+ requires that images be 64K-aligned if they're going to used
+       * with CCS.  This is because the Aux translation table maps main
+       * surface addresses to aux addresses at a 64K (in the main surface)
+       * granularity.  Because we don't know for sure in ISL if a surface will
+       * use CCS, we have to guess based on the DISABLE_AUX usage bit.  The
+       * one thing we do know is that we haven't enable CCS on linear images
+       * yet so we can avoid the extra alignment there.
+       */
+      if (ISL_DEV_GEN(dev) >= 12 &&
+          !(info->usage & ISL_SURF_USAGE_DISABLE_AUX_BIT)) {
+         base_alignment_B = MAX(base_alignment_B, 64 * 1024);
+      }
    }
 
    if (ISL_DEV_GEN(dev) < 9) {
@@ -2714,16 +2747,6 @@ isl_surf_get_depth_format(const struct isl_device *dev,
 }
 
 bool
-isl_surf_supports_hiz_ccs_wt(const struct gen_device_info *dev,
-                             const struct isl_surf *surf,
-                             enum isl_aux_usage aux_usage)
-{
-   return aux_usage == ISL_AUX_USAGE_HIZ_CCS &&
-          surf->samples == 1 &&
-          surf->usage & ISL_SURF_USAGE_TEXTURE_BIT;
-}
-
-bool
 isl_swizzle_supports_rendering(const struct gen_device_info *devinfo,
                                struct isl_swizzle swizzle)
 {
@@ -2839,4 +2862,76 @@ isl_swizzle_invert(struct isl_swizzle swizzle)
       chans[swizzle.r - ISL_CHANNEL_SELECT_RED] = ISL_CHANNEL_SELECT_RED;
 
    return (struct isl_swizzle) { chans[0], chans[1], chans[2], chans[3] };
+}
+
+uint8_t
+isl_format_get_aux_map_encoding(enum isl_format format)
+{
+   switch(format) {
+   case ISL_FORMAT_R32G32B32A32_FLOAT: return 0x11;
+   case ISL_FORMAT_R32G32B32X32_FLOAT: return 0x11;
+   case ISL_FORMAT_R32G32B32A32_SINT: return 0x12;
+   case ISL_FORMAT_R32G32B32A32_UINT: return 0x13;
+   case ISL_FORMAT_R16G16B16A16_UNORM: return 0x14;
+   case ISL_FORMAT_R16G16B16A16_SNORM: return 0x15;
+   case ISL_FORMAT_R16G16B16A16_SINT: return 0x16;
+   case ISL_FORMAT_R16G16B16A16_UINT: return 0x17;
+   case ISL_FORMAT_R16G16B16A16_FLOAT: return 0x10;
+   case ISL_FORMAT_R16G16B16X16_FLOAT: return 0x10;
+   case ISL_FORMAT_R32G32_FLOAT: return 0x11;
+   case ISL_FORMAT_R32G32_SINT: return 0x12;
+   case ISL_FORMAT_R32G32_UINT: return 0x13;
+   case ISL_FORMAT_B8G8R8A8_UNORM: return 0xA;
+   case ISL_FORMAT_B8G8R8X8_UNORM: return 0xA;
+   case ISL_FORMAT_B8G8R8A8_UNORM_SRGB: return 0xA;
+   case ISL_FORMAT_B8G8R8X8_UNORM_SRGB: return 0xA;
+   case ISL_FORMAT_R10G10B10A2_UNORM: return 0x18;
+   case ISL_FORMAT_R10G10B10A2_UNORM_SRGB: return 0x18;
+   case ISL_FORMAT_R10G10B10_FLOAT_A2_UNORM: return 0x19;
+   case ISL_FORMAT_R10G10B10A2_UINT: return 0x1A;
+   case ISL_FORMAT_R8G8B8A8_UNORM: return 0xA;
+   case ISL_FORMAT_R8G8B8A8_UNORM_SRGB: return 0xA;
+   case ISL_FORMAT_R8G8B8A8_SNORM: return 0x1B;
+   case ISL_FORMAT_R8G8B8A8_SINT: return 0x1C;
+   case ISL_FORMAT_R8G8B8A8_UINT: return 0x1D;
+   case ISL_FORMAT_R16G16_UNORM: return 0x14;
+   case ISL_FORMAT_R16G16_SNORM: return 0x15;
+   case ISL_FORMAT_R16G16_SINT: return 0x16;
+   case ISL_FORMAT_R16G16_UINT: return 0x17;
+   case ISL_FORMAT_R16G16_FLOAT: return 0x10;
+   case ISL_FORMAT_B10G10R10A2_UNORM: return 0x18;
+   case ISL_FORMAT_B10G10R10A2_UNORM_SRGB: return 0x18;
+   case ISL_FORMAT_R11G11B10_FLOAT: return 0x1E;
+   case ISL_FORMAT_R32_SINT: return 0x12;
+   case ISL_FORMAT_R32_UINT: return 0x13;
+   case ISL_FORMAT_R32_FLOAT: return 0x11;
+   case ISL_FORMAT_R24_UNORM_X8_TYPELESS: return 0x11;
+   case ISL_FORMAT_B5G6R5_UNORM: return 0xA;
+   case ISL_FORMAT_B5G6R5_UNORM_SRGB: return 0xA;
+   case ISL_FORMAT_B5G5R5A1_UNORM: return 0xA;
+   case ISL_FORMAT_B5G5R5A1_UNORM_SRGB: return 0xA;
+   case ISL_FORMAT_B4G4R4A4_UNORM: return 0xA;
+   case ISL_FORMAT_B4G4R4A4_UNORM_SRGB: return 0xA;
+   case ISL_FORMAT_R8G8_UNORM: return 0xA;
+   case ISL_FORMAT_R8G8_SNORM: return 0x1B;
+   case ISL_FORMAT_R8G8_SINT: return 0x1C;
+   case ISL_FORMAT_R8G8_UINT: return 0x1D;
+   case ISL_FORMAT_R16_UNORM: return 0x14;
+   case ISL_FORMAT_R16_SNORM: return 0x15;
+   case ISL_FORMAT_R16_SINT: return 0x16;
+   case ISL_FORMAT_R16_UINT: return 0x17;
+   case ISL_FORMAT_R16_FLOAT: return 0x10;
+   case ISL_FORMAT_B5G5R5X1_UNORM: return 0xA;
+   case ISL_FORMAT_B5G5R5X1_UNORM_SRGB: return 0xA;
+   case ISL_FORMAT_A1B5G5R5_UNORM: return 0xA;
+   case ISL_FORMAT_A4B4G4R4_UNORM: return 0xA;
+   case ISL_FORMAT_R8_UNORM: return 0xA;
+   case ISL_FORMAT_R8_SNORM: return 0x1B;
+   case ISL_FORMAT_R8_SINT: return 0x1C;
+   case ISL_FORMAT_R8_UINT: return 0x1D;
+   case ISL_FORMAT_A8_UNORM: return 0xA;
+   default:
+      unreachable("Unsupported aux-map format!");
+      return 0;
+   }
 }

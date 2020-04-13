@@ -59,6 +59,9 @@ struct ir3_info {
 	/* number of sync bits: */
 	uint16_t ss, sy;
 
+	/* estimate of number of cycles stalled on (ss) */
+	uint16_t sstall;
+
 	uint16_t last_baryf;     /* instruction # of last varying fetch */
 };
 
@@ -215,11 +218,15 @@ struct ir3_instruction {
 		IR3_INSTR_S2EN  = 0x200,
 		IR3_INSTR_G     = 0x400,
 		IR3_INSTR_SAT   = 0x800,
+		/* (cat5/cat6) Bindless */
+		IR3_INSTR_B     = 0x1000,
+		/* (cat5-only) Get some parts of the encoding from a1.x */
+		IR3_INSTR_A1EN  = 0x2000,
 		/* meta-flags, for intermediate stages of IR, ie.
 		 * before register assignment is done:
 		 */
-		IR3_INSTR_MARK  = 0x1000,
-		IR3_INSTR_UNUSED= 0x2000,
+		IR3_INSTR_MARK  = 0x4000,
+		IR3_INSTR_UNUSED= 0x8000,
 	} flags;
 	uint8_t repeat;
 	uint8_t nop;
@@ -250,6 +257,7 @@ struct ir3_instruction {
 		} cat2;
 		struct {
 			unsigned samp, tex;
+			unsigned tex_base : 3;
 			type_t type;
 		} cat5;
 		struct {
@@ -259,6 +267,7 @@ struct ir3_instruction {
 			int iim_val : 3;      /* for ldgb/stgb, # of components */
 			unsigned d : 3;
 			bool typed : 1;
+			unsigned base : 3;
 		} cat6;
 		struct {
 			unsigned w : 1;       /* write */
@@ -281,6 +290,8 @@ struct ir3_instruction {
 		struct {
 			unsigned samp, tex;
 			unsigned input_offset;
+			unsigned samp_base : 3;
+			unsigned tex_base : 3;
 		} prefetch;
 		struct {
 			/* maps back to entry in ir3_shader_variant::inputs table: */
@@ -321,6 +332,11 @@ struct ir3_instruction {
 	 * to index into a table of pass-private data.
 	 */
 	void *data;
+
+	/**
+	 * Valid if pass calls ir3_find_ssa_uses().. see foreach_ssa_use()
+	 */
+	struct set *uses;
 
 	int sun;            /* Sethi–Ullman number, used by sched */
 	int use_count;      /* currently just updated/used by cp */
@@ -399,6 +415,9 @@ struct ir3_instruction {
 #ifdef DEBUG
 	uint32_t serialno;
 #endif
+
+	// TODO only computerator/assembler:
+	int line;
 };
 
 static inline struct ir3_instruction *
@@ -458,7 +477,10 @@ struct ir3 {
 	 * convenient list of instructions that reference some address
 	 * register simplifies this.
 	 */
-	DECLARE_ARRAY(struct ir3_instruction *, indirects);
+	DECLARE_ARRAY(struct ir3_instruction *, a0_users);
+
+	/* same for a1.x: */
+	DECLARE_ARRAY(struct ir3_instruction *, a1_users);
 
 	/* and same for instructions that consume predicate register: */
 	DECLARE_ARRAY(struct ir3_instruction *, predicates);
@@ -500,6 +522,9 @@ struct ir3_array {
 	unsigned base;      /* base vreg name */
 	unsigned reg;       /* base physical reg */
 	uint16_t start_ip, end_ip;
+
+	/* Indicates if half-precision */
+	bool half;
 };
 
 struct ir3_array * ir3_lookup_array(struct ir3 *ir, unsigned id);
@@ -584,16 +609,14 @@ void ir3_clear_mark(struct ir3 *shader);
 
 unsigned ir3_count_instructions(struct ir3 *ir);
 
-static inline int ir3_instr_regno(struct ir3_instruction *instr,
-		struct ir3_register *reg)
-{
-	unsigned i;
-	for (i = 0; i < instr->regs_count; i++)
-		if (reg == instr->regs[i])
-			return i;
-	return -1;
-}
+void ir3_find_ssa_uses(struct ir3 *ir, void *mem_ctx);
 
+#include "util/set.h"
+#define foreach_ssa_use(__use, __instr) \
+	for (struct ir3_instruction *__use = (void *)~0; \
+	     __use && (__instr)->uses; __use = NULL) \
+		set_foreach ((__instr)->uses, __entry) \
+			if ((__use = (void *)__entry->key))
 
 #define MAX_ARRAYS 16
 
@@ -683,10 +706,10 @@ static inline bool is_same_type_mov(struct ir3_instruction *instr)
 
 	dst = instr->regs[0];
 
-	/* mov's that write to a0.x or p0.x are special: */
+	/* mov's that write to a0 or p0.x are special: */
 	if (dst->num == regid(REG_P0, 0))
 		return false;
-	if (dst->num == regid(REG_A0, 0))
+	if (reg_num(dst) == REG_A0)
 		return false;
 
 	if (dst->flags & (IR3_REG_RELATIV | IR3_REG_ARRAY))
@@ -742,6 +765,18 @@ static inline bool is_mem(struct ir3_instruction *instr)
 static inline bool is_barrier(struct ir3_instruction *instr)
 {
 	return (opc_cat(instr->opc) == 7);
+}
+
+static inline bool
+is_half(struct ir3_instruction *instr)
+{
+	return !!(instr->regs[0]->flags & IR3_REG_HALF);
+}
+
+static inline bool
+is_high(struct ir3_instruction *instr)
+{
+	return !!(instr->regs[0]->flags & IR3_REG_HIGH);
 }
 
 static inline bool
@@ -824,11 +859,20 @@ static inline unsigned dest_regs(struct ir3_instruction *instr)
 	return util_last_bit(instr->regs[0]->wrmask);
 }
 
-static inline bool writes_addr(struct ir3_instruction *instr)
+static inline bool writes_addr0(struct ir3_instruction *instr)
 {
 	if (instr->regs_count > 0) {
 		struct ir3_register *dst = instr->regs[0];
-		return reg_num(dst) == REG_A0;
+		return dst->num == regid(REG_A0, 0);
+	}
+	return false;
+}
+
+static inline bool writes_addr1(struct ir3_instruction *instr)
+{
+	if (instr->regs_count > 0) {
+		struct ir3_register *dst = instr->regs[0];
+		return dst->num == regid(REG_A0, 1);
 	}
 	return false;
 }
@@ -1139,7 +1183,7 @@ void ir3_print_instr(struct ir3_instruction *instr);
 
 /* delay calculation: */
 int ir3_delayslots(struct ir3_instruction *assigner,
-		struct ir3_instruction *consumer, unsigned n);
+		struct ir3_instruction *consumer, unsigned n, bool soft);
 unsigned ir3_delay_calc(struct ir3_block *block, struct ir3_instruction *instr,
 		bool soft, bool pred);
 void ir3_remove_nops(struct ir3 *ir);
@@ -1148,6 +1192,9 @@ void ir3_remove_nops(struct ir3 *ir);
 struct ir3_shader_variant;
 void ir3_insert_by_depth(struct ir3_instruction *instr, struct list_head *list);
 void ir3_depth(struct ir3 *ir, struct ir3_shader_variant *so);
+
+/* fp16 conversion folding */
+void ir3_cf(struct ir3 *ir);
 
 /* copy-propagate: */
 void ir3_cp(struct ir3 *ir, struct ir3_shader_variant *so);
@@ -1173,6 +1220,37 @@ int ir3_ra(struct ir3_shader_variant *v, struct ir3_instruction **precolor, unsi
 
 /* legalize: */
 void ir3_legalize(struct ir3 *ir, struct ir3_shader_variant *so, int *max_bary);
+
+static inline bool
+ir3_has_latency_to_hide(struct ir3 *ir)
+{
+	/* VS/GS/TCS/TESS  co-exist with frag shader invocations, but we don't
+	 * know the nature of the fragment shader.  Just assume it will have
+	 * latency to hide:
+	 */
+	if (ir->type != MESA_SHADER_FRAGMENT)
+		return true;
+
+	foreach_block (block, &ir->block_list) {
+		foreach_instr (instr, &block->instr_list) {
+			if (is_tex_or_prefetch(instr))
+				return true;
+
+			if (is_load(instr)) {
+				switch (instr->opc) {
+				case OPC_LDLV:
+				case OPC_LDL:
+				case OPC_LDLW:
+					break;
+				default:
+					return true;
+				}
+			}
+		}
+	}
+
+	return false;
+}
 
 /* ************************************************************************* */
 /* instruction helpers */
@@ -1489,9 +1567,11 @@ ir3_SAM(struct ir3_block *block, opc_t opc, type_t type,
 	struct ir3_instruction *sam;
 
 	sam = ir3_instr_create(block, opc);
-	sam->flags |= flags | IR3_INSTR_S2EN;
+	sam->flags |= flags;
 	__ssa_dst(sam)->wrmask = wrmask;
-	__ssa_src(sam, samp_tex, IR3_REG_HALF);
+	if (flags & IR3_INSTR_S2EN) {
+		__ssa_src(sam, samp_tex, IR3_REG_HALF);
+	}
 	if (src0) {
 		__ssa_src(sam, src0, 0)->wrmask = (1 << (src0->regs_count - 1)) - 1;
 	}
@@ -1524,6 +1604,7 @@ INSTR2(ATOMIC_MAX)
 INSTR2(ATOMIC_AND)
 INSTR2(ATOMIC_OR)
 INSTR2(ATOMIC_XOR)
+INSTR2(LDC)
 #if GPU >= 600
 INSTR3(STIB);
 INSTR2(LDIB);
@@ -1568,23 +1649,59 @@ INSTR0(META_TEX_PREFETCH);
 /* split this out or find some helper to use.. like main/bitset.h.. */
 
 #include <string.h>
+#include "util/bitset.h"
 
 #define MAX_REG 256
 
-typedef uint8_t regmask_t[2 * MAX_REG / 8];
+typedef BITSET_DECLARE(regmask_t, 2 * MAX_REG);
 
-static inline unsigned regmask_idx(struct ir3_register *reg)
+static inline bool
+__regmask_get(regmask_t *regmask, struct ir3_register *reg, unsigned n)
 {
-	unsigned num = (reg->flags & IR3_REG_RELATIV) ? reg->array.offset : reg->num;
-	debug_assert(num < MAX_REG);
-	if (reg->flags & IR3_REG_HALF) {
-		if (reg->merged) {
-			num /= 2;
+	if (reg->merged) {
+		/* a6xx+ case, with merged register file, we track things in terms
+		 * of half-precision registers, with a full precisions register
+		 * using two half-precision slots:
+		 */
+		if (reg->flags & IR3_REG_HALF) {
+			return BITSET_TEST(*regmask, n);
 		} else {
-			num += MAX_REG;
+			n *= 2;
+			return BITSET_TEST(*regmask, n) || BITSET_TEST(*regmask, n+1);
 		}
+	} else {
+		/* pre a6xx case, with separate register file for half and full
+		 * precision:
+		 */
+		if (reg->flags & IR3_REG_HALF)
+			n += MAX_REG;
+		return BITSET_TEST(*regmask, n);
 	}
-	return num;
+}
+
+static inline void
+__regmask_set(regmask_t *regmask, struct ir3_register *reg, unsigned n)
+{
+	if (reg->merged) {
+		/* a6xx+ case, with merged register file, we track things in terms
+		 * of half-precision registers, with a full precisions register
+		 * using two half-precision slots:
+		 */
+		if (reg->flags & IR3_REG_HALF) {
+			BITSET_SET(*regmask, n);
+		} else {
+			n *= 2;
+			BITSET_SET(*regmask, n);
+			BITSET_SET(*regmask, n+1);
+		}
+	} else {
+		/* pre a6xx case, with separate register file for half and full
+		 * precision:
+		 */
+		if (reg->flags & IR3_REG_HALF)
+			n += MAX_REG;
+		BITSET_SET(*regmask, n);
+	}
 }
 
 static inline void regmask_init(regmask_t *regmask)
@@ -1594,16 +1711,13 @@ static inline void regmask_init(regmask_t *regmask)
 
 static inline void regmask_set(regmask_t *regmask, struct ir3_register *reg)
 {
-	unsigned idx = regmask_idx(reg);
 	if (reg->flags & IR3_REG_RELATIV) {
-		unsigned i;
-		for (i = 0; i < reg->size; i++, idx++)
-			(*regmask)[idx / 8] |= 1 << (idx % 8);
+		for (unsigned i = 0; i < reg->size; i++)
+			__regmask_set(regmask, reg, reg->array.offset + i);
 	} else {
-		unsigned mask;
-		for (mask = reg->wrmask; mask; mask >>= 1, idx++)
+		for (unsigned mask = reg->wrmask, n = reg->num; mask; mask >>= 1, n++)
 			if (mask & 1)
-				(*regmask)[idx / 8] |= 1 << (idx % 8);
+				__regmask_set(regmask, reg, n);
 	}
 }
 
@@ -1614,41 +1728,17 @@ static inline void regmask_or(regmask_t *dst, regmask_t *a, regmask_t *b)
 		(*dst)[i] = (*a)[i] | (*b)[i];
 }
 
-/* set bits in a if not set in b, conceptually:
- *   a |= (reg & ~b)
- */
-static inline void regmask_set_if_not(regmask_t *a,
-		struct ir3_register *reg, regmask_t *b)
-{
-	unsigned idx = regmask_idx(reg);
-	if (reg->flags & IR3_REG_RELATIV) {
-		unsigned i;
-		for (i = 0; i < reg->size; i++, idx++)
-			if (!((*b)[idx / 8] & (1 << (idx % 8))))
-				(*a)[idx / 8] |= 1 << (idx % 8);
-	} else {
-		unsigned mask;
-		for (mask = reg->wrmask; mask; mask >>= 1, idx++)
-			if (mask & 1)
-				if (!((*b)[idx / 8] & (1 << (idx % 8))))
-					(*a)[idx / 8] |= 1 << (idx % 8);
-	}
-}
-
 static inline bool regmask_get(regmask_t *regmask,
 		struct ir3_register *reg)
 {
-	unsigned idx = regmask_idx(reg);
 	if (reg->flags & IR3_REG_RELATIV) {
-		unsigned i;
-		for (i = 0; i < reg->size; i++, idx++)
-			if ((*regmask)[idx / 8] & (1 << (idx % 8)))
+		for (unsigned i = 0; i < reg->size; i++)
+			if (__regmask_get(regmask, reg, reg->array.offset + i))
 				return true;
 	} else {
-		unsigned mask;
-		for (mask = reg->wrmask; mask; mask >>= 1, idx++)
+		for (unsigned mask = reg->wrmask, n = reg->num; mask; mask >>= 1, n++)
 			if (mask & 1)
-				if ((*regmask)[idx / 8] & (1 << (idx % 8)))
+				if (__regmask_get(regmask, reg, n))
 					return true;
 	}
 	return false;

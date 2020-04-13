@@ -177,7 +177,7 @@ iris_upload_ubo_ssbo_surf_state(struct iris_context *ice,
                                         : ISL_FORMAT_R32G32B32A32_FLOAT,
                          .swizzle = ISL_SWIZZLE_IDENTITY,
                          .stride_B = 1,
-                         .mocs = ice->vtbl.mocs(res->bo, &screen->isl_dev));
+                         .mocs = iris_mocs(res->bo, &screen->isl_dev));
 }
 
 static nir_ssa_def *
@@ -432,6 +432,9 @@ iris_setup_uniforms(const struct brw_compiler *compiler,
             load_ubo->num_components = intrin->num_components;
             load_ubo->src[0] = nir_src_for_ssa(temp_const_ubo_name);
             load_ubo->src[1] = nir_src_for_ssa(offset);
+            nir_intrinsic_set_align(load_ubo,
+                                    nir_intrinsic_align_mul(intrin),
+                                    nir_intrinsic_align_offset(intrin));
             nir_ssa_dest_init(&load_ubo->instr, &load_ubo->dest,
                               intrin->dest.ssa.num_components,
                               intrin->dest.ssa.bit_size,
@@ -524,6 +527,7 @@ iris_setup_uniforms(const struct brw_compiler *compiler,
          load->num_components = comps;
          load->src[0] = nir_src_for_ssa(temp_ubo_name);
          load->src[1] = nir_src_for_ssa(offset);
+         nir_intrinsic_set_align(load, 4, 0);
          nir_ssa_dest_init(&load->instr, &load->dest, comps, 32, NULL);
          nir_builder_instr_insert(&b, &load->instr);
          nir_ssa_def_rewrite_uses(&intrin->dest.ssa,
@@ -1093,7 +1097,7 @@ iris_compile_vs(struct iris_context *ice,
 
    brw_compute_vue_map(devinfo,
                        &vue_prog_data->vue_map, nir->info.outputs_written,
-                       nir->info.separate_shader);
+                       nir->info.separate_shader, /* pos_slots */ 1);
 
    struct brw_vs_prog_key brw_key = iris_to_brw_vs_key(devinfo, key);
 
@@ -1547,7 +1551,7 @@ iris_compile_gs(struct iris_context *ice,
 
    brw_compute_vue_map(devinfo,
                        &vue_prog_data->vue_map, nir->info.outputs_written,
-                       nir->info.separate_shader);
+                       nir->info.separate_shader, /* pos_slots */ 1);
 
    struct brw_gs_prog_key brw_key = iris_to_brw_gs_key(devinfo, key);
 
@@ -2016,13 +2020,14 @@ iris_update_compiled_compute_shader(struct iris_context *ice)
 
 void
 iris_fill_cs_push_const_buffer(struct brw_cs_prog_data *cs_prog_data,
+                               unsigned threads,
                                uint32_t *dst)
 {
-   assert(cs_prog_data->push.total.size > 0);
+   assert(brw_cs_push_const_total_size(cs_prog_data, threads) > 0);
    assert(cs_prog_data->push.cross_thread.size == 0);
    assert(cs_prog_data->push.per_thread.dwords == 1);
    assert(cs_prog_data->base.param[0] == BRW_PARAM_BUILTIN_SUBGROUP_ID);
-   for (unsigned t = 0; t < cs_prog_data->threads; t++)
+   for (unsigned t = 0; t < threads; t++)
       dst[8 * t] = t;
 }
 
@@ -2053,16 +2058,26 @@ iris_get_scratch_space(struct iris_context *ice,
     * as well.  This is not currently documented at all.
     *
     * This hack is no longer necessary on Gen11+.
+    *
+    * For, Gen11+, scratch space allocation is based on the number of threads
+    * in the base configuration.
     */
    unsigned subslice_total = screen->subslice_total;
-   if (devinfo->gen < 11)
+   if (devinfo->gen >= 12)
+      subslice_total = devinfo->num_subslices[0];
+   else if (devinfo->gen == 11)
+      subslice_total = 8;
+   else if (devinfo->gen < 11)
       subslice_total = 4 * devinfo->num_slices;
    assert(subslice_total >= screen->subslice_total);
 
    if (!*bop) {
       unsigned scratch_ids_per_subslice = devinfo->max_cs_threads;
 
-      if (devinfo->gen >= 11) {
+      if (devinfo->gen >= 12) {
+         /* Same as ICL below, but with 16 EUs. */
+         scratch_ids_per_subslice = 16 * 8;
+      } else if (devinfo->gen == 11) {
          /* The MEDIA_VFE_STATE docs say:
           *
           *    "Starting with this configuration, the Maximum Number of
@@ -2121,7 +2136,8 @@ iris_create_uncompiled_shader(struct pipe_context *ctx,
 
    brw_preprocess_nir(screen->compiler, nir, NULL);
 
-   NIR_PASS_V(nir, brw_nir_lower_image_load_store, devinfo);
+   NIR_PASS_V(nir, brw_nir_lower_image_load_store, devinfo,
+              &ish->uses_atomic_load_store);
    NIR_PASS_V(nir, iris_lower_storage_image_derefs);
 
    nir_sweep(nir);

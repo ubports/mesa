@@ -77,6 +77,8 @@ typedef uint32_t xcb_window_t;
 
 #include "tu_entrypoints.h"
 
+#include "vk_format.h"
+
 #define MAX_VBS 32
 #define MAX_VERTEX_ATTRIBS 32
 #define MAX_RTS 8
@@ -96,6 +98,12 @@ typedef uint32_t xcb_window_t;
 #define MAX_VIEWS 8
 /* The Qualcomm driver exposes 0x20000058 */
 #define MAX_STORAGE_BUFFER_RANGE 0x20000000
+/* We use ldc for uniform buffer loads, just like the Qualcomm driver, so
+ * expose the same maximum range.
+ * TODO: The SIZE bitfield is 15 bits, and in 4-dword units, so the actual
+ * range might be higher.
+ */
+#define MAX_UNIFORM_BUFFER_RANGE 0x10000
 
 #define NUM_DEPTH_CLEAR_PIPELINES 3
 
@@ -313,8 +321,17 @@ struct tu_physical_device
 
    unsigned gpu_id;
    uint32_t gmem_size;
-   uint32_t tile_align_w;
-   uint32_t tile_align_h;
+   uint64_t gmem_base;
+   uint32_t ccu_offset_gmem;
+   uint32_t ccu_offset_bypass;
+#define GMEM_ALIGN_W 16
+#define GMEM_ALIGN_H 4
+
+   struct {
+      uint32_t RB_UNKNOWN_8E04_blit;    /* for CP_BLIT's */
+      uint32_t PC_UNKNOWN_9805;
+      uint32_t SP_UNKNOWN_A0F8;
+   } magic;
 
    /* This is the drivers on-disk cache used as a fallback as opposed to
     * the pipeline cache defined by apps.
@@ -330,6 +347,8 @@ enum tu_debug_flags
    TU_DEBUG_NIR = 1 << 1,
    TU_DEBUG_IR3 = 1 << 2,
    TU_DEBUG_NOBIN = 1 << 3,
+   TU_DEBUG_SYSMEM = 1 << 4,
+   TU_DEBUG_FORCEBIN = 1 << 5,
 };
 
 struct tu_instance
@@ -486,6 +505,8 @@ struct tu_device
    uint32_t vsc_data_pitch;
    uint32_t vsc_data2_pitch;
 
+   struct tu_bo border_color;
+
    struct list_head shader_slabs;
    mtx_t shader_slab_mutex;
 
@@ -560,6 +581,7 @@ struct tu_cs
    uint32_t *reserved_end;
    uint32_t *end;
 
+   struct tu_device *device;
    enum tu_cs_mode mode;
    uint32_t next_bo_size;
 
@@ -570,6 +592,10 @@ struct tu_cs
    struct tu_bo **bos;
    uint32_t bo_count;
    uint32_t bo_capacity;
+
+   /* state for cond_exec_start/cond_exec_end */
+   uint32_t cond_flags;
+   uint32_t *cond_dwords;
 };
 
 struct tu_device_memory
@@ -595,13 +621,15 @@ struct tu_descriptor_range
 struct tu_descriptor_set
 {
    const struct tu_descriptor_set_layout *layout;
+   struct tu_descriptor_pool *pool;
    uint32_t size;
 
    uint64_t va;
    uint32_t *mapped_ptr;
-   struct tu_descriptor_range *dynamic_descriptors;
 
-   struct tu_bo *descriptors[0];
+   uint32_t *dynamic_descriptors;
+
+   struct tu_bo *buffers[0];
 };
 
 struct tu_push_descriptor_set
@@ -662,7 +690,6 @@ struct tu_descriptor_update_template_entry
 struct tu_descriptor_update_template
 {
    uint32_t entry_count;
-   VkPipelineBindPoint bind_point;
    struct tu_descriptor_update_template_entry entry[0];
 };
 
@@ -786,7 +813,8 @@ struct tu_descriptor_state
    uint32_t valid;
    struct tu_push_descriptor_set push_set;
    bool push_dirty;
-   uint64_t dynamic_buffers[MAX_DYNAMIC_BUFFERS];
+   uint32_t dynamic_descriptors[MAX_DYNAMIC_BUFFERS * A6XX_TEX_CONST_DWORDS];
+   uint32_t input_attachments[MAX_RTS * A6XX_TEX_CONST_DWORDS];
 };
 
 struct tu_tile
@@ -814,6 +842,9 @@ struct tu_tiling_config
    /* pipe register values */
    uint32_t pipe_config[MAX_VSC_PIPES];
    uint32_t pipe_sizes[MAX_VSC_PIPES];
+
+   /* Whether sysmem rendering must be used */
+   bool force_sysmem;
 };
 
 enum tu_cmd_dirty_bits
@@ -822,12 +853,25 @@ enum tu_cmd_dirty_bits
    TU_CMD_DIRTY_COMPUTE_PIPELINE = 1 << 1,
    TU_CMD_DIRTY_VERTEX_BUFFERS = 1 << 2,
    TU_CMD_DIRTY_DESCRIPTOR_SETS = 1 << 3,
-   TU_CMD_DIRTY_PUSH_CONSTANTS = 1 << 4,
+   TU_CMD_DIRTY_COMPUTE_DESCRIPTOR_SETS = 1 << 4,
+   TU_CMD_DIRTY_PUSH_CONSTANTS = 1 << 5,
+   TU_CMD_DIRTY_STREAMOUT_BUFFERS = 1 << 6,
+   TU_CMD_DIRTY_INPUT_ATTACHMENTS = 1 << 7,
 
    TU_CMD_DIRTY_DYNAMIC_LINE_WIDTH = 1 << 16,
    TU_CMD_DIRTY_DYNAMIC_STENCIL_COMPARE_MASK = 1 << 17,
    TU_CMD_DIRTY_DYNAMIC_STENCIL_WRITE_MASK = 1 << 18,
    TU_CMD_DIRTY_DYNAMIC_STENCIL_REFERENCE = 1 << 19,
+   TU_CMD_DIRTY_DYNAMIC_VIEWPORT = 1 << 20,
+   TU_CMD_DIRTY_DYNAMIC_SCISSOR = 1 << 21,
+};
+
+struct tu_streamout_state {
+   uint16_t stride[IR3_MAX_SO_BUFFERS];
+   uint32_t ncomp[IR3_MAX_SO_BUFFERS];
+   uint32_t prog[IR3_MAX_SO_OUTPUTS * 2];
+   uint32_t prog_count;
+   uint32_t vpc_so_buf_cntl;
 };
 
 struct tu_cmd_state
@@ -846,6 +890,17 @@ struct tu_cmd_state
 
    struct tu_dynamic_state dynamic;
 
+   /* Stream output buffers */
+   struct
+   {
+      struct tu_buffer *buffers[IR3_MAX_SO_BUFFERS];
+      VkDeviceSize offsets[IR3_MAX_SO_BUFFERS];
+      VkDeviceSize sizes[IR3_MAX_SO_BUFFERS];
+   } streamout_buf;
+
+   uint8_t streamout_reset;
+   uint8_t streamout_enabled;
+
    /* Index buffer */
    struct tu_buffer *index_buffer;
    uint64_t index_offset;
@@ -859,7 +914,6 @@ struct tu_cmd_state
 
    struct tu_tiling_config tiling_config;
 
-   struct tu_cs_entry tile_load_ib;
    struct tu_cs_entry tile_store_ib;
 };
 
@@ -910,6 +964,28 @@ tu_bo_list_add(struct tu_bo_list *list,
 VkResult
 tu_bo_list_merge(struct tu_bo_list *list, const struct tu_bo_list *other);
 
+/* This struct defines the layout of the scratch_bo */
+struct tu6_control
+{
+   uint32_t seqno;          /* seqno for async CP_EVENT_WRITE, etc */
+   uint32_t _pad0;
+   volatile uint32_t vsc_overflow;
+   uint32_t _pad1;
+   /* flag set from cmdstream when VSC overflow detected: */
+   uint32_t vsc_scratch;
+   uint32_t _pad2;
+   uint32_t _pad3;
+   uint32_t _pad4;
+
+   /* scratch space for VPC_SO[i].FLUSH_BASE_LO/HI, start on 32 byte boundary. */
+   struct {
+      uint32_t offset;
+      uint32_t pad[7];
+   } flush_base[4];
+};
+
+#define ctrl_offset(member) offsetof(struct tu6_control, member)
+
 struct tu_cmd_buffer
 {
    VK_LOADER_DATA _loader_data;
@@ -943,13 +1019,8 @@ struct tu_cmd_buffer
    struct tu_cs draw_epilogue_cs;
    struct tu_cs sub_cs;
 
-   uint16_t marker_reg;
-   uint32_t marker_seqno;
-
    struct tu_bo scratch_bo;
    uint32_t scratch_seqno;
-#define VSC_OVERFLOW 0x8
-#define VSC_SCRATCH 0x10
 
    struct tu_bo vsc_data;
    struct tu_bo vsc_data2;
@@ -1057,26 +1128,18 @@ struct tu_shader_compile_options
    bool include_binning_pass;
 };
 
-struct tu_descriptor_map
+struct tu_push_constant_range
 {
-   /* TODO: avoid fixed size array/justify the size */
-   unsigned num; /* number of array entries */
-   unsigned num_desc; /* Number of descriptors (sum of array_size[]) */
-   int set[64];
-   int binding[64];
-   int value[64];
-   int array_size[64];
+   uint32_t lo;
+   uint32_t count;
 };
 
 struct tu_shader
 {
    struct ir3_shader ir3_shader;
 
-   struct tu_descriptor_map texture_map;
-   struct tu_descriptor_map sampler_map;
-   struct tu_descriptor_map ubo_map;
-   struct tu_descriptor_map ssbo_map;
-   struct tu_descriptor_map image_map;
+   struct tu_push_constant_range push_consts;
+   unsigned attachment_idx[MAX_RTS];
 
    /* This may be true for vertex shaders.  When true, variants[1] is the
     * binning variant and binning_binary is non-NULL.
@@ -1120,11 +1183,7 @@ struct tu_program_descriptor_linkage
 
    uint32_t constlen;
 
-   struct tu_descriptor_map texture_map;
-   struct tu_descriptor_map sampler_map;
-   struct tu_descriptor_map ubo_map;
-   struct tu_descriptor_map ssbo_map;
-   struct tu_descriptor_map image_map;
+   struct tu_push_constant_range push_consts;
 };
 
 struct tu_pipeline
@@ -1138,6 +1197,8 @@ struct tu_pipeline
    bool need_indirect_descriptor_sets;
    VkShaderStageFlags active_stages;
 
+   struct tu_streamout_state streamout;
+
    struct
    {
       struct tu_bo binary_bo;
@@ -1145,18 +1206,20 @@ struct tu_pipeline
       struct tu_cs_entry binning_state_ib;
 
       struct tu_program_descriptor_linkage link[MESA_SHADER_STAGES];
+      unsigned input_attachment_idx[MAX_RTS];
    } program;
 
    struct
    {
+      struct tu_cs_entry state_ib;
+   } load_state;
+
+   struct
+   {
       uint8_t bindings[MAX_VERTEX_ATTRIBS];
-      uint16_t strides[MAX_VERTEX_ATTRIBS];
-      uint16_t offsets[MAX_VERTEX_ATTRIBS];
       uint32_t count;
 
       uint8_t binning_bindings[MAX_VERTEX_ATTRIBS];
-      uint16_t binning_strides[MAX_VERTEX_ATTRIBS];
-      uint16_t binning_offsets[MAX_VERTEX_ATTRIBS];
       uint32_t binning_count;
 
       struct tu_cs_entry state_ib;
@@ -1227,6 +1290,48 @@ tu6_emit_stencil_reference(struct tu_cs *cs, uint32_t front, uint32_t back);
 void
 tu6_emit_blend_constants(struct tu_cs *cs, const float constants[4]);
 
+void tu6_emit_msaa(struct tu_cs *cs, VkSampleCountFlagBits samples);
+
+void tu6_emit_window_scissor(struct tu_cs *cs, uint32_t x1, uint32_t y1, uint32_t x2, uint32_t y2);
+
+void tu6_emit_window_offset(struct tu_cs *cs, uint32_t x1, uint32_t y1);
+
+struct tu_image_view;
+
+void
+tu_resolve_sysmem(struct tu_cmd_buffer *cmd,
+                  struct tu_cs *cs,
+                  struct tu_image_view *src,
+                  struct tu_image_view *dst,
+                  uint32_t layers,
+                  const VkRect2D *rect);
+
+void
+tu_clear_sysmem_attachment(struct tu_cmd_buffer *cmd,
+                           struct tu_cs *cs,
+                           uint32_t a,
+                           const VkRenderPassBeginInfo *info);
+
+void
+tu_clear_gmem_attachment(struct tu_cmd_buffer *cmd,
+                         struct tu_cs *cs,
+                         uint32_t a,
+                         const VkRenderPassBeginInfo *info);
+
+void
+tu_load_gmem_attachment(struct tu_cmd_buffer *cmd, struct tu_cs *cs, uint32_t a);
+
+/* expose this function to be able to emit load without checking LOAD_OP */
+void
+tu_emit_load_gmem_attachment(struct tu_cmd_buffer *cmd, struct tu_cs *cs, uint32_t a);
+
+/* note: gmem store can also resolve */
+void
+tu_store_gmem_attachment(struct tu_cmd_buffer *cmd,
+                         struct tu_cs *cs,
+                         uint32_t a,
+                         uint32_t gmem_a);
+
 struct tu_userdata_info *
 tu_lookup_user_sgpr(struct tu_pipeline *pipeline,
                     gl_shader_stage stage,
@@ -1248,38 +1353,32 @@ struct tu_graphics_pipeline_create_info
    uint32_t custom_blend_mode;
 };
 
+enum tu_supported_formats {
+   FMT_VERTEX = 1,
+   FMT_TEXTURE = 2,
+   FMT_COLOR = 4,
+};
+
 struct tu_native_format
 {
-   int vtx;      /* VFMTn_xxx or -1 */
-   int tex;      /* TFMTn_xxx or -1 */
-   int rb;       /* RBn_xxx or -1 */
-   int swap;     /* enum a3xx_color_swap */
-   bool present; /* internal only; always true to external users */
+   enum a6xx_format fmt : 8;
+   enum a3xx_color_swap swap : 8;
+   enum a6xx_tile_mode tile_mode : 8;
+   enum tu_supported_formats supported : 8;
 };
 
-const struct tu_native_format *
-tu6_get_native_format(VkFormat format);
+struct tu_native_format tu6_format_vtx(VkFormat format);
+struct tu_native_format tu6_format_color(VkFormat format, enum a6xx_tile_mode tile_mode);
+struct tu_native_format tu6_format_texture(VkFormat format, enum a6xx_tile_mode tile_mode);
 
-void
-tu_pack_clear_value(const VkClearValue *val,
-                    VkFormat format,
-                    uint32_t buf[4]);
-
-void
-tu_2d_clear_color(const VkClearColorValue *val, VkFormat format, uint32_t buf[4]);
-
-void
-tu_2d_clear_zs(const VkClearDepthStencilValue *val, VkFormat format, uint32_t buf[4]);
-
-enum a6xx_2d_ifmt tu6_rb_fmt_to_ifmt(enum a6xx_color_fmt fmt);
-enum a6xx_depth_format tu6_pipe2depth(VkFormat format);
-
-struct tu_image_level
+static inline enum a6xx_format
+tu6_base_format(VkFormat format)
 {
-   VkDeviceSize offset;
-   VkDeviceSize size;
-   uint32_t pitch;
-};
+   /* note: tu6_format_color doesn't care about tiling for .fmt field */
+   return tu6_format_color(format, TILE6_LINEAR).fmt;
+}
+
+enum a6xx_depth_format tu6_pipe2depth(VkFormat format);
 
 struct tu_image
 {
@@ -1296,9 +1395,6 @@ struct tu_image
    uint32_t level_count;
    uint32_t layer_count;
    VkSampleCountFlagBits samples;
-
-
-   uint32_t alignment;
 
    struct fdl_layout layout;
 
@@ -1347,6 +1443,14 @@ static inline uint32_t
 tu_image_stride(struct tu_image *image, int level)
 {
    return image->layout.slices[level].pitch * image->layout.cpp;
+}
+
+/* to get the right pitch for compressed formats */
+static inline uint32_t
+tu_image_pitch(struct tu_image *image, int level)
+{
+   uint32_t stride = tu_image_stride(image, level);
+   return stride / vk_format_get_blockwidth(image->vk_format);
 }
 
 static inline uint64_t
@@ -1398,10 +1502,34 @@ tu_image_ubwc_base(struct tu_image *image, int level, int layer)
 #define tu_image_view_ubwc_base_ref(iview) \
    tu_image_ubwc_base_ref(iview->image, iview->base_mip, iview->base_layer)
 
+#define tu_image_view_ubwc_pitches(iview)                                \
+   .pitch = tu_image_ubwc_pitch(iview->image, iview->base_mip),          \
+   .array_pitch = tu_image_ubwc_size(iview->image, iview->base_mip) >> 2
+
 enum a6xx_tile_mode
 tu6_get_image_tile_mode(struct tu_image *image, int level);
 enum a3xx_msaa_samples
 tu_msaa_samples(uint32_t samples);
+enum a6xx_tex_fetchsize
+tu6_fetchsize(VkFormat format);
+
+static inline struct tu_native_format
+tu6_format_image(struct tu_image *image, VkFormat format, uint32_t level)
+{
+   struct tu_native_format fmt =
+      tu6_format_color(format, image->layout.tile_mode);
+   fmt.tile_mode = tu6_get_image_tile_mode(image, level);
+   return fmt;
+}
+
+static inline struct tu_native_format
+tu6_format_image_src(struct tu_image *image, VkFormat format, uint32_t level)
+{
+   struct tu_native_format fmt =
+      tu6_format_texture(format, image->layout.tile_mode);
+   fmt.tile_mode = tu6_get_image_tile_mode(image, level);
+   return fmt;
+}
 
 struct tu_image_view
 {
@@ -1424,12 +1552,8 @@ struct tu_image_view
    uint32_t storage_descriptor[A6XX_TEX_CONST_DWORDS];
 };
 
-struct tu_sampler
-{
-   uint32_t state[A6XX_TEX_SAMP_DWORDS];
-
-   bool needs_border;
-   VkBorderColor border;
+struct tu_sampler {
+   uint32_t descriptor[A6XX_TEX_SAMP_DWORDS];
 };
 
 VkResult
@@ -1529,6 +1653,7 @@ struct tu_subpass
 struct tu_render_pass_attachment
 {
    VkFormat format;
+   uint32_t samples;
    uint32_t cpp;
    VkAttachmentLoadOp load_op;
    VkAttachmentLoadOp stencil_load_op;
@@ -1603,6 +1728,9 @@ tu_drm_get_gpu_id(const struct tu_physical_device *dev, uint32_t *id);
 
 int
 tu_drm_get_gmem_size(const struct tu_physical_device *dev, uint32_t *size);
+
+int
+tu_drm_get_gmem_base(const struct tu_physical_device *dev, uint64_t *base);
 
 int
 tu_drm_submitqueue_new(const struct tu_device *dev,

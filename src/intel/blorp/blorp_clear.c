@@ -100,7 +100,8 @@ blorp_params_get_clear_kernel(struct blorp_batch *batch,
                        &prog_data);
 
    bool result =
-      blorp->upload_shader(batch, &blorp_key, sizeof(blorp_key),
+      blorp->upload_shader(batch, MESA_SHADER_FRAGMENT,
+                           &blorp_key, sizeof(blorp_key),
                            program, prog_data.base.program_size,
                            &prog_data.base, sizeof(prog_data),
                            &params->wm_prog_kernel, &params->wm_prog_data);
@@ -192,7 +193,8 @@ blorp_params_get_layer_offset_vs(struct blorp_batch *batch,
       blorp_compile_vs(blorp, mem_ctx, b.shader, &vs_prog_data);
 
    bool result =
-      blorp->upload_shader(batch, &blorp_key, sizeof(blorp_key),
+      blorp->upload_shader(batch, MESA_SHADER_VERTEX,
+                           &blorp_key, sizeof(blorp_key),
                            program, vs_prog_data.base.base.program_size,
                            &vs_prog_data.base.base, sizeof(vs_prog_data),
                            &params->vs_prog_kernel, &params->vs_prog_data);
@@ -332,7 +334,8 @@ get_fast_clear_rect(const struct isl_device *dev,
 
 void
 blorp_fast_clear(struct blorp_batch *batch,
-                 const struct blorp_surf *surf, enum isl_format format,
+                 const struct blorp_surf *surf,
+                 enum isl_format format, struct isl_swizzle swizzle,
                  uint32_t level, uint32_t start_layer, uint32_t num_layers,
                  uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1)
 {
@@ -357,6 +360,12 @@ blorp_fast_clear(struct blorp_batch *batch,
    brw_blorp_surface_info_init(batch->blorp, &params.dst, surf, level,
                                start_layer, format, true);
    params.num_samples = params.dst.surf.samples;
+
+   /* If a swizzle was provided, we need to swizzle the clear color so that
+    * the hardware color format conversion will work properly.
+    */
+   params.dst.clear_color = swizzle_color_value(params.dst.clear_color,
+                                                swizzle);
 
    batch->blorp->exec(batch, &params);
 }
@@ -805,7 +814,7 @@ blorp_can_hiz_clear_depth(const struct gen_device_info *devinfo,
       if (x0 % align_px_w || y0 % align_px_h ||
           x1 % align_px_w || y1 % align_px_h)
          return false;
-   } else if (isl_surf_supports_hiz_ccs_wt(devinfo, surf, aux_usage)) {
+   } else if (aux_usage == ISL_AUX_USAGE_HIZ_CCS_WT) {
       /* We have to set the WM_HZ_OP::FullSurfaceDepthandStencilClear bit
        * whenever we clear an uninitialized HIZ buffer (as some drivers
        * currently do). However, this bit seems liable to clear 16x8 pixels in
@@ -1170,7 +1179,8 @@ blorp_params_get_mcs_partial_resolve_kernel(struct blorp_batch *batch,
                        &prog_data);
 
    bool result =
-      blorp->upload_shader(batch, &blorp_key, sizeof(blorp_key),
+      blorp->upload_shader(batch, MESA_SHADER_FRAGMENT,
+                           &blorp_key, sizeof(blorp_key),
                            program, prog_data.base.program_size,
                            &prog_data.base, sizeof(prog_data),
                            &params->wm_prog_kernel, &params->wm_prog_data);

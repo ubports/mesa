@@ -66,6 +66,7 @@ struct fd_constbuf_stateobj {
 struct fd_shaderbuf_stateobj {
 	struct pipe_shader_buffer sb[PIPE_MAX_SHADER_BUFFERS];
 	uint32_t enabled_mask;
+	uint32_t writable_mask;
 };
 
 struct fd_shaderimg_stateobj {
@@ -201,6 +202,16 @@ struct fd_context {
 	struct list_head acc_active_queries;
 	/*@}*/
 
+	/* Whether we need to walk the acc_active_queries next fd_set_stage() to
+	 * update active queries (even if stage doesn't change).
+	 */
+	bool update_active_queries;
+
+	/* Current state of pctx->set_active_query_state() (i.e. "should drawing
+	 * be counted against non-perfcounter queries")
+	 */
+	bool active_queries;
+
 	/* table with PIPE_PRIM_MAX entries mapping PIPE_PRIM_x to
 	 * DI_PT_x value to use for draw initiator.  There are some
 	 * slight differences between generation:
@@ -257,7 +268,7 @@ struct fd_context {
 	 * contents.  Main point is to eliminate blits from fd_try_shadow_resource().
 	 * For example, in case of texture upload + gen-mipmaps.
 	 */
-	bool in_blit : 1;
+	bool in_discard_blit : 1;
 
 	struct pipe_scissor_state scissor;
 
@@ -343,6 +354,14 @@ struct fd_context {
 
 	/* handling for barriers: */
 	void (*framebuffer_barrier)(struct fd_context *ctx);
+
+	/* logger: */
+	void (*record_timestamp)(struct fd_ringbuffer *ring, struct fd_bo *bo, unsigned offset);
+	uint64_t (*ts_to_ns)(uint64_t ts);
+
+	struct list_head log_chunks;  /* list of flushed log chunks in fifo order */
+	unsigned frame_nr;            /* frame counter (for fd_log) */
+	FILE *log_out;
 
 	/*
 	 * Common pre-cooked VBO state (used for a3xx and later):
@@ -461,16 +480,6 @@ static inline void
 fd_batch_set_stage(struct fd_batch *batch, enum fd_render_stage stage)
 {
 	struct fd_context *ctx = batch->ctx;
-
-	/* special case: internal blits (like mipmap level generation)
-	 * go through normal draw path (via util_blitter_blit()).. but
-	 * we need to ignore the FD_STAGE_DRAW which will be set, so we
-	 * don't enable queries which should be paused during internal
-	 * blits:
-	 */
-	if ((batch->stage == FD_STAGE_BLIT) &&
-			(stage != FD_STAGE_NULL))
-		return;
 
 	if (ctx->query_set_stage)
 		ctx->query_set_stage(batch, stage);

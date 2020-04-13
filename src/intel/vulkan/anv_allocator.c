@@ -1190,12 +1190,12 @@ anv_state_stream_init(struct anv_state_stream *stream,
 
    stream->block = ANV_STATE_NULL;
 
-   stream->block_list = NULL;
-
    /* Ensure that next + whatever > block_size.  This way the first call to
     * state_stream_alloc fetches a new block.
     */
    stream->next = block_size;
+
+   util_dynarray_init(&stream->all_blocks, NULL);
 
    VG(VALGRIND_CREATE_MEMPOOL(stream, 0, false));
 }
@@ -1203,14 +1203,12 @@ anv_state_stream_init(struct anv_state_stream *stream,
 void
 anv_state_stream_finish(struct anv_state_stream *stream)
 {
-   struct anv_state_stream_block *next = stream->block_list;
-   while (next != NULL) {
-      struct anv_state_stream_block sb = VG_NOACCESS_READ(next);
-      VG(VALGRIND_MEMPOOL_FREE(stream, sb._vg_ptr));
-      VG(VALGRIND_MAKE_MEM_UNDEFINED(next, stream->block_size));
-      anv_state_pool_free_no_vg(stream->state_pool, sb.block);
-      next = sb.next;
+   util_dynarray_foreach(&stream->all_blocks, struct anv_state, block) {
+      VG(VALGRIND_MEMPOOL_FREE(stream, block->map));
+      VG(VALGRIND_MAKE_MEM_NOACCESS(block->map, block->alloc_size));
+      anv_state_pool_free_no_vg(stream->state_pool, *block);
    }
+   util_dynarray_fini(&stream->all_blocks);
 
    VG(VALGRIND_DESTROY_MEMPOOL(stream));
 }
@@ -1232,21 +1230,15 @@ anv_state_stream_alloc(struct anv_state_stream *stream,
 
       stream->block = anv_state_pool_alloc_no_vg(stream->state_pool,
                                                  block_size, PAGE_SIZE);
+      util_dynarray_append(&stream->all_blocks,
+                           struct anv_state, stream->block);
+      VG(VALGRIND_MAKE_MEM_NOACCESS(stream->block.map, block_size));
 
-      struct anv_state_stream_block *sb = stream->block.map;
-      VG_NOACCESS_WRITE(&sb->block, stream->block);
-      VG_NOACCESS_WRITE(&sb->next, stream->block_list);
-      stream->block_list = sb;
-      VG(VG_NOACCESS_WRITE(&sb->_vg_ptr, NULL));
-
-      VG(VALGRIND_MAKE_MEM_NOACCESS(stream->block.map, stream->block_size));
-
-      /* Reset back to the start plus space for the header */
-      stream->next = sizeof(*sb);
-
-      offset = align_u32(stream->next, alignment);
+      /* Reset back to the start */
+      stream->next = offset = 0;
       assert(offset + size <= stream->block.alloc_size);
    }
+   const bool new_block = stream->next == 0;
 
    struct anv_state state = stream->block;
    state.offset += offset;
@@ -1255,22 +1247,17 @@ anv_state_stream_alloc(struct anv_state_stream *stream,
 
    stream->next = offset + size;
 
-#ifdef HAVE_VALGRIND
-   struct anv_state_stream_block *sb = stream->block_list;
-   void *vg_ptr = VG_NOACCESS_READ(&sb->_vg_ptr);
-   if (vg_ptr == NULL) {
-      vg_ptr = state.map;
-      VG_NOACCESS_WRITE(&sb->_vg_ptr, vg_ptr);
-      VALGRIND_MEMPOOL_ALLOC(stream, vg_ptr, size);
+   if (new_block) {
+      assert(state.map == stream->block.map);
+      VG(VALGRIND_MEMPOOL_ALLOC(stream, state.map, size));
    } else {
-      void *state_end = state.map + state.alloc_size;
       /* This only updates the mempool.  The newly allocated chunk is still
        * marked as NOACCESS. */
-      VALGRIND_MEMPOOL_CHANGE(stream, vg_ptr, vg_ptr, state_end - vg_ptr);
+      VG(VALGRIND_MEMPOOL_CHANGE(stream, stream->block.map, stream->block.map,
+                                 stream->next));
       /* Mark the newly allocated chunk as undefined */
-      VALGRIND_MAKE_MEM_UNDEFINED(state.map, state.alloc_size);
+      VG(VALGRIND_MAKE_MEM_UNDEFINED(state.map, state.alloc_size));
    }
-#endif
 
    return state;
 }
@@ -1395,10 +1382,34 @@ anv_scratch_pool_alloc(struct anv_device *device, struct anv_scratch_pool *pool,
 
    const struct gen_device_info *devinfo = &device->info;
 
-   const unsigned subslices = MAX2(device->physical->subslice_total, 1);
+   unsigned subslices = MAX2(device->physical->subslice_total, 1);
+
+   /* The documentation for 3DSTATE_PS "Scratch Space Base Pointer" says:
+    *
+    *    "Scratch Space per slice is computed based on 4 sub-slices.  SW
+    *     must allocate scratch space enough so that each slice has 4
+    *     slices allowed."
+    *
+    * According to the other driver team, this applies to compute shaders
+    * as well.  This is not currently documented at all.
+    *
+    * This hack is no longer necessary on Gen11+.
+    *
+    * For, Gen11+, scratch space allocation is based on the number of threads
+    * in the base configuration.
+    */
+   if (devinfo->gen >= 12)
+      subslices = devinfo->num_subslices[0];
+   else if (devinfo->gen == 11)
+      subslices = 8;
+   else if (devinfo->gen >= 9)
+      subslices = 4 * devinfo->num_slices;
 
    unsigned scratch_ids_per_subslice;
-   if (devinfo->gen >= 11) {
+   if (devinfo->gen >= 12) {
+      /* Same as ICL below, but with 16 EUs. */
+      scratch_ids_per_subslice = 16 * 8;
+   } else if (devinfo->gen == 11) {
       /* The MEDIA_VFE_STATE docs say:
        *
        *    "Starting with this configuration, the Maximum Number of

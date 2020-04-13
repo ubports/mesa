@@ -84,6 +84,8 @@ nir_alu_op_for_opencl_opcode(struct vtn_builder *b,
    case OpenCLstd_UMin: return nir_op_umin;
    case OpenCLstd_Fmod: return nir_op_fmod;
    case OpenCLstd_Mix: return nir_op_flrp;
+   case OpenCLstd_Native_exp2: return nir_op_fexp2;
+   case OpenCLstd_Native_log2: return nir_op_flog2;
    case OpenCLstd_SMul_hi: return nir_op_imul_high;
    case OpenCLstd_UMul_hi: return nir_op_umul_high;
    case OpenCLstd_Popcount: return nir_op_bit_count;
@@ -98,6 +100,7 @@ nir_alu_op_for_opencl_opcode(struct vtn_builder *b,
    case OpenCLstd_SSub_sat: return nir_op_isub_sat;
    case OpenCLstd_USub_sat: return nir_op_usub_sat;
    case OpenCLstd_Trunc: return nir_op_ftrunc;
+   case OpenCLstd_Rint: return nir_op_fround_even;
    /* uhm... */
    case OpenCLstd_UAbs: return nir_op_mov;
    default:
@@ -193,6 +196,14 @@ handle_special(struct vtn_builder *b, enum OpenCLstd_Entrypoints opcode,
    case OpenCLstd_S_Upsample:
    case OpenCLstd_U_Upsample:
       return nir_upsample(nb, srcs[0], srcs[1]);
+   case OpenCLstd_Native_exp:
+      return nir_fexp(nb, srcs[0]);
+   case OpenCLstd_Native_exp10:
+      return nir_fexp2(nb, nir_fmul_imm(nb, srcs[0], log(10) / log(2)));
+   case OpenCLstd_Native_log:
+      return nir_flog(nb, srcs[0]);
+   case OpenCLstd_Native_log10:
+      return nir_fmul_imm(nb, nir_flog2(nb, srcs[0]), log(2) / log(10));
    default:
       vtn_fail("No NIR equivalent");
       return NULL;
@@ -339,6 +350,8 @@ vtn_handle_opencl_instruction(struct vtn_builder *b, SpvOp ext_opcode,
    case OpenCLstd_SMin:
    case OpenCLstd_UMin:
    case OpenCLstd_Mix:
+   case OpenCLstd_Native_exp2:
+   case OpenCLstd_Native_log2:
    case OpenCLstd_Fmod:
    case OpenCLstd_SMul_hi:
    case OpenCLstd_UMul_hi:
@@ -354,6 +367,7 @@ vtn_handle_opencl_instruction(struct vtn_builder *b, SpvOp ext_opcode,
    case OpenCLstd_SSub_sat:
    case OpenCLstd_USub_sat:
    case OpenCLstd_Trunc:
+   case OpenCLstd_Rint:
       handle_instr(b, cl_opcode, w, count, handle_alu);
       return true;
    case OpenCLstd_SAbs_diff:
@@ -390,6 +404,11 @@ vtn_handle_opencl_instruction(struct vtn_builder *b, SpvOp ext_opcode,
    case OpenCLstd_Smoothstep:
    case OpenCLstd_S_Upsample:
    case OpenCLstd_U_Upsample:
+   case OpenCLstd_Clz:
+   case OpenCLstd_Native_exp:
+   case OpenCLstd_Native_exp10:
+   case OpenCLstd_Native_log:
+   case OpenCLstd_Native_log10:
       handle_instr(b, cl_opcode, w, count, handle_special);
       return true;
    case OpenCLstd_Vloadn:

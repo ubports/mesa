@@ -25,6 +25,7 @@
 #include "midgard_ops.h"
 #include "midgard_quirks.h"
 #include "util/u_memory.h"
+#include "util/u_math.h"
 
 /* Scheduling for Midgard is complicated, to say the least. ALU instructions
  * must be grouped into VLIW bundles according to following model:
@@ -244,7 +245,7 @@ bytes_for_instruction(midgard_instruction *ains)
 static midgard_instruction **
 flatten_mir(midgard_block *block, unsigned *len)
 {
-        *len = list_length(&block->instructions);
+        *len = list_length(&block->base.instructions);
 
         if (!(*len))
                 return NULL;
@@ -347,6 +348,13 @@ struct midgard_predicate {
 
         unsigned mask;
         unsigned dest;
+
+        /* For load/store: how many pipeline registers are in use? The two
+         * scheduled instructions cannot use more than the 256-bits of pipeline
+         * space available or RA will fail (as it would run out of pipeline
+         * registers and fail to spill without breaking the schedule) */
+
+        unsigned pipeline_count;
 };
 
 /* For an instruction that can fit, adjust it to fit and update the constants
@@ -456,6 +464,26 @@ mir_adjust_constants(midgard_instruction *ins,
         return true;
 }
 
+/* Conservative estimate of the pipeline registers required for load/store */
+
+static unsigned
+mir_pipeline_count(midgard_instruction *ins)
+{
+        unsigned bytecount = 0;
+
+        mir_foreach_src(ins, i) {
+                /* Skip empty source  */
+                if (ins->src[i] == ~0) continue;
+
+                unsigned bytemask = mir_bytemask_of_read_components_index(ins, i);
+
+                unsigned max = util_logbase2(bytemask) + 1;
+                bytecount += max;
+        }
+
+        return DIV_ROUND_UP(bytecount, 16);
+}
+
 static midgard_instruction *
 mir_choose_instruction(
                 midgard_instruction **instructions,
@@ -465,6 +493,7 @@ mir_choose_instruction(
         /* Parse the predicate */
         unsigned tag = predicate->tag;
         bool alu = tag == TAG_ALU_4;
+        bool ldst = tag == TAG_LOAD_STORE_4;
         unsigned unit = predicate->unit;
         bool branch = alu && (unit == ALU_ENAB_BR_COMPACT);
         bool scalar = (unit != ~0) && (unit & UNITS_SCALAR);
@@ -519,6 +548,9 @@ mir_choose_instruction(
                 if (mask && ((~instructions[i]->mask) & mask))
                         continue;
 
+                if (ldst && mir_pipeline_count(instructions[i]) + predicate->pipeline_count > 2)
+                        continue;
+
                 bool conditional = alu && !branch && OP_IS_CSEL(instructions[i]->alu.op);
                 conditional |= (branch && instructions[i]->branch.conditional);
 
@@ -547,6 +579,9 @@ mir_choose_instruction(
 
                 if (alu)
                         mir_adjust_constants(instructions[best_index], predicate, true);
+
+                if (ldst)
+                        predicate->pipeline_count += mir_pipeline_count(instructions[best_index]);
 
                 /* Once we schedule a conditional, we can't again */
                 predicate->no_cond |= best_conditional;
@@ -776,7 +811,8 @@ mir_schedule_texture(
         mir_update_worklist(worklist, len, instructions, ins);
 
         struct midgard_bundle out = {
-                .tag = TAG_TEXTURE_4,
+                .tag = ins->texture.op == TEXTURE_OP_BARRIER ?
+                        TAG_TEXTURE_4_BARRIER : TAG_TEXTURE_4,
                 .instruction_count = 1,
                 .instructions = { ins }
         };
@@ -1018,6 +1054,14 @@ mir_schedule_alu(
                         bundle.control |= stages[i]->unit;
                         bytes_emitted += bytes_for_instruction(stages[i]);
                         bundle.instructions[bundle.instruction_count++] = stages[i];
+
+                        /* If we branch, we can't spill to TLS since the store
+                         * instruction will never get executed. We could try to
+                         * break the bundle but this is probably easier for
+                         * now. */
+
+                        if (branch)
+                                stages[i]->no_spill |= (1 << REG_CLASS_WORK);
                 }
         }
 
@@ -1092,7 +1136,7 @@ schedule_block(compiler_context *ctx, midgard_block *block)
                 if (bundle.has_blend_constant)
                         blend_offset = block->quadword_count;
 
-                block->quadword_count += midgard_word_size[bundle.tag];
+                block->quadword_count += midgard_tag_props[bundle.tag].size;
         }
 
         /* We emitted bundles backwards; copy into the block in reverse-order */
@@ -1112,7 +1156,7 @@ schedule_block(compiler_context *ctx, midgard_block *block)
         if (blend_offset)
                 ctx->blend_constant_offset = ((ctx->quadword_count + block->quadword_count) - blend_offset - 1) * 0x10;
 
-        block->is_scheduled = true;
+        block->scheduled = true;
         ctx->quadword_count += block->quadword_count;
 
         /* Reorder instructions to match bundled. First remove existing
@@ -1123,7 +1167,7 @@ schedule_block(compiler_context *ctx, midgard_block *block)
         }
 
         mir_foreach_instr_in_block_scheduled_rev(block, ins) {
-                list_add(&ins->link, &block->instructions);
+                list_add(&ins->link, &block->base.instructions);
         }
 
 	free(instructions); /* Allocated by flatten_mir() */
@@ -1142,7 +1186,8 @@ midgard_schedule_program(compiler_context *ctx)
 
         /* Lowering can introduce some dead moves */
 
-        mir_foreach_block(ctx, block) {
+        mir_foreach_block(ctx, _block) {
+                midgard_block *block = (midgard_block *) _block;
                 midgard_opt_dead_move_eliminate(ctx, block);
                 schedule_block(ctx, block);
         }

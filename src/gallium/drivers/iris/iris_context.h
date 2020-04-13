@@ -361,6 +361,9 @@ struct iris_uncompiled_shader {
 
    bool needs_edge_flag;
 
+   /* Whether shader uses atomic operations. */
+   bool uses_atomic_load_store;
+
    /** Constant data scraped from the shader by nir_opt_large_constants */
    struct pipe_resource *const_data;
 
@@ -571,7 +574,6 @@ struct iris_vtable {
                            struct iris_fs_prog_key *key);
    void (*populate_cs_key)(const struct iris_context *ice,
                            struct iris_cs_prog_key *key);
-   uint32_t (*mocs)(const struct iris_bo *bo, const struct isl_device *isl_dev);
    void (*lost_genx_state)(struct iris_context *ice, struct iris_batch *batch);
 };
 
@@ -686,6 +688,9 @@ struct iris_context {
    } condition;
 
    struct gen_perf_context *perf_ctx;
+
+   /** Frame number for debug prints */
+   uint32_t frame;
 
    struct {
       uint64_t dirty;
@@ -842,6 +847,7 @@ void iris_init_perfquery_functions(struct pipe_context *ctx);
 void iris_update_compiled_shaders(struct iris_context *ice);
 void iris_update_compiled_compute_shader(struct iris_context *ice);
 void iris_fill_cs_push_const_buffer(struct brw_cs_prog_data *cs_prog_data,
+                                    unsigned threads,
                                     uint32_t *dst);
 
 
@@ -951,7 +957,7 @@ bool iris_blorp_lookup_shader(struct blorp_batch *blorp_batch,
                               uint32_t key_size,
                               uint32_t *kernel_out,
                               void *prog_data_out);
-bool iris_blorp_upload_shader(struct blorp_batch *blorp_batch,
+bool iris_blorp_upload_shader(struct blorp_batch *blorp_batch, uint32_t stage,
                               const void *key, uint32_t key_size,
                               const void *kernel, uint32_t kernel_size,
                               const struct brw_stage_prog_data *prog_data,

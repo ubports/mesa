@@ -638,7 +638,7 @@ brw_compile_gs(const struct brw_compiler *compiler, void *log_data,
    GLbitfield64 inputs_read = shader->info.inputs_read;
    brw_compute_vue_map(compiler->devinfo,
                        &c.input_vue_map, inputs_read,
-                       shader->info.separate_shader);
+                       shader->info.separate_shader, 1);
 
    brw_nir_apply_key(shader, compiler, &key->base, 8, is_scalar);
    brw_nir_lower_vue_inputs(shader, &c.input_vue_map);
@@ -857,8 +857,7 @@ brw_compile_gs(const struct brw_compiler *compiler, void *log_data,
          prog_data->base.base.dispatch_grf_start_reg = v.payload.num_regs;
 
          fs_generator g(compiler, log_data, mem_ctx,
-                        &prog_data->base.base, v.shader_stats,
-                        false, MESA_SHADER_GEOMETRY);
+                        &prog_data->base.base, false, MESA_SHADER_GEOMETRY);
          if (unlikely(INTEL_DEBUG & DEBUG_GS)) {
             const char *label =
                shader->info.label ? shader->info.label : "unnamed";
@@ -866,7 +865,7 @@ brw_compile_gs(const struct brw_compiler *compiler, void *log_data,
                                          label, shader->info.name);
             g.enable_debug(name);
          }
-         g.generate_code(v.cfg, 8, stats);
+         g.generate_code(v.cfg, 8, v.shader_stats, stats);
          return g.get_assembly();
       }
    }

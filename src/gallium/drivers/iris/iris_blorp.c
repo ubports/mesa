@@ -46,12 +46,6 @@
 #define BLORP_USE_SOFTPIN
 #include "blorp/blorp_genX_exec.h"
 
-#if GEN_GEN == 8
-#define MOCS_WB 0x78
-#else
-#define MOCS_WB (2 << 1)
-#endif
-
 static uint32_t *
 stream_state(struct iris_batch *batch,
              struct u_upload_mgr *uploader,
@@ -189,7 +183,7 @@ blorp_alloc_vertex_buffer(struct blorp_batch *blorp_batch,
    *addr = (struct blorp_address) {
       .buffer = bo,
       .offset = offset,
-      .mocs = MOCS_WB,
+      .mocs = iris_mocs(bo, &batch->screen->isl_dev),
    };
 
    return map;
@@ -308,7 +302,7 @@ iris_blorp_exec(struct blorp_batch *blorp_batch,
    }
 
 #if GEN_GEN >= 12
-   genX(emit_aux_map_state)(batch);
+   genX(invalidate_aux_map_state)(batch);
 #endif
 
    iris_handle_always_flush_cache(batch);

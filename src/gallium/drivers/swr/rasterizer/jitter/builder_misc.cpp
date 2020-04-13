@@ -172,52 +172,92 @@ namespace SwrJit
 
     Value* Builder::VIMMED1(uint64_t i)
     {
+#if LLVM_VERSION_MAJOR > 10
+        return ConstantVector::getSplat(ElementCount(mVWidth, false), cast<ConstantInt>(C(i)));
+#else
         return ConstantVector::getSplat(mVWidth, cast<ConstantInt>(C(i)));
+#endif
     }
 
     Value* Builder::VIMMED1_16(uint64_t i)
     {
+#if LLVM_VERSION_MAJOR > 10
+        return ConstantVector::getSplat(ElementCount(mVWidth16, false), cast<ConstantInt>(C(i)));
+#else
         return ConstantVector::getSplat(mVWidth16, cast<ConstantInt>(C(i)));
+#endif
     }
 
     Value* Builder::VIMMED1(int i)
     {
+#if LLVM_VERSION_MAJOR > 10
+        return ConstantVector::getSplat(ElementCount(mVWidth, false), cast<ConstantInt>(C(i)));
+#else
         return ConstantVector::getSplat(mVWidth, cast<ConstantInt>(C(i)));
+#endif
     }
 
     Value* Builder::VIMMED1_16(int i)
     {
+#if LLVM_VERSION_MAJOR > 10
+        return ConstantVector::getSplat(ElementCount(mVWidth16, false), cast<ConstantInt>(C(i)));
+#else
         return ConstantVector::getSplat(mVWidth16, cast<ConstantInt>(C(i)));
+#endif
     }
 
     Value* Builder::VIMMED1(uint32_t i)
     {
+#if LLVM_VERSION_MAJOR > 10
+        return ConstantVector::getSplat(ElementCount(mVWidth, false), cast<ConstantInt>(C(i)));
+#else
         return ConstantVector::getSplat(mVWidth, cast<ConstantInt>(C(i)));
+#endif
     }
 
     Value* Builder::VIMMED1_16(uint32_t i)
     {
+#if LLVM_VERSION_MAJOR > 10
+        return ConstantVector::getSplat(ElementCount(mVWidth16, false), cast<ConstantInt>(C(i)));
+#else
         return ConstantVector::getSplat(mVWidth16, cast<ConstantInt>(C(i)));
+#endif
     }
 
     Value* Builder::VIMMED1(float i)
     {
+#if LLVM_VERSION_MAJOR > 10
+        return ConstantVector::getSplat(ElementCount(mVWidth, false), cast<ConstantFP>(C(i)));
+#else
         return ConstantVector::getSplat(mVWidth, cast<ConstantFP>(C(i)));
+#endif
     }
 
     Value* Builder::VIMMED1_16(float i)
     {
+#if LLVM_VERSION_MAJOR > 10
+        return ConstantVector::getSplat(ElementCount(mVWidth16, false), cast<ConstantFP>(C(i)));
+#else
         return ConstantVector::getSplat(mVWidth16, cast<ConstantFP>(C(i)));
+#endif
     }
 
     Value* Builder::VIMMED1(bool i)
     {
+#if LLVM_VERSION_MAJOR > 10
+        return ConstantVector::getSplat(ElementCount(mVWidth, false), cast<ConstantInt>(C(i)));
+#else
         return ConstantVector::getSplat(mVWidth, cast<ConstantInt>(C(i)));
+#endif
     }
 
     Value* Builder::VIMMED1_16(bool i)
     {
+#if LLVM_VERSION_MAJOR > 10
+        return ConstantVector::getSplat(ElementCount(mVWidth16, false), cast<ConstantInt>(C(i)));
+#else
         return ConstantVector::getSplat(mVWidth16, cast<ConstantInt>(C(i)));
+#endif
     }
 
     Value* Builder::VUNDEF_IPTR() { return UndefValue::get(VectorType::get(mInt32PtrTy, mVWidth)); }
@@ -621,37 +661,11 @@ namespace SwrJit
     /// @param a - 128bit SIMD lane(8x16bit) of float16 in int16 format.
     Value* Builder::CVTPH2PS(Value* a, const llvm::Twine& name)
     {
-        if (JM()->mArch.F16C())
-        {
-            return VCVTPH2PS(a, name);
-        }
-        else
-        {
-            FunctionType* pFuncTy   = FunctionType::get(mFP32Ty, mInt16Ty);
-            Function*     pCvtPh2Ps = cast<Function>(
-#if LLVM_VERSION_MAJOR >= 9
-                JM()->mpCurrentModule->getOrInsertFunction("ConvertFloat16ToFloat32", pFuncTy).getCallee());
-#else
-                JM()->mpCurrentModule->getOrInsertFunction("ConvertFloat16ToFloat32", pFuncTy));
-#endif
+        // Bitcast Nxint16 to Nxhalf
+        uint32_t numElems = a->getType()->getVectorNumElements();
+        Value*   input    = BITCAST(a, VectorType::get(mFP16Ty, numElems));
 
-            if (sys::DynamicLibrary::SearchForAddressOfSymbol("ConvertFloat16ToFloat32") == nullptr)
-            {
-                sys::DynamicLibrary::AddSymbol("ConvertFloat16ToFloat32",
-                                               (void*)&ConvertFloat16ToFloat32);
-            }
-
-            Value* pResult = UndefValue::get(mSimdFP32Ty);
-            for (uint32_t i = 0; i < mVWidth; ++i)
-            {
-                Value* pSrc  = VEXTRACT(a, C(i));
-                Value* pConv = CALL(pCvtPh2Ps, std::initializer_list<Value*>{pSrc});
-                pResult      = VINSERT(pResult, pConv, C(i));
-            }
-
-            pResult->setName(name);
-            return pResult;
-        }
+        return FP_EXT(input, VectorType::get(mFP32Ty, numElems), name);
     }
 
     //////////////////////////////////////////////////////////////////////////

@@ -95,6 +95,8 @@ zink_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       return 1;
 
    case PIPE_CAP_MAX_DUAL_SOURCE_RENDER_TARGETS:
+      if (!screen->feats.dualSrcBlend)
+         return 0;
       return screen->props.limits.maxFragmentDualSrcAttachments;
 
    case PIPE_CAP_POINT_SPRITE:
@@ -384,9 +386,15 @@ zink_get_shader_param(struct pipe_screen *pscreen,
       }
 
    case PIPE_SHADER_CAP_MAX_TEXTURE_SAMPLERS:
-      /* this might be a bit simplistic... */
-      return MIN2(screen->props.limits.maxPerStageDescriptorSamplers,
-                  PIPE_MAX_SAMPLERS);
+      switch (shader) {
+      case PIPE_SHADER_VERTEX:
+      case PIPE_SHADER_FRAGMENT:
+         /* this might be a bit simplistic... */
+         return MIN2(screen->props.limits.maxPerStageDescriptorSamplers,
+                     PIPE_MAX_SAMPLERS);
+      default:
+         return 0; /* unsupported stage */
+      }
 
    case PIPE_SHADER_CAP_MAX_CONST_BUFFER_SIZE:
       return MIN2(screen->props.limits.maxUniformBufferRange, INT_MAX);

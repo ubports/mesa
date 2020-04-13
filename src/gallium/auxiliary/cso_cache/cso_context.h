@@ -32,6 +32,7 @@
 #include "pipe/p_context.h"
 #include "pipe/p_state.h"
 #include "pipe/p_defines.h"
+#include "cso_cache.h"
 
 
 #ifdef	__cplusplus
@@ -82,8 +83,7 @@ cso_single_sampler_done(struct cso_context *cso,
 
 
 enum pipe_error cso_set_vertex_elements(struct cso_context *ctx,
-                                        unsigned count,
-                                        const struct pipe_vertex_element *states);
+                                        const struct cso_velems_state *velems);
 
 void cso_set_vertex_buffers(struct cso_context *ctx,
                             unsigned start_slot, unsigned count,
@@ -103,27 +103,11 @@ void cso_set_stream_outputs(struct cso_context *ctx,
  */
 
 void cso_set_fragment_shader_handle(struct cso_context *ctx, void *handle);
-void cso_delete_fragment_shader(struct cso_context *ctx, void *handle );
-
-
 void cso_set_vertex_shader_handle(struct cso_context *ctx, void *handle);
-void cso_delete_vertex_shader(struct cso_context *ctx, void *handle );
-
-
 void cso_set_geometry_shader_handle(struct cso_context *ctx, void *handle);
-void cso_delete_geometry_shader(struct cso_context *ctx, void *handle);
-
-
 void cso_set_tessctrl_shader_handle(struct cso_context *ctx, void *handle);
-void cso_delete_tessctrl_shader(struct cso_context *ctx, void *handle);
-
-
 void cso_set_tesseval_shader_handle(struct cso_context *ctx, void *handle);
-void cso_delete_tesseval_shader(struct cso_context *ctx, void *handle);
-
-
 void cso_set_compute_shader_handle(struct cso_context *ctx, void *handle);
-void cso_delete_compute_shader(struct cso_context *ctx, void *handle);
 
 
 void cso_set_framebuffer(struct cso_context *cso,
@@ -222,8 +206,7 @@ void cso_restore_constant_buffer_slot0(struct cso_context *cso,
 /* Optimized version. */
 void
 cso_set_vertex_buffers_and_elements(struct cso_context *ctx,
-                                    unsigned velem_count,
-                                    const struct pipe_vertex_element *velems,
+                                    const struct cso_velems_state *velems,
                                     unsigned vb_count,
                                     unsigned unbind_trailing_vb_count,
                                     const struct pipe_vertex_buffer *vbuffers,

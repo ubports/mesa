@@ -24,14 +24,6 @@ sed -i -e 's/http:\/\/deb/https:\/\/deb/g' /etc/apt/sources.list
 echo 'deb https://deb.debian.org/debian buster-backports main' >/etc/apt/sources.list.d/backports.list
 
 apt-get update
-
-# Use newer packages from backports by default
-cat >/etc/apt/preferences <<EOF
-Package: *
-Pin: release a=buster-backports
-Pin-Priority: 500
-EOF
-
 apt-get dist-upgrade -y
 
 apt-get install -y --no-remove \
@@ -76,11 +68,14 @@ apt-get install -y --no-remove \
       libxvmc-dev \
       libxxf86vm-dev \
       llvm-6.0-dev \
+      llvm-7-dev \
       llvm-9-dev \
       meson \
       pkg-config \
       python-mako \
       python3-mako \
+      python3-pil \
+      python3-requests \
       qemu-user \
       scons \
       x11proto-dri2-dev \
@@ -89,46 +84,43 @@ apt-get install -y --no-remove \
       xz-utils \
       zlib1g-dev
 
+. .gitlab-ci/container/container_pre_build.sh
+
 # Cross-build Mesa deps
 for arch in $CROSS_ARCHITECTURES; do
     apt-get install -y --no-remove \
             crossbuild-essential-${arch} \
             libdrm-dev:${arch} \
             libelf-dev:${arch} \
-            libexpat1-dev:${arch}
+            libexpat1-dev:${arch} \
+            libffi-dev:${arch} \
+            libllvm8:${arch} \
+            libstdc++6:${arch} \
+            libtinfo-dev:${arch}
 
-    if [ "$arch" = "s390x" ]; then
-        LLVM_VERSION=7
-    else
-        LLVM_VERSION=8
-    fi
-
-    if [ "$arch" != "i386" ]; then
-        mkdir /var/cache/apt/archives/${arch}
+    if [ "$arch" == "i386" ]; then
+        # libpciaccess-dev is only needed for Intel.
         apt-get install -y --no-remove \
-                libffi-dev:${arch} \
-                libllvm${LLVM_VERSION}:${arch} \
-                libstdc++6:${arch} \
-                libtinfo-dev:${arch} \
-
-        # Download llvm-* packages, but don't install them yet, since they can
-        # only be installed for one architecture at a time
-        apt-get install -o Dir::Cache::archives=/var/cache/apt/archives/$arch --download-only -y --no-remove \
-            llvm-${LLVM_VERSION}-dev:${arch}
+            libpciaccess-dev:${arch}
     fi
+
+    mkdir /var/cache/apt/archives/${arch}
+    # Download llvm-* packages, but don't install them yet, since they can
+    # only be installed for one architecture at a time
+    apt-get install -o Dir::Cache::archives=/var/cache/apt/archives/$arch --download-only -y --no-remove \
+       llvm-8-dev:${arch}
 done
 
 apt-get install -y --no-remove \
-      llvm-7-dev \
       llvm-8-dev \
 
 # for 64bit windows cross-builds
 apt-get install -y --no-remove \
-    libz-mingw-w64-dev \
-    mingw-w64 \
-    wine \
-    wine32 \
-    wine64
+      libz-mingw-w64-dev \
+      mingw-w64 \
+      wine \
+      wine32 \
+      wine64
 
 # Debian's pkg-config wrapers for mingw are broken, and there's no sign that
 # they're going to be fixed, so we'll just have to fix it ourselves
@@ -178,35 +170,36 @@ export  WAYLAND_PROTOCOLS_VERSION=wayland-protocols-1.12
 
 wget $XORG_RELEASES/util/$XORGMACROS_VERSION.tar.bz2
 tar -xvf $XORGMACROS_VERSION.tar.bz2 && rm $XORGMACROS_VERSION.tar.bz2
-cd $XORGMACROS_VERSION; ./configure; make -j4 install; cd ..
+cd $XORGMACROS_VERSION; ./configure; make install; cd ..
 rm -rf $XORGMACROS_VERSION
 
 wget $XCB_RELEASES/$XCBPROTO_VERSION.tar.bz2
 tar -xvf $XCBPROTO_VERSION.tar.bz2 && rm $XCBPROTO_VERSION.tar.bz2
-cd $XCBPROTO_VERSION; ./configure; make -j4 install; cd ..
+cd $XCBPROTO_VERSION; ./configure; make install; cd ..
 rm -rf $XCBPROTO_VERSION
 
 wget $XCB_RELEASES/$LIBXCB_VERSION.tar.bz2
 tar -xvf $LIBXCB_VERSION.tar.bz2 && rm $LIBXCB_VERSION.tar.bz2
-cd $LIBXCB_VERSION; ./configure; make -j4 install; cd ..
+cd $LIBXCB_VERSION; ./configure; make install; cd ..
 rm -rf $LIBXCB_VERSION
 
 wget https://dri.freedesktop.org/libdrm/$LIBDRM_VERSION.tar.bz2
 tar -xvf $LIBDRM_VERSION.tar.bz2 && rm $LIBDRM_VERSION.tar.bz2
 cd $LIBDRM_VERSION
-meson build -D vc4=true -D freedreno=true -D etnaviv=true -D libdir=lib/x86_64-linux-gnu; ninja -j4 -C build install
-rm -rf build; meson --cross-file=/cross_file-ppc64el.txt build -D libdir=lib/powerpc64le-linux-gnu; ninja -j4 -C build install
+meson build -D vc4=true -D freedreno=true -D etnaviv=true -D libdir=lib/x86_64-linux-gnu; ninja -C build install
+rm -rf build; meson --cross-file=/cross_file-ppc64el.txt build -D libdir=lib/powerpc64le-linux-gnu; ninja -C build install
+rm -rf build; meson --cross-file=/cross_file-i386.txt build -D libdir=lib/i386-linux-gnu; ninja -C build install
 cd ..
 rm -rf $LIBDRM_VERSION
 
 wget $WAYLAND_RELEASES/$LIBWAYLAND_VERSION.tar.xz
 tar -xvf $LIBWAYLAND_VERSION.tar.xz && rm $LIBWAYLAND_VERSION.tar.xz
-cd $LIBWAYLAND_VERSION; ./configure --enable-libraries --without-host-scanner --disable-documentation --disable-dtd-validation; make -j4 install; cd ..
+cd $LIBWAYLAND_VERSION; ./configure --enable-libraries --without-host-scanner --disable-documentation --disable-dtd-validation; make install; cd ..
 rm -rf $LIBWAYLAND_VERSION
 
 wget $WAYLAND_RELEASES/$WAYLAND_PROTOCOLS_VERSION.tar.xz
 tar -xvf $WAYLAND_PROTOCOLS_VERSION.tar.xz && rm $WAYLAND_PROTOCOLS_VERSION.tar.xz
-cd $WAYLAND_PROTOCOLS_VERSION; ./configure; make -j4 install; cd ..
+cd $WAYLAND_PROTOCOLS_VERSION; ./configure; make install; cd ..
 rm -rf $WAYLAND_PROTOCOLS_VERSION
 
 
@@ -216,7 +209,7 @@ rm -rf $WAYLAND_PROTOCOLS_VERSION
 GLVND_VERSION=1.2.0
 wget https://gitlab.freedesktop.org/glvnd/libglvnd/-/archive/v$GLVND_VERSION/libglvnd-v$GLVND_VERSION.tar.gz
 tar -xvf libglvnd-v$GLVND_VERSION.tar.gz && rm libglvnd-v$GLVND_VERSION.tar.gz
-pushd libglvnd-v$GLVND_VERSION; ./autogen.sh; ./configure; make -j4 install; popd
+pushd libglvnd-v$GLVND_VERSION; ./autogen.sh; ./configure; make install; popd
 rm -rf libglvnd-v$GLVND_VERSION
 
 
@@ -224,12 +217,8 @@ pushd /usr/local
 git clone https://gitlab.freedesktop.org/mesa/shader-db.git --depth 1
 rm -rf shader-db/.git
 cd shader-db
-make -j4
+make
 popd
-
-
-# Remove ccache directory, useless for the build jobs
-rm -rf $(ccache --get-config=cache_dir)
 
 
 ############### Uninstall the build software
@@ -246,4 +235,4 @@ apt-get purge -y \
       unzip \
       wget
 
-apt-get autoremove -y --purge
+. .gitlab-ci/container/container_post_build.sh

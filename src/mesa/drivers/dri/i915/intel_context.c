@@ -31,7 +31,7 @@
 #include "main/extensions.h"
 #include "main/fbobject.h"
 #include "main/framebuffer.h"
-#include "main/imports.h"
+#include "util/imports.h"
 #include "main/points.h"
 #include "main/renderbuffer.h"
 
@@ -499,7 +499,7 @@ intelInitContext(struct intel_context *intel,
    ctx->Const.MaxRenderbufferSize = 2048;
 
    _swrast_CreateContext(ctx);
-   _vbo_CreateContext(ctx);
+   _vbo_CreateContext(ctx, false);
    if (ctx->swrast_context) {
       _tnl_CreateContext(ctx);
       _swsetup_CreateContext(ctx);

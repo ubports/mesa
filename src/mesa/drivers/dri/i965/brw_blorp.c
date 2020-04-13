@@ -53,7 +53,7 @@ brw_blorp_lookup_shader(struct blorp_batch *batch,
 }
 
 static bool
-brw_blorp_upload_shader(struct blorp_batch *batch,
+brw_blorp_upload_shader(struct blorp_batch *batch, uint32_t stage,
                         const void *key, uint32_t key_size,
                         const void *kernel, uint32_t kernel_size,
                         const struct brw_stage_prog_data *prog_data,
@@ -857,7 +857,7 @@ blorp_get_client_bo(struct brw_context *brw,
    *row_stride_out = stride;
    *image_stride_out = _mesa_image_image_stride(packing, w, h, format, type);
 
-   if (_mesa_is_bufferobj(packing->BufferObj)) {
+   if (packing->BufferObj) {
       const uint32_t offset = first_pixel + (intptr_t)pixels;
       if (!read_only && ((offset % cpp) || (stride % cpp))) {
          perf_debug("Bad PBO alignment; fallback to CPU mapping\n");
@@ -1070,7 +1070,7 @@ brw_blorp_download_miptree(struct brw_context *brw,
    }
 
    /* This pass only works for PBOs */
-   assert(_mesa_is_bufferobj(packing->BufferObj));
+   assert(packing->BufferObj);
 
    uint32_t dst_offset, dst_row_stride, dst_image_stride;
    struct brw_bo *dst_bo =
@@ -1307,6 +1307,7 @@ do_single_blorp_clear(struct brw_context *brw, struct gl_framebuffer *fb,
       struct blorp_batch batch;
       blorp_batch_init(&brw->blorp, &batch, brw, 0);
       blorp_fast_clear(&batch, &surf, isl_format_srgb_to_linear(isl_format),
+                       ISL_SWIZZLE_IDENTITY,
                        level, irb->mt_layer, num_layers, x0, y0, x1, y1);
       blorp_batch_finish(&batch);
 

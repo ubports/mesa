@@ -66,6 +66,9 @@ device_free_images(struct dri2_egl_surface *dri2_surf)
       dri2_dpy->image->destroyImage(dri2_surf->front);
       dri2_surf->front = NULL;
    }
+
+   free(dri2_surf->swrast_device_buffer);
+   dri2_surf->swrast_device_buffer = NULL;
 }
 
 static int
@@ -142,15 +145,12 @@ dri2_device_create_surface(_EGLDriver *drv, _EGLDisplay *disp, EGLint type,
       goto cleanup_surface;
    }
 
-   if (!dri2_create_drawable(dri2_dpy, config, dri2_surf, dri2_surf))
+   dri2_surf->visual = dri2_image_format_for_pbuffer_config(dri2_dpy, config);
+   if (dri2_surf->visual == __DRI_IMAGE_FORMAT_NONE)
       goto cleanup_surface;
 
-   if (conf->RedSize == 5)
-      dri2_surf->visual = __DRI_IMAGE_FORMAT_RGB565;
-   else if (conf->AlphaSize == 0)
-      dri2_surf->visual = __DRI_IMAGE_FORMAT_XRGB8888;
-   else
-      dri2_surf->visual = __DRI_IMAGE_FORMAT_ARGB8888;
+   if (!dri2_create_drawable(dri2_dpy, config, dri2_surf, dri2_surf))
+      goto cleanup_surface;
 
    return &dri2_surf->base;
 
@@ -180,50 +180,6 @@ dri2_device_create_pbuffer_surface(_EGLDriver *drv, _EGLDisplay *disp,
 {
    return dri2_device_create_surface(drv, disp, EGL_PBUFFER_BIT, conf,
                                      attrib_list);
-}
-
-static EGLBoolean
-device_add_configs_for_visuals(_EGLDriver *drv, _EGLDisplay *disp)
-{
-   struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
-   static const struct {
-      const char *format_name;
-      int rgba_shifts[4];
-      unsigned int rgba_sizes[4];
-   } visuals[] = {
-      { "A2RGB10",  { 20, 10, 0, 30 }, { 10, 10, 10, 2 } },
-      { "X2RGB10",  { 20, 10, 0, -1 }, { 10, 10, 10, 0 } },
-      { "ARGB8888", { 16, 8, 0, 24 }, { 8, 8, 8, 8 } },
-      { "RGB888",   { 16, 8, 0, -1 }, { 8, 8, 8, 0 } },
-      { "RGB565",   { 11, 5, 0, -1 }, { 5, 6, 5, 0 } },
-   };
-   unsigned int format_count[ARRAY_SIZE(visuals)] = { 0 };
-   unsigned int config_count = 0;
-
-   for (unsigned i = 0; dri2_dpy->driver_configs[i] != NULL; i++) {
-      for (unsigned j = 0; j < ARRAY_SIZE(visuals); j++) {
-         struct dri2_egl_config *dri2_conf;
-
-         dri2_conf = dri2_add_config(disp, dri2_dpy->driver_configs[i],
-               config_count + 1, EGL_PBUFFER_BIT, NULL,
-               visuals[j].rgba_shifts, visuals[j].rgba_sizes);
-
-         if (dri2_conf) {
-            if (dri2_conf->base.ConfigID == config_count + 1)
-               config_count++;
-            format_count[j]++;
-         }
-      }
-   }
-
-   for (unsigned i = 0; i < ARRAY_SIZE(format_count); i++) {
-      if (!format_count[i]) {
-         _eglLog(_EGL_DEBUG, "No DRI config supports native format %s",
-               visuals[i].format_name);
-      }
-   }
-
-   return (config_count != 0);
 }
 
 static const struct dri2_egl_display_vtbl dri2_device_display_vtbl = {
@@ -395,7 +351,7 @@ dri2_initialize_device(_EGLDriver *drv, _EGLDisplay *disp)
 
    dri2_setup_screen(disp);
 
-   if (!device_add_configs_for_visuals(drv, disp)) {
+   if (!dri2_add_pbuffer_configs_for_visuals(drv, disp)) {
       err = "DRI2: failed to add configs";
       goto cleanup;
    }

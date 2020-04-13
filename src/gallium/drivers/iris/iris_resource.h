@@ -27,9 +27,11 @@
 #include "util/u_inlines.h"
 #include "util/u_range.h"
 #include "intel/isl/isl.h"
+#include "iris_bufmgr.h"
 
 struct iris_batch;
 struct iris_context;
+struct shader_info;
 
 #define IRIS_MAX_MIPLEVELS 15
 
@@ -289,6 +291,12 @@ iris_resource_bo(struct pipe_resource *p_res)
    return res->bo;
 }
 
+static inline uint32_t
+iris_mocs(const struct iris_bo *bo, const struct isl_device *dev)
+{
+   return bo && bo->external ? dev->mocs.external : dev->mocs.internal;
+}
+
 struct iris_format_info iris_format_for_usage(const struct gen_device_info *,
                                               enum pipe_format pf,
                                               isl_surf_usage_flags_t usage);
@@ -455,6 +463,12 @@ void iris_resource_prepare_texture(struct iris_context *ice,
                                    enum isl_format view_format,
                                    uint32_t start_level, uint32_t num_levels,
                                    uint32_t start_layer, uint32_t num_layers);
+
+enum isl_aux_usage iris_image_view_aux_usage(struct iris_context *ice,
+                                             const struct pipe_image_view *pview,
+                                             const struct shader_info *info);
+enum isl_format iris_image_view_get_format(struct iris_context *ice,
+                                           const struct pipe_image_view *img);
 
 static inline bool
 iris_resource_unfinished_aux_import(struct iris_resource *res)

@@ -41,7 +41,7 @@
 #include "main/extensions.h"
 #include "main/formats.h"
 #include "main/framebuffer.h"
-#include "main/imports.h"
+#include "util/imports.h"
 #include "main/macros.h"
 #include "main/mipmap.h"
 #include "main/mtypes.h"
@@ -890,7 +890,7 @@ OSMesaCreateContextAttribs(const int *attribList, OSMesaContext sharelist)
          TNLcontext *tnl;
 
 	 if (!_swrast_CreateContext( ctx ) ||
-             !_vbo_CreateContext( ctx ) ||
+             !_vbo_CreateContext( ctx, false ) ||
              !_tnl_CreateContext( ctx ) ||
              !_swsetup_CreateContext( ctx )) {
             _mesa_destroy_visual(osmesa->gl_visual);

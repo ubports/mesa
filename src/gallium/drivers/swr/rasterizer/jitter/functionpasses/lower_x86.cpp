@@ -48,12 +48,6 @@ namespace SwrJit
 {
     using namespace llvm;
 
-#if LLVM_VERSION_MAJOR > 10
-    typedef unsigned IntrinsicID;
-#else
-    typedef Intrinsic::ID IntrinsicID;
-#endif
-
     enum TargetArch
     {
         AVX    = 0,
@@ -127,7 +121,6 @@ namespace SwrJit
             {"meta.intrinsic.VGATHERDD", {{Intrinsic::not_intrinsic,            Intrinsic::not_intrinsic},  VGATHER_EMU}},
             {"meta.intrinsic.VSCATTERPS", {{Intrinsic::not_intrinsic,           Intrinsic::not_intrinsic}, VSCATTER_EMU}},
             {"meta.intrinsic.VCVTPD2PS", {{Intrinsic::x86_avx_cvt_pd2_ps_256,   Intrinsic::not_intrinsic},  NO_EMU}},
-            {"meta.intrinsic.VCVTPH2PS", {{Intrinsic::x86_vcvtph2ps_256,        Intrinsic::not_intrinsic},  NO_EMU}},
             {"meta.intrinsic.VROUND",    {{Intrinsic::x86_avx_round_ps_256,     DOUBLE},                    NO_EMU}},
             {"meta.intrinsic.VHSUBPS",   {{Intrinsic::x86_avx_hsub_ps_256,      DOUBLE},                    NO_EMU}},
         },
@@ -141,7 +134,6 @@ namespace SwrJit
             {"meta.intrinsic.VGATHERDD",    {{Intrinsic::not_intrinsic,         Intrinsic::not_intrinsic},  VGATHER_EMU}},
             {"meta.intrinsic.VSCATTERPS", {{Intrinsic::not_intrinsic,           Intrinsic::not_intrinsic}, VSCATTER_EMU}},
             {"meta.intrinsic.VCVTPD2PS",    {{Intrinsic::x86_avx_cvt_pd2_ps_256, DOUBLE},                   NO_EMU}},
-            {"meta.intrinsic.VCVTPH2PS",    {{Intrinsic::x86_vcvtph2ps_256,     Intrinsic::not_intrinsic},  NO_EMU}},
             {"meta.intrinsic.VROUND",       {{Intrinsic::x86_avx_round_ps_256,  DOUBLE},                    NO_EMU}},
             {"meta.intrinsic.VHSUBPS",      {{Intrinsic::x86_avx_hsub_ps_256,   DOUBLE},                    NO_EMU}},
         },
@@ -164,7 +156,6 @@ namespace SwrJit
 #else
             {"meta.intrinsic.VCVTPD2PS", {{Intrinsic::not_intrinsic,            Intrinsic::not_intrinsic}, VCONVERT_EMU}},
 #endif
-            {"meta.intrinsic.VCVTPH2PS", {{Intrinsic::x86_avx512_mask_vcvtph2ps_256, Intrinsic::x86_avx512_mask_vcvtph2ps_512}, NO_EMU}},
             {"meta.intrinsic.VROUND", {{Intrinsic::not_intrinsic,               Intrinsic::not_intrinsic}, VROUND_EMU}},
             {"meta.intrinsic.VHSUBPS", {{Intrinsic::not_intrinsic,              Intrinsic::not_intrinsic}, VHSUB_EMU}},
         }};
@@ -388,7 +379,7 @@ namespace SwrJit
 
             SWR_ASSERT(intrinsicMap.find(pFunc->getName().str()) != intrinsicMap.end(),
                        "Unimplemented intrinsic %s.",
-                       pFunc->getName().str());
+                       pFunc->getName().str().c_str());
 
             Intrinsic::ID x86Intrinsic = intrinsicMap[pFunc->getName().str()];
             Function*     pX86IntrinFunc =
@@ -515,10 +506,10 @@ namespace SwrJit
         auto     vi1Mask     = pCallInst->getArgOperand(3);
         auto     i8Scale     = pCallInst->getArgOperand(4);
 
-        pBase             = B->POINTER_CAST(pBase, PointerType::get(B->mInt8Ty, 0));
-        uint32_t numElem  = vSrc->getType()->getVectorNumElements();
-        auto     i32Scale = B->Z_EXT(i8Scale, B->mInt32Ty);
-        auto     srcTy    = vSrc->getType()->getVectorElementType();
+        pBase              = B->POINTER_CAST(pBase, PointerType::get(B->mInt8Ty, 0));
+        uint32_t numElem   = vSrc->getType()->getVectorNumElements();
+        auto     i32Scale  = B->Z_EXT(i8Scale, B->mInt32Ty);
+        auto     srcTy     = vSrc->getType()->getVectorElementType();
         Value*   v32Gather = nullptr;
         if (arch == AVX)
         {
@@ -529,7 +520,11 @@ namespace SwrJit
             B->STORE(vSrc, pTmp);
 
             v32Gather        = UndefValue::get(vSrc->getType());
+#if LLVM_VERSION_MAJOR > 10
+            auto vi32Scale   = ConstantVector::getSplat(ElementCount(numElem, false), cast<ConstantInt>(i32Scale));
+#else
             auto vi32Scale   = ConstantVector::getSplat(numElem, cast<ConstantInt>(i32Scale));
+#endif
             auto vi32Offsets = B->MUL(vi32Indices, vi32Scale);
 
             for (uint32_t i = 0; i < numElem; ++i)

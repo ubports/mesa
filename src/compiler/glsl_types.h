@@ -60,10 +60,6 @@ void encode_type_to_blob(struct blob *blob, const struct glsl_type *type);
 
 const struct glsl_type *decode_type_from_blob(struct blob_reader *blob);
 
-#ifdef __cplusplus
-}
-#endif
-
 typedef void (*glsl_type_size_align_func)(const struct glsl_type *type,
                                           unsigned *size, unsigned *align);
 
@@ -231,6 +227,9 @@ enum glsl_sampler_dim {
    GLSL_SAMPLER_DIM_SUBPASS_MS, /* for multisampled vulkan input attachments */
 };
 
+int
+glsl_get_sampler_dim_coordinate_components(enum glsl_sampler_dim dim);
+
 enum glsl_matrix_layout {
    /**
     * The layout of the matrix is inherited from the object containing the
@@ -260,6 +259,8 @@ enum {
 };
 
 #ifdef __cplusplus
+} /* extern "C" */
+
 #include "GL/gl.h"
 #include "util/ralloc.h"
 #include "main/menums.h" /* for gl_texture_index, C++'s enum rules are broken */
@@ -393,6 +394,11 @@ public:
     * Gets the "bare" type without any decorations or layout information.
     */
    const glsl_type *get_bare_type() const;
+
+   /**
+    * Gets the float16 version of this type.
+    */
+   const glsl_type *get_float16_type() const;
 
    /**
     * Get the instance of a built-in scalar, vector, or matrix type
@@ -753,6 +759,22 @@ public:
    bool is_float() const
    {
       return base_type == GLSL_TYPE_FLOAT;
+   }
+
+   /**
+    * Query whether or not a type is a half-float or float type
+    */
+   bool is_float_16_32() const
+   {
+      return base_type == GLSL_TYPE_FLOAT16 || is_float();
+   }
+
+   /**
+    * Query whether or not a type is a half-float, float or double
+    */
+   bool is_float_16_32_64() const
+   {
+      return base_type == GLSL_TYPE_FLOAT16 || is_float() || is_double();
    }
 
    /**

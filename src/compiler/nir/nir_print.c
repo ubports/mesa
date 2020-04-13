@@ -461,8 +461,10 @@ print_var_decl(nir_variable *var, print_state *state)
    const char *const samp = (var->data.sample) ? "sample " : "";
    const char *const patch = (var->data.patch) ? "patch " : "";
    const char *const inv = (var->data.invariant) ? "invariant " : "";
-   fprintf(fp, "%s%s%s%s%s %s ",
-           cent, samp, patch, inv, get_variable_mode_str(var->data.mode, false),
+   const char *const per_view = (var->data.per_view) ? "per_view " : "";
+   fprintf(fp, "%s%s%s%s%s%s %s ",
+           cent, samp, patch, inv, per_view,
+           get_variable_mode_str(var->data.mode, false),
            glsl_interp_mode_name(var->data.interpolation));
 
    enum gl_access_qualifier access = var->data.access;
@@ -476,6 +478,16 @@ print_var_decl(nir_variable *var, print_state *state)
 
    if (glsl_get_base_type(glsl_without_array(var->type)) == GLSL_TYPE_IMAGE) {
       fprintf(fp, "%s ", util_format_short_name(var->data.image.format));
+   }
+
+   if (var->data.precision) {
+      const char *precisions[] = {
+         "",
+         "highp",
+         "mediump",
+         "lowp",
+      };
+      fprintf(fp, "%s ", precisions[var->data.precision]);
    }
 
    fprintf(fp, "%s %s", glsl_get_type_name(var->type),
@@ -558,6 +570,8 @@ print_var_decl(nir_variable *var, print_state *state)
       print_constant(var->constant_initializer, var->type, state);
       fprintf(fp, " }");
    }
+   if (var->pointer_initializer)
+      fprintf(fp, " = &%s", get_var_name(var->pointer_initializer, state));
 
    fprintf(fp, "\n");
    print_annotation(state, var);

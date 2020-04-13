@@ -215,13 +215,14 @@ legalize_block(struct ir3_legalize_ctx *ctx, struct ir3_block *block)
 			ctx->type == MESA_SHADER_VERTEX && n->opc == OPC_SAMGQ) {
 			struct ir3_instruction *samgp;
 
+			list_delinit(&n->node);
+
 			for (i = 0; i < 4; i++) {
 				samgp = ir3_instr_clone(n);
 				samgp->opc = OPC_SAMGP0 + i;
 				if (i > 1)
 					samgp->flags |= IR3_INSTR_SY;
 			}
-			list_delinit(&n->node);
 		} else {
 			list_addtail(&n->node, &block->instr_list);
 		}
@@ -238,7 +239,6 @@ legalize_block(struct ir3_legalize_ctx *ctx, struct ir3_block *block)
 
 		if (is_tex_or_prefetch(n)) {
 			regmask_set(&state->needs_sy, n->regs[0]);
-			ctx->so->need_pixlod = true;
 			if (n->opc == OPC_META_TEX_PREFETCH)
 				has_tex_prefetch = true;
 		} else if (n->opc == OPC_RESINFO) {
@@ -273,7 +273,7 @@ legalize_block(struct ir3_legalize_ctx *ctx, struct ir3_block *block)
 		 * their src register(s):
 		 */
 		if (is_tex(n) || is_sfu(n) || is_mem(n)) {
-			foreach_src(reg, n) {
+			foreach_src (reg, n) {
 				if (reg_gpr(reg))
 					regmask_set(&state->needs_ss_war, reg);
 			}

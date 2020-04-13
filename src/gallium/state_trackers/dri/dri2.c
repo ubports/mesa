@@ -1398,14 +1398,16 @@ dri2_query_dma_buf_modifiers(__DRIscreen *_screen, int fourcc, int max,
 
    format = map->pipe_format;
 
-   if (pscreen->query_dmabuf_modifiers != NULL &&
-       (pscreen->is_format_supported(pscreen, format, screen->target, 0, 0,
+   if (pscreen->is_format_supported(pscreen, format, screen->target, 0, 0,
                                      PIPE_BIND_RENDER_TARGET) ||
         pscreen->is_format_supported(pscreen, format, screen->target, 0, 0,
                                      PIPE_BIND_SAMPLER_VIEW) ||
-        dri2_yuv_dma_buf_supported(screen, map))) {
-      pscreen->query_dmabuf_modifiers(pscreen, format, max, modifiers,
-                                      external_only, count);
+        dri2_yuv_dma_buf_supported(screen, map)) {
+      if (pscreen->query_dmabuf_modifiers != NULL)
+         pscreen->query_dmabuf_modifiers(pscreen, format, max, modifiers,
+                                         external_only, count);
+      else
+         *count = 0;
       return true;
    }
    return false;
@@ -1416,6 +1418,12 @@ dri2_query_dma_buf_format_modifier_attribs(__DRIscreen *_screen,
                                            uint32_t fourcc, uint64_t modifier,
                                            int attrib, uint64_t *value)
 {
+   struct dri_screen *screen = dri_screen(_screen);
+   struct pipe_screen *pscreen = screen->base.screen;
+
+   if (!pscreen->query_dmabuf_modifiers)
+      return false;
+
    switch (attrib) {
    case __DRI_IMAGE_FORMAT_MODIFIER_ATTRIB_PLANE_COUNT: {
       uint64_t mod_planes = dri2_get_modifier_num_planes(modifier, fourcc);
@@ -2093,13 +2101,11 @@ dri2_init_screen(__DRIscreen * sPriv)
          dri2ImageExtension.createImageFromFds = dri2_from_fds;
          dri2ImageExtension.createImageFromDmaBufs = dri2_from_dma_bufs;
          dri2ImageExtension.createImageFromDmaBufs2 = dri2_from_dma_bufs2;
-         if (pscreen->query_dmabuf_modifiers) {
-            dri2ImageExtension.queryDmaBufFormats = dri2_query_dma_buf_formats;
-            dri2ImageExtension.queryDmaBufModifiers =
-                                       dri2_query_dma_buf_modifiers;
-            dri2ImageExtension.queryDmaBufFormatModifierAttribs =
-                                       dri2_query_dma_buf_format_modifier_attribs;
-         }
+         dri2ImageExtension.queryDmaBufFormats = dri2_query_dma_buf_formats;
+         dri2ImageExtension.queryDmaBufModifiers =
+            dri2_query_dma_buf_modifiers;
+         dri2ImageExtension.queryDmaBufFormatModifierAttribs =
+            dri2_query_dma_buf_format_modifier_attribs;
       }
    }
 
@@ -2175,10 +2181,8 @@ dri_kms_init_screen(__DRIscreen * sPriv)
       dri2ImageExtension.createImageFromFds = dri2_from_fds;
       dri2ImageExtension.createImageFromDmaBufs = dri2_from_dma_bufs;
       dri2ImageExtension.createImageFromDmaBufs2 = dri2_from_dma_bufs2;
-      if (pscreen->query_dmabuf_modifiers) {
-         dri2ImageExtension.queryDmaBufFormats = dri2_query_dma_buf_formats;
-         dri2ImageExtension.queryDmaBufModifiers = dri2_query_dma_buf_modifiers;
-      }
+      dri2ImageExtension.queryDmaBufFormats = dri2_query_dma_buf_formats;
+      dri2ImageExtension.queryDmaBufModifiers = dri2_query_dma_buf_modifiers;
    }
 
    sPriv->extensions = dri_screen_extensions;

@@ -32,6 +32,7 @@
 #include "util/format/u_format.h"
 #include "util/u_viewport.h"
 
+#include "freedreno_log.h"
 #include "freedreno_resource.h"
 #include "freedreno_query_hw.h"
 
@@ -652,7 +653,7 @@ build_vbo_state(struct fd6_emit *emit, const struct ir3_shader_variant *vp)
 					&vtx->vertexbuf.vb[elem->vertex_buffer_index];
 			struct fd_resource *rsc = fd_resource(vb->buffer.resource);
 			enum pipe_format pfmt = elem->src_format;
-			enum a6xx_vtx_fmt fmt = fd6_pipe2vtx(pfmt);
+			enum a6xx_format fmt = fd6_pipe2vtx(pfmt);
 			bool isint = util_format_is_pure_integer(pfmt);
 			uint32_t off = vb->buffer_offset + elem->src_offset;
 			uint32_t size = fd_bo_size(rsc->bo) - off;
@@ -688,7 +689,8 @@ build_vbo_state(struct fd6_emit *emit, const struct ir3_shader_variant *vp)
 	}
 
 	OUT_PKT4(ring, REG_A6XX_VFD_CONTROL_0, 1);
-	OUT_RING(ring, A6XX_VFD_CONTROL_0_VTXCNT(j) | (j << 8));
+	OUT_RING(ring, A6XX_VFD_CONTROL_0_FETCH_CNT(j) |
+			A6XX_VFD_CONTROL_0_DECODE_CNT(j));
 
 	return ring;
 }
@@ -1245,6 +1247,8 @@ fd6_emit_restore(struct fd_batch *batch, struct fd_ringbuffer *ring)
 {
 	//struct fd_context *ctx = batch->ctx;
 
+	fd_log(batch, "START RESTORE");
+
 	fd6_cache_inv(batch, ring);
 
 	OUT_PKT4(ring, REG_A6XX_HLSQ_UPDATE_CNTL, 1);
@@ -1359,6 +1363,8 @@ fd6_emit_restore(struct fd_batch *batch, struct fd_ringbuffer *ring)
 
 	OUT_PKT4(ring, REG_A6XX_RB_LRZ_CNTL, 1);
 	OUT_RING(ring, 0x00000000);
+
+	fd_log(batch, "END RESTORE");
 }
 
 static void
@@ -1394,7 +1400,7 @@ fd6_framebuffer_barrier(struct fd_context *ctx)
 	struct fd_ringbuffer *ring = batch->draw;
 	unsigned seqno;
 
-	seqno = fd6_event_write(batch, ring, CACHE_FLUSH_AND_INV_EVENT, true);
+	seqno = fd6_event_write(batch, ring, RB_DONE_TS, true);
 
 	OUT_PKT7(ring, CP_WAIT_REG_MEM, 6);
 	OUT_RING(ring, CP_WAIT_REG_MEM_0_FUNCTION(WRITE_EQ) |
@@ -1404,8 +1410,8 @@ fd6_framebuffer_barrier(struct fd_context *ctx)
 	OUT_RING(ring, CP_WAIT_REG_MEM_4_MASK(~0));
 	OUT_RING(ring, CP_WAIT_REG_MEM_5_DELAY_LOOP_CYCLES(16));
 
-	fd6_event_write(batch, ring, UNK_1D, true);
-	fd6_event_write(batch, ring, UNK_1C, true);
+	fd6_event_write(batch, ring, PC_CCU_FLUSH_COLOR_TS, true);
+	fd6_event_write(batch, ring, PC_CCU_FLUSH_DEPTH_TS, true);
 
 	seqno = fd6_event_write(batch, ring, CACHE_FLUSH_TS, true);
 

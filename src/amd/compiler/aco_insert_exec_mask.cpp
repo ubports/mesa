@@ -107,10 +107,13 @@ bool pred_by_exec_mask(aco_ptr<Instruction>& instr) {
    if (instr->format == Format::PSEUDO) {
       switch (instr->opcode) {
       case aco_opcode::p_create_vector:
-         return instr->definitions[0].getTemp().type() == RegType::vgpr;
       case aco_opcode::p_extract_vector:
       case aco_opcode::p_split_vector:
-         return instr->operands[0].getTemp().type() == RegType::vgpr;
+         for (Definition def : instr->definitions) {
+            if (def.getTemp().type() == RegType::vgpr)
+               return true;
+         }
+         return false;
       case aco_opcode::p_spill:
       case aco_opcode::p_reload:
          return false;
@@ -374,7 +377,7 @@ unsigned add_coupling_code(exec_ctx& ctx, Block* block,
       bld.insert(std::move(startpgm));
 
       /* exec seems to need to be manually initialized with combined shaders */
-      if (util_bitcount(ctx.program->stage & sw_mask) > 1) {
+      if (util_bitcount(ctx.program->stage & sw_mask) > 1 || (ctx.program->stage & hw_ngg_gs)) {
          bld.sop1(Builder::s_mov, bld.exec(Definition(exec_mask)), bld.lm == s2 ? Operand(UINT64_MAX) : Operand(UINT32_MAX));
          instructions[0]->definitions.pop_back();
       }
@@ -526,7 +529,7 @@ unsigned add_coupling_code(exec_ctx& ctx, Block* block,
             /* create phi for loop footer */
             aco_ptr<Pseudo_instruction> phi{create_instruction<Pseudo_instruction>(aco_opcode::p_linear_phi, Format::PSEUDO, preds.size(), 1)};
             phi->definitions[0] = bld.def(bld.lm);
-            if (k == info.num_exec_masks - 1) {
+            if (k == info.num_exec_masks - 1u) {
                phi->definitions[0].setFixed(exec);
                need_parallelcopy = false;
             }

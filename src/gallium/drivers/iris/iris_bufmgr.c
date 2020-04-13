@@ -49,6 +49,7 @@
 #include <sys/types.h>
 #include <stdbool.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "errno.h"
 #include "common/gen_aux_map.h"
@@ -57,6 +58,7 @@
 #include "common/gen_gem.h"
 #include "dev/gen_device_info.h"
 #include "main/macros.h"
+#include "os/os_mman.h"
 #include "util/debug.h"
 #include "util/macros.h"
 #include "util/hash_table.h"
@@ -125,6 +127,13 @@ struct bo_cache_bucket {
 };
 
 struct iris_bufmgr {
+   /**
+    * List into the list of bufmgr.
+    */
+   struct list_head link;
+
+   uint32_t refcount;
+
    int fd;
 
    mtx_t lock;
@@ -149,6 +158,12 @@ struct iris_bufmgr {
    bool bo_reuse:1;
 
    struct gen_aux_map_context *aux_map_ctx;
+};
+
+static mtx_t global_bufmgr_list_mutex = _MTX_INITIALIZER_NP;
+static struct list_head global_bufmgr_list = {
+   .next = &global_bufmgr_list,
+   .prev = &global_bufmgr_list,
 };
 
 static int bo_set_tiling_internal(struct iris_bo *bo, uint32_t tiling_mode,
@@ -750,15 +765,15 @@ bo_free(struct iris_bo *bo)
 
    if (bo->map_cpu && !bo->userptr) {
       VG_NOACCESS(bo->map_cpu, bo->size);
-      munmap(bo->map_cpu, bo->size);
+      os_munmap(bo->map_cpu, bo->size);
    }
    if (bo->map_wc) {
       VG_NOACCESS(bo->map_wc, bo->size);
-      munmap(bo->map_wc, bo->size);
+      os_munmap(bo->map_wc, bo->size);
    }
    if (bo->map_gtt) {
       VG_NOACCESS(bo->map_gtt, bo->size);
-      munmap(bo->map_gtt, bo->size);
+      os_munmap(bo->map_gtt, bo->size);
    }
 
    if (bo->idle) {
@@ -921,7 +936,7 @@ iris_bo_map_cpu(struct pipe_debug_callback *dbg,
 
       if (p_atomic_cmpxchg(&bo->map_cpu, NULL, map)) {
          VG_NOACCESS(map, bo->size);
-         munmap(map, bo->size);
+         os_munmap(map, bo->size);
       }
    }
    assert(bo->map_cpu);
@@ -983,7 +998,7 @@ iris_bo_map_wc(struct pipe_debug_callback *dbg,
 
       if (p_atomic_cmpxchg(&bo->map_wc, NULL, map)) {
          VG_NOACCESS(map, bo->size);
-         munmap(map, bo->size);
+         os_munmap(map, bo->size);
       }
    }
    assert(bo->map_wc);
@@ -1041,8 +1056,8 @@ iris_bo_map_gtt(struct pipe_debug_callback *dbg,
       }
 
       /* and mmap it. */
-      void *map = mmap(0, bo->size, PROT_READ | PROT_WRITE,
-                       MAP_SHARED, bufmgr->fd, mmap_arg.offset);
+      void *map = os_mmap(0, bo->size, PROT_READ | PROT_WRITE,
+                          MAP_SHARED, bufmgr->fd, mmap_arg.offset);
       if (map == MAP_FAILED) {
          DBG("%s:%d: Error mapping buffer %d (%s): %s .\n",
              __FILE__, __LINE__, bo->gem_handle, bo->name, strerror(errno));
@@ -1058,7 +1073,7 @@ iris_bo_map_gtt(struct pipe_debug_callback *dbg,
 
       if (p_atomic_cmpxchg(&bo->map_gtt, NULL, map)) {
          VG_NOACCESS(map, bo->size);
-         munmap(map, bo->size);
+         os_munmap(map, bo->size);
       }
    }
    assert(bo->map_gtt);
@@ -1200,7 +1215,7 @@ iris_bo_wait(struct iris_bo *bo, int64_t timeout_ns)
    return ret;
 }
 
-void
+static void
 iris_bufmgr_destroy(struct iris_bufmgr *bufmgr)
 {
    /* Free aux-map buffers */
@@ -1235,6 +1250,8 @@ iris_bufmgr_destroy(struct iris_bufmgr *bufmgr)
       if (z != IRIS_MEMZONE_BINDER)
          util_vma_heap_finish(&bufmgr->vma_allocator[z]);
    }
+
+   close(bufmgr->fd);
 
    free(bufmgr);
 }
@@ -1621,8 +1638,8 @@ static struct gen_mapped_pinned_buffer_alloc aux_map_allocator = {
  *
  * \param fd File descriptor of the opened DRM device.
  */
-struct iris_bufmgr *
-iris_bufmgr_init(struct gen_device_info *devinfo, int fd, bool bo_reuse)
+static struct iris_bufmgr *
+iris_bufmgr_create(struct gen_device_info *devinfo, int fd, bool bo_reuse)
 {
    uint64_t gtt_size = iris_gtt_size(fd);
    if (gtt_size <= IRIS_MEMZONE_OTHER_START)
@@ -1641,9 +1658,12 @@ iris_bufmgr_init(struct gen_device_info *devinfo, int fd, bool bo_reuse)
     * Don't do this! Ensure that each library/bufmgr has its own device
     * fd so that its namespace does not clash with another.
     */
-   bufmgr->fd = fd;
+   bufmgr->fd = dup(fd);
+
+   p_atomic_set(&bufmgr->refcount, 1);
 
    if (mtx_init(&bufmgr->lock, mtx_plain) != 0) {
+      close(bufmgr->fd);
       free(bufmgr);
       return NULL;
    }
@@ -1697,6 +1717,67 @@ iris_bufmgr_init(struct gen_device_info *devinfo, int fd, bool bo_reuse)
    }
 
    return bufmgr;
+}
+
+static struct iris_bufmgr *
+iris_bufmgr_ref(struct iris_bufmgr *bufmgr)
+{
+   p_atomic_inc(&bufmgr->refcount);
+   return bufmgr;
+}
+
+void
+iris_bufmgr_unref(struct iris_bufmgr *bufmgr)
+{
+   mtx_lock(&global_bufmgr_list_mutex);
+   if (p_atomic_dec_zero(&bufmgr->refcount)) {
+      list_del(&bufmgr->link);
+      iris_bufmgr_destroy(bufmgr);
+   }
+   mtx_unlock(&global_bufmgr_list_mutex);
+}
+
+/**
+ * Gets an already existing GEM buffer manager or create a new one.
+ *
+ * \param fd File descriptor of the opened DRM device.
+ */
+struct iris_bufmgr *
+iris_bufmgr_get_for_fd(struct gen_device_info *devinfo, int fd, bool bo_reuse)
+{
+   struct stat st;
+
+   if (fstat(fd, &st))
+      return NULL;
+
+   struct iris_bufmgr *bufmgr = NULL;
+
+   mtx_lock(&global_bufmgr_list_mutex);
+   list_for_each_entry(struct iris_bufmgr, iter_bufmgr, &global_bufmgr_list, link) {
+      struct stat iter_st;
+      if (fstat(iter_bufmgr->fd, &iter_st))
+         continue;
+
+      if (st.st_rdev == iter_st.st_rdev) {
+         assert(iter_bufmgr->bo_reuse == bo_reuse);
+         bufmgr = iris_bufmgr_ref(iter_bufmgr);
+         goto unlock;
+      }
+   }
+
+   bufmgr = iris_bufmgr_create(devinfo, fd, bo_reuse);
+   list_addtail(&bufmgr->link, &global_bufmgr_list);
+
+ unlock:
+   mtx_unlock(&global_bufmgr_list_mutex);
+
+   return bufmgr;
+}
+
+int
+iris_bufmgr_get_fd(struct iris_bufmgr *bufmgr)
+{
+   return bufmgr->fd;
 }
 
 void*

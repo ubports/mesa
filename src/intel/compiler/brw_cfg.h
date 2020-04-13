@@ -28,7 +28,10 @@
 #ifndef BRW_CFG_H
 #define BRW_CFG_H
 
-#include "brw_shader.h"
+#include "brw_ir.h"
+#ifdef __cplusplus
+#include "brw_ir_analysis.h"
+#endif
 
 struct bblock_t;
 
@@ -70,7 +73,8 @@ struct bblock_link {
    enum bblock_link_kind kind;
 };
 
-struct backend_instruction;
+struct backend_shader;
+struct cfg_t;
 
 struct bblock_t {
 #ifdef __cplusplus
@@ -86,7 +90,7 @@ struct bblock_t {
                         enum bblock_link_kind kind) const;
    bool can_combine_with(const bblock_t *that) const;
    void combine_with(bblock_t *that);
-   void dump(backend_shader *s) const;
+   void dump() const;
 
    backend_instruction *start();
    const backend_instruction *start() const;
@@ -107,7 +111,6 @@ struct bblock_t {
 
    struct exec_node link;
    struct cfg_t *cfg;
-   struct bblock_t *idom;
 
    int start_ip;
    int end_ip;
@@ -302,7 +305,7 @@ struct cfg_t {
 #ifdef __cplusplus
    DECLARE_RALLOC_CXX_OPERATORS(cfg_t)
 
-   cfg_t(exec_list *instructions);
+   cfg_t(const backend_shader *s, exec_list *instructions);
    ~cfg_t();
 
    void remove_block(bblock_t *block);
@@ -310,21 +313,17 @@ struct cfg_t {
    bblock_t *new_block();
    void set_next_block(bblock_t **cur, bblock_t *block, int ip);
    void make_block_array();
-   void calculate_idom();
-   static bblock_t *intersect(bblock_t *b1, bblock_t *b2);
 
-   void dump(backend_shader *s);
+   void dump();
    void dump_cfg();
-   void dump_domtree();
 #endif
+   const struct backend_shader *s;
    void *mem_ctx;
 
    /** Ordered list (by ip) of basic blocks */
    struct exec_list block_list;
    struct bblock_t **blocks;
    int num_blocks;
-
-   bool idom_dirty;
 
    unsigned cycle_count;
 };
@@ -380,5 +379,54 @@ struct cfg_t {
    for (__type *__scan_inst = (__type *)__inst->prev;          \
         !__scan_inst->is_head_sentinel();                      \
         __scan_inst = (__type *)__scan_inst->prev)
+
+#ifdef __cplusplus
+namespace brw {
+   /**
+    * Immediate dominator tree analysis of a shader.
+    */
+   struct idom_tree {
+      idom_tree(const backend_shader *s);
+      ~idom_tree();
+
+      bool
+      validate(const backend_shader *) const
+      {
+         /* FINISHME */
+         return true;
+      }
+
+      analysis_dependency_class
+      dependency_class() const
+      {
+         return DEPENDENCY_BLOCKS;
+      }
+
+      const bblock_t *
+      parent(const bblock_t *b) const
+      {
+         assert(unsigned(b->num) < num_parents);
+         return parents[b->num];
+      }
+
+      bblock_t *
+      parent(bblock_t *b) const
+      {
+         assert(unsigned(b->num) < num_parents);
+         return parents[b->num];
+      }
+
+      bblock_t *
+      intersect(bblock_t *b1, bblock_t *b2) const;
+
+      void
+      dump() const;
+
+   private:
+      unsigned num_parents;
+      bblock_t **parents;
+   };
+}
+#endif
 
 #endif /* BRW_CFG_H */

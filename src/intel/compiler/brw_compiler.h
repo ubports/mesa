@@ -615,6 +615,9 @@ enum brw_param_builtin {
    BRW_PARAM_BUILTIN_BASE_WORK_GROUP_ID_Y,
    BRW_PARAM_BUILTIN_BASE_WORK_GROUP_ID_Z,
    BRW_PARAM_BUILTIN_SUBGROUP_ID,
+   BRW_PARAM_BUILTIN_WORK_GROUP_SIZE_X,
+   BRW_PARAM_BUILTIN_WORK_GROUP_SIZE_Y,
+   BRW_PARAM_BUILTIN_WORK_GROUP_SIZE_Z,
 };
 
 #define BRW_PARAM_BUILTIN_CLIP_PLANE(idx, comp) \
@@ -679,6 +682,9 @@ struct brw_stage_prog_data {
     */
    uint32_t *param;
    uint32_t *pull_param;
+
+   /* Whether shader uses atomic operations. */
+   bool uses_atomic_load_store;
 };
 
 static inline uint32_t *
@@ -751,7 +757,6 @@ struct brw_wm_prog_data {
    bool dispatch_16;
    bool dispatch_32;
    bool dual_src_blend;
-   bool replicate_alpha;
    bool persample_dispatch;
    bool uses_pos_offset;
    bool uses_omask;
@@ -778,6 +783,11 @@ struct brw_wm_prog_data {
     */
    uint32_t flat_inputs;
 
+   /**
+    * The FS inputs
+    */
+   uint64_t inputs;
+
    /* Mapping of VUE slots to interpolation modes.
     * Used by the Gen4-5 clip/sf/wm stages.
     */
@@ -789,6 +799,14 @@ struct brw_wm_prog_data {
     * For varying slots that are not used by the FS, the value is -1.
     */
    int urb_setup[VARYING_SLOT_MAX];
+
+   /**
+    * Cache structure into the urb_setup array above that contains the
+    * attribute numbers of active varyings out of urb_setup.
+    * The actual count is stored in urb_setup_attribs_count.
+    */
+   uint8_t urb_setup_attribs[VARYING_SLOT_MAX];
+   uint8_t urb_setup_attribs_count;
 };
 
 /** Returns the SIMD width corresponding to a given KSP index
@@ -886,16 +904,16 @@ struct brw_cs_prog_data {
    struct brw_stage_prog_data base;
 
    unsigned local_size[3];
+   unsigned max_variable_local_size;
    unsigned simd_size;
-   unsigned threads;
    unsigned slm_size;
    bool uses_barrier;
    bool uses_num_work_groups;
+   bool uses_variable_group_size;
 
    struct {
       struct brw_push_const_block cross_thread;
       struct brw_push_const_block per_thread;
-      struct brw_push_const_block total;
    } push;
 
    struct {
@@ -1030,7 +1048,8 @@ GLuint brw_varying_to_offset(const struct brw_vue_map *vue_map, GLuint varying)
 void brw_compute_vue_map(const struct gen_device_info *devinfo,
                          struct brw_vue_map *vue_map,
                          uint64_t slots_valid,
-                         bool separate_shader);
+                         bool separate_shader,
+                         uint32_t pos_slots);
 
 void brw_compute_tess_vue_map(struct brw_vue_map *const vue_map,
                               uint64_t slots_valid,
@@ -1126,6 +1145,9 @@ struct brw_tcs_prog_data
 
    /** Number vertices in output patch */
    int instances;
+
+   /** Track patch count threshold */
+   int patch_count_threshold;
 };
 
 
@@ -1450,6 +1472,10 @@ encode_slm_size(unsigned gen, uint32_t bytes)
 
    return slm_size;
 }
+
+unsigned
+brw_cs_push_const_total_size(const struct brw_cs_prog_data *cs_prog_data,
+                             unsigned threads);
 
 /**
  * Return true if the given shader stage is dispatched contiguously by the
