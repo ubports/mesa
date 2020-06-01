@@ -43,12 +43,12 @@ struct fd6_context {
 	 * Compared to previous generations
 	 *   (1) we cannot specify individual buffers per VSC, instead
 	 *       just a pitch and base address
-	 *   (2) there is a second smaller buffer, for something.. we
-	 *       also stash VSC_BIN_SIZE at end of 2nd buffer.
+	 *   (2) there is a second smaller buffer.. we also stash
+	 *       VSC_BIN_SIZE at end of 2nd buffer.
 	 */
-	struct fd_bo *vsc_data, *vsc_data2;
+	struct fd_bo *vsc_draw_strm, *vsc_prim_strm;
 
-	unsigned vsc_data_pitch, vsc_data2_pitch;
+	unsigned vsc_draw_strm_pitch, vsc_prim_strm_pitch;
 
 	/* The 'control' mem BO is used for various housekeeping
 	 * functions.  See 'struct fd6_control'
@@ -78,6 +78,9 @@ struct fd6_context {
 	 */
 	struct ir3_shader_key last_key;
 
+	/* Is there current VS driver-param state set? */
+	bool has_dp_state;
+
 	/* number of active samples-passed queries: */
 	int samples_passed_queries;
 
@@ -102,6 +105,17 @@ struct fd6_context {
 		uint32_t PC_UNKNOWN_9805;
 		uint32_t SP_UNKNOWN_A0F8;
 	} magic;
+
+
+	struct {
+		/* previous binning/draw lrz state, which is a function of multiple
+		 * gallium stateobjs, but doesn't necessarily change as frequently:
+		 */
+		struct {
+			uint32_t gras_lrz_cntl;
+			uint32_t rb_lrz_cntl;
+		} lrz[2];
+	} last;
 };
 
 static inline struct fd6_context *
@@ -153,5 +167,17 @@ emit_marker6(struct fd_ringbuffer *ring, int scratch_idx)
 		OUT_RING(ring, ++marker_cnt);
 	}
 }
+
+struct fd6_vertex_stateobj {
+	struct fd_vertex_stateobj base;
+	struct fd_ringbuffer *stateobj;
+};
+
+static inline struct fd6_vertex_stateobj *
+fd6_vertex_stateobj(void *p)
+{
+	return (struct fd6_vertex_stateobj *) p;
+}
+
 
 #endif /* FD6_CONTEXT_H_ */

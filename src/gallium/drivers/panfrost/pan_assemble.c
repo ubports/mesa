@@ -90,6 +90,31 @@ pan_format_from_glsl(const struct glsl_type *type)
                 MALI_NR_CHANNELS(4);
 }
 
+static enum bifrost_shader_type
+bifrost_blend_type_from_nir(nir_alu_type nir_type)
+{
+        switch(nir_type) {
+        case 0: /* Render target not in use */
+                return 0;
+        case nir_type_float16:
+                return BIFROST_BLEND_F16;
+        case nir_type_float32:
+                return BIFROST_BLEND_F32;
+        case nir_type_int32:
+                return BIFROST_BLEND_I32;
+        case nir_type_uint32:
+                return BIFROST_BLEND_U32;
+        case nir_type_int16:
+                return BIFROST_BLEND_I16;
+        case nir_type_uint16:
+                return BIFROST_BLEND_U16;
+        default:
+                DBG("Unsupported blend shader type for NIR alu type %d", nir_type);
+                assert(0);
+                return 0;
+        }
+}
+
 void
 panfrost_shader_compile(struct panfrost_context *ctx,
                         enum pipe_shader_ir ir_type,
@@ -107,7 +132,7 @@ panfrost_shader_compile(struct panfrost_context *ctx,
                 s = nir_shader_clone(NULL, ir);
         } else {
                 assert (ir_type == PIPE_SHADER_IR_TGSI);
-                s = tgsi_to_nir(ir, ctx->base.screen);
+                s = tgsi_to_nir(ir, ctx->base.screen, false);
         }
 
         s->info.stage = stage;
@@ -152,6 +177,9 @@ panfrost_shader_compile(struct panfrost_context *ctx,
         bool vertex_id = s->info.system_values_read & (1 << SYSTEM_VALUE_VERTEX_ID);
         bool instance_id = s->info.system_values_read & (1 << SYSTEM_VALUE_INSTANCE_ID);
 
+        /* On Bifrost it's a sysval, on Midgard it's a varying */
+        state->reads_frag_coord = s->info.system_values_read & (1 << SYSTEM_VALUE_FRAG_COORD);
+
         switch (stage) {
         case MESA_SHADER_VERTEX:
                 state->attribute_count = util_bitcount64(s->info.inputs_read);
@@ -171,6 +199,14 @@ panfrost_shader_compile(struct panfrost_context *ctx,
                         state->writes_depth = true;
                 if (s->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_STENCIL))
                         state->writes_stencil = true;
+
+                /* List of reasons we need to execute frag shaders when things
+                 * are masked off */
+
+                state->fs_sidefx =
+                        s->info.writes_memory ||
+                        s->info.fs.uses_discard ||
+                        s->info.fs.uses_demote;
                 break;
         case MESA_SHADER_COMPUTE:
                 /* TODO: images */
@@ -197,9 +233,23 @@ panfrost_shader_compile(struct panfrost_context *ctx,
         state->uniform_cutoff = program.uniform_cutoff;
         state->work_reg_count = program.work_register_count;
 
-        unsigned default_vec1_swizzle = panfrost_get_default_swizzle(1);
-        unsigned default_vec2_swizzle = panfrost_get_default_swizzle(2);
-        unsigned default_vec4_swizzle = panfrost_get_default_swizzle(4);
+        if (dev->quirks & IS_BIFROST)
+                for (unsigned i = 0; i < BIFROST_MAX_RENDER_TARGET_COUNT; i++)
+                        state->blend_types[i] = bifrost_blend_type_from_nir(program.blend_types[i]);
+
+        unsigned default_vec1_swizzle;
+        unsigned default_vec2_swizzle;
+        unsigned default_vec4_swizzle;
+
+        if (dev->quirks & HAS_SWIZZLES) {
+                default_vec1_swizzle = panfrost_get_default_swizzle(1);
+                default_vec2_swizzle = panfrost_get_default_swizzle(2);
+                default_vec4_swizzle = panfrost_get_default_swizzle(4);
+        } else {
+                default_vec1_swizzle = panfrost_bifrost_swizzle(1);
+                default_vec2_swizzle = panfrost_bifrost_swizzle(2);
+                default_vec4_swizzle = panfrost_bifrost_swizzle(4);
+        }
 
         /* Record the varying mapping for the command stream's bookkeeping */
 
@@ -227,7 +277,7 @@ panfrost_shader_compile(struct panfrost_context *ctx,
                 struct mali_attr_meta v = {
                         .format = p_varying_type[i],
                         .swizzle = default_vec4_swizzle,
-                        .unknown1 = 0x2,
+                        .unknown1 = dev->quirks & IS_BIFROST ? 0x0 : 0x2,
                 };
 
                 /* Check for special cases, otherwise assume general varying */

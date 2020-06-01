@@ -280,6 +280,20 @@ try_mask_partial_io(nir_shader *shader, nir_variable *var,
 }
 
 static void
+update_memory_written_for_deref(nir_shader *shader, nir_deref_instr *deref)
+{
+   switch (deref->mode) {
+   case nir_var_mem_ssbo:
+   case nir_var_mem_global:
+      shader->info.writes_memory = true;
+      break;
+   default:
+      /* Nothing to do. */
+      break;
+   }
+}
+
+static void
 gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader,
                       void *dead_ctx)
 {
@@ -290,8 +304,11 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader,
    /* fallthrough: quads with helper lanes only might be discarded entirely */
    case nir_intrinsic_discard:
    case nir_intrinsic_discard_if:
-      assert(shader->info.stage == MESA_SHADER_FRAGMENT);
-      shader->info.fs.uses_discard = true;
+      /* Freedreno uses the discard_if intrinsic to end GS invocations that
+       * don't produce a vertex, so we only set uses_discard if executing on
+       * a fragment shader. */
+      if (shader->info.stage == MESA_SHADER_FRAGMENT)
+         shader->info.fs.uses_discard = true;
       break;
 
    case nir_intrinsic_interp_deref_at_centroid:
@@ -323,6 +340,8 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader,
             }
          }
       }
+      if (instr->intrinsic == nir_intrinsic_store_deref)
+         update_memory_written_for_deref(shader, deref);
       break;
    }
 
@@ -375,6 +394,28 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader,
 
       break;
 
+   case nir_intrinsic_atomic_counter_inc:
+   case nir_intrinsic_atomic_counter_inc_deref:
+   case nir_intrinsic_atomic_counter_add:
+   case nir_intrinsic_atomic_counter_add_deref:
+   case nir_intrinsic_atomic_counter_pre_dec:
+   case nir_intrinsic_atomic_counter_pre_dec_deref:
+   case nir_intrinsic_atomic_counter_post_dec:
+   case nir_intrinsic_atomic_counter_post_dec_deref:
+   case nir_intrinsic_atomic_counter_min:
+   case nir_intrinsic_atomic_counter_min_deref:
+   case nir_intrinsic_atomic_counter_max:
+   case nir_intrinsic_atomic_counter_max_deref:
+   case nir_intrinsic_atomic_counter_and:
+   case nir_intrinsic_atomic_counter_and_deref:
+   case nir_intrinsic_atomic_counter_or:
+   case nir_intrinsic_atomic_counter_or_deref:
+   case nir_intrinsic_atomic_counter_xor:
+   case nir_intrinsic_atomic_counter_xor_deref:
+   case nir_intrinsic_atomic_counter_exchange:
+   case nir_intrinsic_atomic_counter_exchange_deref:
+   case nir_intrinsic_atomic_counter_comp_swap:
+   case nir_intrinsic_atomic_counter_comp_swap_deref:
    case nir_intrinsic_bindless_image_atomic_add:
    case nir_intrinsic_bindless_image_atomic_and:
    case nir_intrinsic_bindless_image_atomic_comp_swap:
@@ -466,6 +507,19 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader,
        * shared.
        */
       shader->info.writes_memory = true;
+      break;
+
+   case nir_intrinsic_deref_atomic_add:
+   case nir_intrinsic_deref_atomic_imin:
+   case nir_intrinsic_deref_atomic_umin:
+   case nir_intrinsic_deref_atomic_imax:
+   case nir_intrinsic_deref_atomic_umax:
+   case nir_intrinsic_deref_atomic_and:
+   case nir_intrinsic_deref_atomic_or:
+   case nir_intrinsic_deref_atomic_xor:
+   case nir_intrinsic_deref_atomic_exchange:
+   case nir_intrinsic_deref_atomic_comp_swap:
+      update_memory_written_for_deref(shader, nir_src_as_deref(instr->src[0]));
       break;
 
    default:

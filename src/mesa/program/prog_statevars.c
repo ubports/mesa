@@ -33,7 +33,7 @@
 #include "main/glheader.h"
 #include "main/context.h"
 #include "main/blend.h"
-#include "util/imports.h"
+
 #include "main/macros.h"
 #include "main/mtypes.h"
 #include "main/fbobject.h"
@@ -440,10 +440,10 @@ _mesa_fetch_state(struct gl_context *ctx, const gl_state_index16 state[],
             if(ctx->Light._ClampVertexColor &&
                (idx == VERT_ATTRIB_COLOR0 ||
                 idx == VERT_ATTRIB_COLOR1)) {
-               value[0] = CLAMP(ctx->Current.Attrib[idx][0], 0.0f, 1.0f);
-               value[1] = CLAMP(ctx->Current.Attrib[idx][1], 0.0f, 1.0f);
-               value[2] = CLAMP(ctx->Current.Attrib[idx][2], 0.0f, 1.0f);
-               value[3] = CLAMP(ctx->Current.Attrib[idx][3], 0.0f, 1.0f);
+               value[0] = SATURATE(ctx->Current.Attrib[idx][0]);
+               value[1] = SATURATE(ctx->Current.Attrib[idx][1]);
+               value[2] = SATURATE(ctx->Current.Attrib[idx][2]);
+               value[3] = SATURATE(ctx->Current.Attrib[idx][3]);
             }
             else
                COPY_4V(value, ctx->Current.Attrib[idx]);
@@ -451,10 +451,10 @@ _mesa_fetch_state(struct gl_context *ctx, const gl_state_index16 state[],
          return;
 
       case STATE_NORMAL_SCALE:
-         ASSIGN_4V(value, 
-                   ctx->_ModelViewInvScale, 
-                   ctx->_ModelViewInvScale, 
-                   ctx->_ModelViewInvScale, 
+         ASSIGN_4V(value,
+                   ctx->_ModelViewInvScale,
+                   ctx->_ModelViewInvScale,
+                   ctx->_ModelViewInvScale,
                    1);
          return;
 
@@ -613,7 +613,7 @@ _mesa_fetch_state(struct gl_context *ctx, const gl_state_index16 state[],
          }
          return;
 
-      /* XXX: make sure new tokens added here are also handled in the 
+      /* XXX: make sure new tokens added here are also handled in the
        * _mesa_program_state_flags() switch, below.
        */
       default:

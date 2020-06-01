@@ -55,7 +55,7 @@
 static void llvmpipe_destroy( struct pipe_context *pipe )
 {
    struct llvmpipe_context *llvmpipe = llvmpipe_context( pipe );
-   uint i, j;
+   uint i;
 
    lp_print_counters();
 
@@ -80,21 +80,18 @@ static void llvmpipe_destroy( struct pipe_context *pipe )
 
    pipe_surface_reference(&llvmpipe->framebuffer.zsbuf, NULL);
 
-   for (i = 0; i < ARRAY_SIZE(llvmpipe->sampler_views[0]); i++) {
-      pipe_sampler_view_reference(&llvmpipe->sampler_views[PIPE_SHADER_FRAGMENT][i], NULL);
-   }
-
-   for (i = 0; i < ARRAY_SIZE(llvmpipe->sampler_views[0]); i++) {
-      pipe_sampler_view_reference(&llvmpipe->sampler_views[PIPE_SHADER_VERTEX][i], NULL);
-   }
-
-   for (i = 0; i < ARRAY_SIZE(llvmpipe->sampler_views[0]); i++) {
-      pipe_sampler_view_reference(&llvmpipe->sampler_views[PIPE_SHADER_GEOMETRY][i], NULL);
-   }
-
-   for (i = 0; i < ARRAY_SIZE(llvmpipe->constants); i++) {
-      for (j = 0; j < ARRAY_SIZE(llvmpipe->constants[i]); j++) {
-         pipe_resource_reference(&llvmpipe->constants[i][j].buffer, NULL);
+   for (enum pipe_shader_type s = PIPE_SHADER_VERTEX; s < PIPE_SHADER_TYPES; s++) {
+      for (i = 0; i < ARRAY_SIZE(llvmpipe->sampler_views[0]); i++) {
+         pipe_sampler_view_reference(&llvmpipe->sampler_views[s][i], NULL);
+      }
+      for (i = 0; i < LP_MAX_TGSI_SHADER_IMAGES; i++) {
+         pipe_resource_reference(&llvmpipe->images[s][i].resource, NULL);
+      }
+      for (i = 0; i < LP_MAX_TGSI_SHADER_BUFFERS; i++) {
+         pipe_resource_reference(&llvmpipe->ssbos[s][i].buffer, NULL);
+      }
+      for (i = 0; i < ARRAY_SIZE(llvmpipe->constants[s]); i++) {
+         pipe_resource_reference(&llvmpipe->constants[s][i].buffer, NULL);
       }
    }
 
@@ -134,6 +131,12 @@ llvmpipe_render_condition(struct pipe_context *pipe,
    llvmpipe->render_cond_cond = condition;
 }
 
+static void
+llvmpipe_texture_barrier(struct pipe_context *pipe, unsigned flags)
+{
+   llvmpipe_flush(pipe, NULL, __FUNCTION__);
+}
+
 struct pipe_context *
 llvmpipe_create_context(struct pipe_screen *screen, void *priv,
                         unsigned flags)
@@ -162,6 +165,7 @@ llvmpipe_create_context(struct pipe_screen *screen, void *priv,
    llvmpipe->pipe.set_framebuffer_state = llvmpipe_set_framebuffer_state;
    llvmpipe->pipe.clear = llvmpipe_clear;
    llvmpipe->pipe.flush = do_flush;
+   llvmpipe->pipe.texture_barrier = llvmpipe_texture_barrier;
 
    llvmpipe->pipe.render_condition = llvmpipe_render_condition;
 

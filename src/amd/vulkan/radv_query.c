@@ -1265,7 +1265,7 @@ radv_query_pool_needs_gds(struct radv_device *device,
 	 * TODO: fix use of NGG GS and non-NGG GS inside the same begin/end
 	 * query.
 	 */
-	return device->physical_device->use_ngg &&
+	return device->physical_device->use_ngg_gs &&
 	       (pool->pipeline_stats_mask & VK_QUERY_PIPELINE_STATISTIC_GEOMETRY_SHADER_PRIMITIVES_BIT);
 }
 
@@ -1276,13 +1276,15 @@ VkResult radv_CreateQueryPool(
 	VkQueryPool*                                pQueryPool)
 {
 	RADV_FROM_HANDLE(radv_device, device, _device);
-	struct radv_query_pool *pool = vk_alloc2(&device->alloc, pAllocator,
+	struct radv_query_pool *pool = vk_alloc2(&device->vk.alloc, pAllocator,
 					       sizeof(*pool), 8,
 					       VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
 
 	if (!pool)
 		return vk_error(device->instance, VK_ERROR_OUT_OF_HOST_MEMORY);
 
+	vk_object_base_init(&device->vk, &pool->base,
+			    VK_OBJECT_TYPE_QUERY_POOL);
 
 	switch(pCreateInfo->queryType) {
 	case VK_QUERY_TYPE_OCCLUSION:
@@ -1313,7 +1315,7 @@ VkResult radv_CreateQueryPool(
 					     RADV_BO_PRIORITY_QUERY_POOL);
 
 	if (!pool->bo) {
-		vk_free2(&device->alloc, pAllocator, pool);
+		vk_free2(&device->vk.alloc, pAllocator, pool);
 		return vk_error(device->instance, VK_ERROR_OUT_OF_DEVICE_MEMORY);
 	}
 
@@ -1321,7 +1323,7 @@ VkResult radv_CreateQueryPool(
 
 	if (!pool->ptr) {
 		device->ws->buffer_destroy(pool->bo);
-		vk_free2(&device->alloc, pAllocator, pool);
+		vk_free2(&device->vk.alloc, pAllocator, pool);
 		return vk_error(device->instance, VK_ERROR_OUT_OF_DEVICE_MEMORY);
 	}
 
@@ -1341,7 +1343,9 @@ void radv_DestroyQueryPool(
 		return;
 
 	device->ws->buffer_destroy(pool->bo);
-	vk_free2(&device->alloc, pAllocator, pool);
+
+	vk_object_base_finish(&pool->base);
+	vk_free2(&device->vk.alloc, pAllocator, pool);
 }
 
 VkResult radv_GetQueryPoolResults(

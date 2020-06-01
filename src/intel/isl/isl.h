@@ -1683,6 +1683,10 @@ enum isl_format isl_format_rgb_to_rgba(enum isl_format rgb) ATTRIBUTE_CONST;
 enum isl_format isl_format_rgb_to_rgbx(enum isl_format rgb) ATTRIBUTE_CONST;
 enum isl_format isl_format_rgbx_to_rgba(enum isl_format rgb) ATTRIBUTE_CONST;
 
+union isl_color_value
+isl_color_value_swizzle_inv(union isl_color_value src,
+                            struct isl_swizzle swizzle);
+
 void isl_color_value_pack(const union isl_color_value *value,
                           enum isl_format format,
                           uint32_t *data_out);
@@ -1986,6 +1990,10 @@ isl_surf_init_s(const struct isl_device *dev,
 void
 isl_surf_get_tile_info(const struct isl_surf *surf,
                        struct isl_tile_info *tile_info);
+
+bool
+isl_surf_supports_ccs(const struct isl_device *dev,
+                      const struct isl_surf *surf);
 
 bool
 isl_surf_get_hiz_surf(const struct isl_device *dev,

@@ -338,40 +338,40 @@ bool can_reorder(Instruction* candidate)
    }
 }
 
-bool is_gs_or_done_sendmsg(Instruction *instr)
+bool is_gs_or_done_sendmsg(const Instruction *instr)
 {
    if (instr->opcode == aco_opcode::s_sendmsg) {
-      uint16_t imm = static_cast<SOPP_instruction*>(instr)->imm;
+      uint16_t imm = static_cast<const SOPP_instruction*>(instr)->imm;
       return (imm & sendmsg_id_mask) == _sendmsg_gs ||
              (imm & sendmsg_id_mask) == _sendmsg_gs_done;
    }
    return false;
 }
 
-bool is_done_sendmsg(Instruction *instr)
+bool is_done_sendmsg(const Instruction *instr)
 {
    if (instr->opcode == aco_opcode::s_sendmsg) {
-      uint16_t imm = static_cast<SOPP_instruction*>(instr)->imm;
+      uint16_t imm = static_cast<const SOPP_instruction*>(instr)->imm;
       return (imm & sendmsg_id_mask) == _sendmsg_gs_done;
    }
    return false;
 }
 
-barrier_interaction get_barrier_interaction(Instruction* instr)
+barrier_interaction get_barrier_interaction(const Instruction* instr)
 {
    switch (instr->format) {
    case Format::SMEM:
-      return static_cast<SMEM_instruction*>(instr)->barrier;
+      return static_cast<const SMEM_instruction*>(instr)->barrier;
    case Format::MUBUF:
-      return static_cast<MUBUF_instruction*>(instr)->barrier;
+      return static_cast<const MUBUF_instruction*>(instr)->barrier;
    case Format::MIMG:
-      return static_cast<MIMG_instruction*>(instr)->barrier;
+      return static_cast<const MIMG_instruction*>(instr)->barrier;
    case Format::MTBUF:
-      return static_cast<MTBUF_instruction*>(instr)->barrier;
+      return static_cast<const MTBUF_instruction*>(instr)->barrier;
    case Format::FLAT:
    case Format::GLOBAL:
    case Format::SCRATCH:
-      return static_cast<FLAT_instruction*>(instr)->barrier;
+      return static_cast<const FLAT_instruction*>(instr)->barrier;
    case Format::DS:
       return barrier_shared;
    case Format::SOPP:
@@ -484,7 +484,10 @@ HazardResult perform_hazard_query(hazard_query *query, Instruction *instr)
        instr->opcode == aco_opcode::s_setprio)
       return hazard_fail_unreorderable;
 
-   if (query->barrier_interaction && (query->barrier_interaction & parse_barrier(instr)))
+   barrier_interaction bar = parse_barrier(instr);
+   if (query->barrier_interaction && (query->barrier_interaction & bar))
+      return hazard_fail_barrier;
+   if (bar && query->barriers && (query->barriers & ~bar))
       return hazard_fail_barrier;
    if (query->barriers && (query->barriers & get_barrier_interaction(instr)))
       return hazard_fail_barrier;

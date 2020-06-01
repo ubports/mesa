@@ -152,6 +152,8 @@ create_jit_texture_type(struct gallivm_state *gallivm, const char *struct_name)
    elem_types[DRAW_JIT_TEXTURE_WIDTH]  =
    elem_types[DRAW_JIT_TEXTURE_HEIGHT] =
    elem_types[DRAW_JIT_TEXTURE_DEPTH] =
+   elem_types[DRAW_JIT_TEXTURE_NUM_SAMPLES] =
+   elem_types[DRAW_JIT_TEXTURE_SAMPLE_STRIDE] =
    elem_types[DRAW_JIT_TEXTURE_FIRST_LEVEL] =
    elem_types[DRAW_JIT_TEXTURE_LAST_LEVEL] = int32_type;
    elem_types[DRAW_JIT_TEXTURE_BASE] =
@@ -192,6 +194,12 @@ create_jit_texture_type(struct gallivm_state *gallivm, const char *struct_name)
    LP_CHECK_MEMBER_OFFSET(struct draw_jit_texture, mip_offsets,
                           target, texture_type,
                           DRAW_JIT_TEXTURE_MIP_OFFSETS);
+   LP_CHECK_MEMBER_OFFSET(struct draw_jit_texture, num_samples,
+                          target, texture_type,
+                          DRAW_JIT_TEXTURE_NUM_SAMPLES);
+   LP_CHECK_MEMBER_OFFSET(struct draw_jit_texture, sample_stride,
+                          target, texture_type,
+                          DRAW_JIT_TEXTURE_SAMPLE_STRIDE);
 
    LP_CHECK_STRUCT_SIZE(struct draw_jit_texture, target, texture_type);
 
@@ -252,7 +260,9 @@ create_jit_image_type(struct gallivm_state *gallivm, const char *struct_name)
    elem_types[DRAW_JIT_IMAGE_HEIGHT] =
    elem_types[DRAW_JIT_IMAGE_DEPTH] =
    elem_types[DRAW_JIT_IMAGE_ROW_STRIDE] =
-   elem_types[DRAW_JIT_IMAGE_IMG_STRIDE] = int32_type;
+   elem_types[DRAW_JIT_IMAGE_IMG_STRIDE] =
+   elem_types[DRAW_JIT_IMAGE_NUM_SAMPLES] =
+   elem_types[DRAW_JIT_IMAGE_SAMPLE_STRIDE] = int32_type;
    elem_types[DRAW_JIT_IMAGE_BASE] =
       LLVMPointerType(LLVMInt8TypeInContext(gallivm->context), 0);
 
@@ -278,6 +288,12 @@ create_jit_image_type(struct gallivm_state *gallivm, const char *struct_name)
    LP_CHECK_MEMBER_OFFSET(struct draw_jit_image, img_stride,
                           target, image_type,
                           DRAW_JIT_IMAGE_IMG_STRIDE);
+   LP_CHECK_MEMBER_OFFSET(struct draw_jit_image, num_samples,
+                          target, image_type,
+                          DRAW_JIT_IMAGE_NUM_SAMPLES);
+   LP_CHECK_MEMBER_OFFSET(struct draw_jit_image, sample_stride,
+                          target, image_type,
+                          DRAW_JIT_IMAGE_SAMPLE_STRIDE);
 
    LP_CHECK_STRUCT_SIZE(struct draw_jit_image, target, image_type);
 
@@ -2404,6 +2420,8 @@ draw_llvm_set_mapped_texture(struct draw_context *draw,
                              unsigned sview_idx,
                              uint32_t width, uint32_t height, uint32_t depth,
                              uint32_t first_level, uint32_t last_level,
+                             uint32_t num_samples,
+                             uint32_t sample_stride,
                              const void *base_ptr,
                              uint32_t row_stride[PIPE_MAX_TEXTURE_LEVELS],
                              uint32_t img_stride[PIPE_MAX_TEXTURE_LEVELS],
@@ -2440,6 +2458,8 @@ draw_llvm_set_mapped_texture(struct draw_context *draw,
    jit_tex->first_level = first_level;
    jit_tex->last_level = last_level;
    jit_tex->base = base_ptr;
+   jit_tex->num_samples = num_samples;
+   jit_tex->sample_stride = sample_stride;
 
    for (j = first_level; j <= last_level; j++) {
       jit_tex->mip_offsets[j] = mip_offsets[j];
@@ -2455,7 +2475,9 @@ draw_llvm_set_mapped_image(struct draw_context *draw,
                            uint32_t width, uint32_t height, uint32_t depth,
                            const void *base_ptr,
                            uint32_t row_stride,
-                           uint32_t img_stride)
+                           uint32_t img_stride,
+                           uint32_t num_samples,
+                           uint32_t sample_stride)
 {
    struct draw_jit_image *jit_image;
 
@@ -2488,6 +2510,8 @@ draw_llvm_set_mapped_image(struct draw_context *draw,
 
    jit_image->row_stride = row_stride;
    jit_image->img_stride = img_stride;
+   jit_image->num_samples = num_samples;
+   jit_image->sample_stride = sample_stride;
 }
 
 
@@ -3711,12 +3735,12 @@ draw_tes_llvm_generate(struct draw_llvm *llvm,
    LLVMContextRef context = gallivm->context;
    LLVMTypeRef int32_type = LLVMInt32TypeInContext(context);
    LLVMTypeRef flt_type = LLVMFloatTypeInContext(context);
-   LLVMTypeRef arg_types[9];
+   LLVMTypeRef arg_types[10];
    LLVMTypeRef func_type;
    LLVMValueRef variant_func;
    LLVMValueRef context_ptr;
    LLVMValueRef tess_coord[2], io_ptr, input_array, num_tess_coord;
-   LLVMValueRef tess_inner, tess_outer, prim_id;
+   LLVMValueRef tess_inner, tess_outer, prim_id, patch_vertices_in;
    LLVMBasicBlockRef block;
    LLVMBuilderRef builder;
    LLVMValueRef mask_val;
@@ -3750,6 +3774,7 @@ draw_tes_llvm_generate(struct draw_llvm *llvm,
    arg_types[6] = LLVMPointerType(flt_type, 0);
    arg_types[7] = LLVMPointerType(LLVMArrayType(flt_type, 4), 0);
    arg_types[8] = LLVMPointerType(LLVMArrayType(flt_type, 2), 0);
+   arg_types[9] = int32_type;
 
    func_type = LLVMFunctionType(int32_type, arg_types, ARRAY_SIZE(arg_types), 0);
    variant_func = LLVMAddFunction(gallivm->module, func_name, func_type);
@@ -3770,6 +3795,7 @@ draw_tes_llvm_generate(struct draw_llvm *llvm,
    tess_coord[1]             = LLVMGetParam(variant_func, 6);
    tess_outer                = LLVMGetParam(variant_func, 7);
    tess_inner                = LLVMGetParam(variant_func, 8);
+   patch_vertices_in         = LLVMGetParam(variant_func, 9);
 
    lp_build_name(context_ptr, "context");
    lp_build_name(input_array, "input");
@@ -3780,6 +3806,7 @@ draw_tes_llvm_generate(struct draw_llvm *llvm,
    lp_build_name(tess_coord[1], "tess_coord[1]");
    lp_build_name(tess_outer, "tess_outer");
    lp_build_name(tess_inner, "tess_inner");
+   lp_build_name(patch_vertices_in, "patch_vertices_in");
 
    tes_iface.base.fetch_vertex_input = draw_tes_llvm_fetch_vertex_input;
    tes_iface.base.fetch_patch_input = draw_tes_llvm_fetch_patch_input;
@@ -3815,6 +3842,8 @@ draw_tes_llvm_generate(struct draw_llvm *llvm,
    system_values.tess_inner = LLVMBuildLoad(builder, tess_inner, "");
 
    system_values.prim_id = lp_build_broadcast_scalar(&bldvec, prim_id);
+
+   system_values.vertices_in = lp_build_broadcast_scalar(&bldvec, patch_vertices_in);
    struct lp_build_loop_state lp_loop;
    lp_build_loop_begin(&lp_loop, gallivm, bld.zero);
    {

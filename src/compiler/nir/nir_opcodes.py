@@ -99,6 +99,7 @@ tbool8 = "bool8"
 tbool16 = "bool16"
 tbool32 = "bool32"
 tuint = "uint"
+tuint8 = "uint8"
 tuint16 = "uint16"
 tfloat16 = "float16"
 tfloat32 = "float32"
@@ -199,9 +200,9 @@ unop("fsign", tfloat, ("bit_size == 64 ? " +
 unop("isign", tint, "(src0 == 0) ? 0 : ((src0 > 0) ? 1 : -1)")
 unop("iabs", tint, "(src0 < 0) ? -src0 : src0")
 unop("fabs", tfloat, "fabs(src0)")
-unop("fsat", tfloat, ("bit_size == 64 ? " +
-                      "((src0 > 1.0) ? 1.0 : ((src0 <= 0.0) ? 0.0 : src0)) : " +
-                      "((src0 > 1.0f) ? 1.0f : ((src0 <= 0.0f) ? 0.0f : src0))"))
+unop("fsat", tfloat, ("fmin(fmax(src0, 0.0), 1.0)"))
+unop("fsat_signed", tfloat, ("fmin(fmax(src0, -1.0), 1.0)"))
+unop("fclamp_pos", tfloat, ("fmax(src0, 0.0)"))
 unop("frcp", tfloat, "bit_size == 64 ? 1.0 / src0 : 1.0f / src0")
 unop("frsq", tfloat, "bit_size == 64 ? 1.0 / sqrt(src0) : 1.0f / sqrtf(src0)")
 unop("fsqrt", tfloat, "bit_size == 64 ? sqrt(src0) : sqrtf(src0)")
@@ -357,6 +358,9 @@ dst.x = (src0.x <<  0) |
         (src0.w << 24);
 """)
 
+unop_horiz("pack_32_4x8", 1, tuint32, 4, tuint8,
+           "dst.x = src0.x | ((uint32_t)src0.y << 8) | ((uint32_t)src0.z << 16) | ((uint32_t)src0.w << 24);")
+
 unop_horiz("pack_32_2x16", 1, tuint32, 2, tuint16,
            "dst.x = src0.x | ((uint32_t)src0.y << 16);")
 
@@ -374,6 +378,9 @@ unop_horiz("unpack_64_4x16", 4, tuint16, 1, tuint64,
 
 unop_horiz("unpack_32_2x16", 2, tuint16, 1, tuint32,
            "dst.x = src0.x; dst.y = src0.x >> 16;")
+
+unop_horiz("unpack_32_4x8", 4, tuint8, 1, tuint32,
+           "dst.x = src0.x; dst.y = src0.x >> 8; dst.z = src0.x >> 16; dst.w = src0.x >> 24;")
 
 unop_horiz("unpack_half_2x16_flush_to_zero", 2, tfloat32, 1, tuint32, """
 dst.x = unpack_half_1x16_flush_to_zero((uint16_t)(src0.x & 0xffff));
@@ -457,12 +464,6 @@ for (unsigned bit = 0; bit < bit_size; bit++) {
    }
 }
 """)
-
-
-for i in range(1, 5):
-   for j in range(1, 5):
-      unop_horiz("fnoise{0}_{1}".format(i, j), i, tfloat, j, tfloat, "0.0f")
-
 
 # AMD_gcn_shader extended instructions
 unop_horiz("cube_face_coord", 2, tfloat32, 3, tfloat32, """
@@ -1143,3 +1144,11 @@ triop("imad24_ir3", tint32, _2src_commutative,
 # 24b multiply into 32b result (with sign extension)
 binop("imul24", tint32, _2src_commutative + associative,
       "(((int32_t)src0 << 8) >> 8) * (((int32_t)src1 << 8) >> 8)")
+
+# unsigned 24b multiply into 32b result plus 32b int
+triop("umad24", tuint32, _2src_commutative,
+      "(((uint32_t)src0 << 8) >> 8) * (((uint32_t)src1 << 8) >> 8) + src2")
+
+# unsigned 24b multiply into 32b result uint
+binop("umul24", tint32, _2src_commutative + associative,
+      "(((uint32_t)src0 << 8) >> 8) * (((uint32_t)src1 << 8) >> 8)")

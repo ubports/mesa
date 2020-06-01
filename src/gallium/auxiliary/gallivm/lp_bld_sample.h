@@ -98,6 +98,7 @@ enum lp_sampler_op_type {
 #define LP_SAMPLER_LOD_PROPERTY_MASK  (3 << 6)
 #define LP_SAMPLER_GATHER_COMP_SHIFT        8
 #define LP_SAMPLER_GATHER_COMP_MASK   (3 << 8)
+#define LP_SAMPLER_FETCH_MS          (1 << 10)
 
 struct lp_sampler_params
 {
@@ -109,6 +110,7 @@ struct lp_sampler_params
    LLVMValueRef thread_data_ptr;
    const LLVMValueRef *coords;
    const LLVMValueRef *offsets;
+   LLVMValueRef ms_index;
    LLVMValueRef lod;
    const struct lp_derivatives *derivs;
    LLVMValueRef *texel;
@@ -121,6 +123,7 @@ struct lp_sampler_size_query_params
    unsigned target;
    LLVMValueRef context_ptr;
    boolean is_sviewinfo;
+   bool samples_only;
    enum lp_sampler_lod_property lod_property;
    LLVMValueRef explicit_lod;
    LLVMValueRef *sizes_out;
@@ -142,6 +145,7 @@ struct lp_img_params
    LLVMValueRef context_ptr;
    LLVMValueRef thread_data_ptr;
    const LLVMValueRef *coords;
+   LLVMValueRef ms_index;
    LLVMValueRef indata[4];
    LLVMValueRef indata2[4];
    LLVMValueRef *outdata;
@@ -278,6 +282,20 @@ struct lp_sampler_dynamic_state
                   LLVMValueRef context_ptr,
                   unsigned texture_unit);
 
+   /** Obtain number of samples (returns int32) */
+   LLVMValueRef
+   (*num_samples)(const struct lp_sampler_dynamic_state *state,
+                  struct gallivm_state *gallivm,
+                  LLVMValueRef context_ptr,
+                  unsigned texture_unit);
+
+   /** Obtain multisample stride (returns int32) */
+   LLVMValueRef
+   (*sample_stride)(const struct lp_sampler_dynamic_state *state,
+                    struct gallivm_state *gallivm,
+                    LLVMValueRef context_ptr,
+                    unsigned texture_unit);
+
    /* These are callbacks for sampler state */
 
    /** Obtain texture min lod (returns float) */
@@ -351,6 +369,7 @@ struct lp_build_sample_context
    boolean no_quad_lod;
    boolean no_brilinear;
    boolean no_rho_approx;
+   boolean fetch_ms;
 
    /** regular scalar float type */
    struct lp_type float_type;
@@ -413,6 +432,7 @@ struct lp_build_sample_context
    LLVMValueRef base_ptr;
    LLVMValueRef mip_offsets;
    LLVMValueRef cache;
+   LLVMValueRef sample_stride;
 
    /** Integer vector with texture width, height, depth */
    LLVMValueRef int_size;

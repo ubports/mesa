@@ -50,10 +50,10 @@ fd6_context_destroy(struct pipe_context *pctx)
 
 	fd_context_destroy(pctx);
 
-	if (fd6_ctx->vsc_data)
-		fd_bo_del(fd6_ctx->vsc_data);
-	if (fd6_ctx->vsc_data2)
-		fd_bo_del(fd6_ctx->vsc_data2);
+	if (fd6_ctx->vsc_draw_strm)
+		fd_bo_del(fd6_ctx->vsc_draw_strm);
+	if (fd6_ctx->vsc_prim_strm)
+		fd_bo_del(fd6_ctx->vsc_prim_strm);
 	fd_bo_del(fd6_ctx->control_mem);
 
 	fd_context_cleanup_common_vbos(&fd6_ctx->base);
@@ -80,6 +80,49 @@ static const uint8_t primtypes[] = {
 		[PIPE_PRIM_PATCHES]                     = DI_PT_PATCHES0,
 		[PIPE_PRIM_MAX]                         = DI_PT_RECTLIST,  /* internal clear blits */
 };
+
+static void *
+fd6_vertex_state_create(struct pipe_context *pctx, unsigned num_elements,
+		const struct pipe_vertex_element *elements)
+{
+	struct fd_context *ctx = fd_context(pctx);
+
+	struct fd6_vertex_stateobj *state = CALLOC_STRUCT(fd6_vertex_stateobj);
+	memcpy(state->base.pipe, elements, sizeof(*elements) * num_elements);
+	state->base.num_elements = num_elements;
+	state->stateobj =
+		fd_ringbuffer_new_object(ctx->pipe, 4 * (num_elements * 2 + 1));
+	struct fd_ringbuffer *ring = state->stateobj;
+
+	OUT_PKT4(ring, REG_A6XX_VFD_DECODE(0), 2 * num_elements);
+	for (int32_t i = 0; i < num_elements; i++) {
+		const struct pipe_vertex_element *elem = &elements[i];
+		enum pipe_format pfmt = elem->src_format;
+		enum a6xx_format fmt = fd6_pipe2vtx(pfmt);
+		bool isint = util_format_is_pure_integer(pfmt);
+		debug_assert(fmt != FMT6_NONE);
+
+		OUT_RING(ring, A6XX_VFD_DECODE_INSTR_IDX(elem->vertex_buffer_index) |
+				A6XX_VFD_DECODE_INSTR_OFFSET(elem->src_offset) |
+				A6XX_VFD_DECODE_INSTR_FORMAT(fmt) |
+				COND(elem->instance_divisor, A6XX_VFD_DECODE_INSTR_INSTANCED) |
+				A6XX_VFD_DECODE_INSTR_SWAP(fd6_pipe2swap(pfmt)) |
+				A6XX_VFD_DECODE_INSTR_UNK30 |
+				COND(!isint, A6XX_VFD_DECODE_INSTR_FLOAT));
+		OUT_RING(ring, MAX2(1, elem->instance_divisor)); /* VFD_DECODE[j].STEP_RATE */
+	}
+
+	return state;
+}
+
+static void
+fd6_vertex_state_delete(struct pipe_context *pctx, void *hwcso)
+{
+	struct fd6_vertex_stateobj *so = hwcso;
+
+	fd_ringbuffer_del(so->stateobj);
+	FREE(hwcso);
+}
 
 struct pipe_context *
 fd6_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
@@ -135,6 +178,14 @@ PC_UNKNOWN_9805:
 		fd6_ctx->magic.PC_UNKNOWN_9805 = 0x1;
 		fd6_ctx->magic.SP_UNKNOWN_A0F8 = 0x1;
 		break;
+	case 650:
+		fd6_ctx->magic.RB_UNKNOWN_8E04_blit = 0x04100000;
+		fd6_ctx->magic.RB_CCU_CNTL_gmem = A6XX_RB_CCU_CNTL_OFFSET(0x114000) |
+										  A6XX_RB_CCU_CNTL_GMEM;
+		fd6_ctx->magic.RB_CCU_CNTL_bypass = A6XX_RB_CCU_CNTL_OFFSET(0x30000);
+		fd6_ctx->magic.PC_UNKNOWN_9805 = 0x2;
+		fd6_ctx->magic.SP_UNKNOWN_A0F8 = 0x2;
+		break;
 	default:
 		unreachable("missing magic config");
 	}
@@ -149,6 +200,7 @@ PC_UNKNOWN_9805:
 	pctx->create_blend_state = fd6_blend_state_create;
 	pctx->create_rasterizer_state = fd6_rasterizer_state_create;
 	pctx->create_depth_stencil_alpha_state = fd6_zsa_state_create;
+	pctx->create_vertex_elements_state = fd6_vertex_state_create;
 
 	fd6_draw_init(pctx);
 	fd6_compute_init(pctx);
@@ -167,6 +219,8 @@ PC_UNKNOWN_9805:
 
 	util_blitter_set_texture_multisample(fd6_ctx->base.blitter, true);
 
+	pctx->delete_vertex_elements_state = fd6_vertex_state_delete;
+
 	/* fd_context_init overwrites delete_rasterizer_state, so set this
 	 * here. */
 	pctx->delete_rasterizer_state = fd6_rasterizer_state_delete;
@@ -176,8 +230,8 @@ PC_UNKNOWN_9805:
 	/* initial sizes for VSC buffers (or rather the per-pipe sizes
 	 * which is used to derive entire buffer size:
 	 */
-	fd6_ctx->vsc_data_pitch = 0x440;
-	fd6_ctx->vsc_data2_pitch = 0x1040;
+	fd6_ctx->vsc_draw_strm_pitch = 0x440;
+	fd6_ctx->vsc_prim_strm_pitch = 0x1040;
 
 	fd6_ctx->control_mem = fd_bo_new(screen->dev, 0x1000,
 			DRM_FREEDRENO_GEM_TYPE_KMEM, "control");

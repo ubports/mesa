@@ -181,7 +181,8 @@ void ac_build_s_barrier(struct ac_llvm_context *ctx);
 void ac_build_optimization_barrier(struct ac_llvm_context *ctx,
 				   LLVMValueRef *pvgpr);
 
-LLVMValueRef ac_build_shader_clock(struct ac_llvm_context *ctx);
+LLVMValueRef ac_build_shader_clock(struct ac_llvm_context *ctx,
+				   nir_scope scope);
 
 LLVMValueRef ac_build_ballot(struct ac_llvm_context *ctx, LLVMValueRef value);
 LLVMValueRef ac_get_i1_sgpr_mask(struct ac_llvm_context *ctx,
@@ -561,6 +562,7 @@ struct ac_image_args {
 	LLVMValueRef derivs[6];
 	LLVMValueRef coords[4];
 	LLVMValueRef lod; // also used by ac_image_get_resinfo
+	LLVMValueRef min_lod;
 };
 
 LLVMValueRef ac_build_image_opcode(struct ac_llvm_context *ctx,
@@ -611,6 +613,7 @@ void ac_optimize_vs_outputs(struct ac_llvm_context *ac,
 			    LLVMValueRef main_fn,
 			    uint8_t *vs_output_param_offset,
 			    uint32_t num_outputs,
+			    uint32_t skip_output_mask,
 			    uint8_t *num_param_exports);
 void ac_init_exec_full_mask(struct ac_llvm_context *ctx);
 

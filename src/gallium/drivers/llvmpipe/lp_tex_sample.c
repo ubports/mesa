@@ -172,6 +172,8 @@ LP_LLVM_TEXTURE_MEMBER(base_ptr,   LP_JIT_TEXTURE_BASE, TRUE)
 LP_LLVM_TEXTURE_MEMBER(row_stride, LP_JIT_TEXTURE_ROW_STRIDE, FALSE)
 LP_LLVM_TEXTURE_MEMBER(img_stride, LP_JIT_TEXTURE_IMG_STRIDE, FALSE)
 LP_LLVM_TEXTURE_MEMBER(mip_offsets, LP_JIT_TEXTURE_MIP_OFFSETS, FALSE)
+LP_LLVM_TEXTURE_MEMBER(num_samples, LP_JIT_TEXTURE_NUM_SAMPLES, TRUE)
+LP_LLVM_TEXTURE_MEMBER(sample_stride, LP_JIT_TEXTURE_SAMPLE_STRIDE, TRUE)
 
 
 /**
@@ -311,6 +313,8 @@ LP_LLVM_IMAGE_MEMBER(depth,      LP_JIT_IMAGE_DEPTH, TRUE)
 LP_LLVM_IMAGE_MEMBER(base_ptr,   LP_JIT_IMAGE_BASE, TRUE)
 LP_LLVM_IMAGE_MEMBER(row_stride, LP_JIT_IMAGE_ROW_STRIDE, TRUE)
 LP_LLVM_IMAGE_MEMBER(img_stride, LP_JIT_IMAGE_IMG_STRIDE, TRUE)
+LP_LLVM_IMAGE_MEMBER(num_samples, LP_JIT_IMAGE_NUM_SAMPLES, TRUE)
+LP_LLVM_IMAGE_MEMBER(sample_stride, LP_JIT_IMAGE_SAMPLE_STRIDE, TRUE)
 
 #if LP_USE_TEXTURE_CACHE
 static LLVMValueRef
@@ -401,6 +405,8 @@ lp_llvm_sampler_soa_create(const struct lp_sampler_static_state *static_state)
    sampler->dynamic_state.base.row_stride = lp_llvm_texture_row_stride;
    sampler->dynamic_state.base.img_stride = lp_llvm_texture_img_stride;
    sampler->dynamic_state.base.mip_offsets = lp_llvm_texture_mip_offsets;
+   sampler->dynamic_state.base.num_samples = lp_llvm_texture_num_samples;
+   sampler->dynamic_state.base.sample_stride = lp_llvm_texture_sample_stride;
    sampler->dynamic_state.base.min_lod = lp_llvm_sampler_min_lod;
    sampler->dynamic_state.base.max_lod = lp_llvm_sampler_max_lod;
    sampler->dynamic_state.base.lod_bias = lp_llvm_sampler_lod_bias;
@@ -473,6 +479,8 @@ lp_llvm_image_soa_create(const struct lp_image_static_state *static_state)
    image->dynamic_state.base.base_ptr = lp_llvm_image_base_ptr;
    image->dynamic_state.base.row_stride = lp_llvm_image_row_stride;
    image->dynamic_state.base.img_stride = lp_llvm_image_img_stride;
+   image->dynamic_state.base.num_samples = lp_llvm_image_num_samples;
+   image->dynamic_state.base.sample_stride = lp_llvm_image_sample_stride;
 
    image->dynamic_state.static_state = static_state;
 

@@ -30,6 +30,7 @@
 #include "util/list.h"
 #include "util/u_range.h"
 #include "util/u_transfer_helper.h"
+#include "util/simple_mtx.h"
 
 #include "freedreno_batch.h"
 #include "freedreno_util.h"
@@ -49,6 +50,8 @@ struct fd_resource {
 	/* reference to the resource holding stencil data for a z32_s8 texture */
 	/* TODO rename to secondary or auxiliary? */
 	struct fd_resource *stencil;
+
+	simple_mtx_t lock;
 
 	/* bitmask of in-flight batches which reference this resource.  Note
 	 * that the batch doesn't hold reference to resources (but instead
@@ -70,6 +73,11 @@ struct fd_resource {
 
 	/* Sequence # incremented each time bo changes: */
 	uint16_t seqno;
+
+	/* bitmask of state this resource could potentially dirty when rebound,
+	 * see rebind_resource()
+	 */
+	enum fd_dirty_3d_state dirty;
 
 	/*
 	 * LRZ
@@ -111,6 +119,40 @@ pending(struct fd_resource *rsc, bool write)
 		return true;
 
 	return false;
+}
+
+static inline bool
+fd_resource_busy(struct fd_resource *rsc, unsigned op)
+{
+	return fd_bo_cpu_prep(rsc->bo, NULL, op | DRM_FREEDRENO_PREP_NOSYNC) != 0;
+}
+
+static inline void
+fd_resource_lock(struct fd_resource *rsc)
+{
+	simple_mtx_lock(&rsc->lock);
+}
+
+static inline void
+fd_resource_unlock(struct fd_resource *rsc)
+{
+	simple_mtx_unlock(&rsc->lock);
+}
+
+static inline void
+fd_resource_set_usage(struct pipe_resource *prsc, enum fd_dirty_3d_state usage)
+{
+	if (!prsc)
+		return;
+	struct fd_resource *rsc = fd_resource(prsc);
+	/* Bits are only ever ORed in, and we expect many set_usage() per
+	 * resource, so do the quick check outside of the lock.
+	 */
+	if (likely(rsc->dirty & usage))
+		return;
+	fd_resource_lock(rsc);
+	rsc->dirty |= usage;
+	fd_resource_unlock(rsc);
 }
 
 static inline bool
@@ -202,5 +244,23 @@ void fd_resource_resize(struct pipe_resource *prsc, uint32_t sz);
 void fd_resource_uncompress(struct fd_context *ctx, struct fd_resource *rsc);
 
 bool fd_render_condition_check(struct pipe_context *pctx);
+
+static inline bool
+fd_batch_references_resource(struct fd_batch *batch, struct fd_resource *rsc)
+{
+	return rsc->batch_mask & (1 << batch->idx);
+}
+
+static inline void
+fd_batch_resource_read(struct fd_batch *batch,
+		struct fd_resource *rsc)
+{
+	/* Fast path: if we hit this then we know we don't have anyone else
+	 * writing to it (since both _write and _read flush other writers), and
+	 * that we've already recursed for stencil.
+	 */
+	if (unlikely(!fd_batch_references_resource(batch, rsc)))
+		fd_batch_resource_read_slowpath(batch, rsc);
+}
 
 #endif /* FREEDRENO_RESOURCE_H_ */

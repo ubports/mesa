@@ -90,6 +90,7 @@ static const struct debug_named_value debug_options[] = {
 		{"notile",    FD_DBG_NOTILE, "Disable tiling for all internal buffers"},
 		{"layout",    FD_DBG_LAYOUT, "Dump resource layouts"},
 		{"nofp16",    FD_DBG_NOFP16, "Disable mediump precision lowering"},
+		{"nohw",      FD_DBG_NOHW,   "Disable submitting commands to the HW"},
 		DEBUG_NAMED_VALUE_END
 };
 
@@ -156,9 +157,10 @@ fd_screen_destroy(struct pipe_screen *pscreen)
 
 	slab_destroy_parent(&screen->transfer_pool);
 
-	mtx_destroy(&screen->lock);
+	simple_mtx_destroy(&screen->lock);
 
 	ralloc_free(screen->compiler);
+	ralloc_free(screen->live_batches);
 
 	free(screen->perfcntr_queries);
 	free(screen);
@@ -187,9 +189,6 @@ fd_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 	case PIPE_CAP_SEAMLESS_CUBE_MAP:
 	case PIPE_CAP_VERTEX_COLOR_UNCLAMPED:
 	case PIPE_CAP_QUADS_FOLLOW_PROVOKING_VERTEX_CONVENTION:
-	case PIPE_CAP_VERTEX_BUFFER_OFFSET_4BYTE_ALIGNED_ONLY:
-	case PIPE_CAP_VERTEX_BUFFER_STRIDE_4BYTE_ALIGNED_ONLY:
-	case PIPE_CAP_VERTEX_ELEMENT_SRC_OFFSET_4BYTE_ALIGNED_ONLY:
 	case PIPE_CAP_BUFFER_MAP_PERSISTENT_COHERENT:
 	case PIPE_CAP_STRING_MARKER:
 	case PIPE_CAP_MIXED_COLOR_DEPTH_BITS:
@@ -197,6 +196,11 @@ fd_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 	case PIPE_CAP_INVALIDATE_BUFFER:
 	case PIPE_CAP_RGB_OVERRIDE_DST_ALPHA_BLEND:
 		return 1;
+
+	case PIPE_CAP_VERTEX_BUFFER_OFFSET_4BYTE_ALIGNED_ONLY:
+	case PIPE_CAP_VERTEX_BUFFER_STRIDE_4BYTE_ALIGNED_ONLY:
+	case PIPE_CAP_VERTEX_ELEMENT_SRC_OFFSET_4BYTE_ALIGNED_ONLY:
+		return !is_a2xx(screen);
 
 	case PIPE_CAP_TGSI_FS_COORD_PIXEL_CENTER_INTEGER:
 		return is_a2xx(screen);
@@ -400,9 +404,15 @@ fd_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 
 	/* Texturing. */
 	case PIPE_CAP_MAX_TEXTURE_2D_SIZE:
-		return 1 << (MAX_MIP_LEVELS - 1);
+		if (is_a6xx(screen) || is_a5xx(screen) || is_a4xx(screen))
+			return 16384;
+		else
+			return 8192;
 	case PIPE_CAP_MAX_TEXTURE_CUBE_LEVELS:
-		return MAX_MIP_LEVELS;
+		if (is_a6xx(screen) || is_a5xx(screen) || is_a4xx(screen))
+			return 15;
+		else
+			return 14;
 	case PIPE_CAP_MAX_TEXTURE_3D_LEVELS:
 		return 11;
 
@@ -914,6 +924,7 @@ fd_screen_create(struct fd_device *dev, struct renderonly *ro)
 	case 330:
 		fd3_screen_init(pscreen);
 		break;
+	case 405:
 	case 420:
 	case 430:
 		fd4_screen_init(pscreen);
@@ -926,6 +937,7 @@ fd_screen_create(struct fd_device *dev, struct renderonly *ro)
 	case 618:
 	case 630:
 	case 640:
+	case 650:
 		fd6_screen_init(pscreen);
 		break;
 	default:
@@ -934,16 +946,18 @@ fd_screen_create(struct fd_device *dev, struct renderonly *ro)
 	}
 
 	if (screen->gpu_id >= 600) {
-		screen->gmem_alignw = 32;
-		screen->gmem_alignh = 32;
+		screen->gmem_alignw = 16;
+		screen->gmem_alignh = 4;
+		screen->tile_alignw = is_a650(screen) ? 96 : 32;
+		screen->tile_alignh = 32;
 		screen->num_vsc_pipes = 32;
 	} else if (screen->gpu_id >= 500) {
-		screen->gmem_alignw = 64;
-		screen->gmem_alignh = 32;
+		screen->gmem_alignw = screen->tile_alignw = 64;
+		screen->gmem_alignh = screen->tile_alignh = 32;
 		screen->num_vsc_pipes = 16;
 	} else {
-		screen->gmem_alignw = 32;
-		screen->gmem_alignh = 32;
+		screen->gmem_alignw = screen->tile_alignw = 32;
+		screen->gmem_alignh = screen->tile_alignh = 32;
 		screen->num_vsc_pipes = 8;
 	}
 
@@ -959,9 +973,14 @@ fd_screen_create(struct fd_device *dev, struct renderonly *ro)
 	if (fd_device_version(dev) >= FD_VERSION_UNLIMITED_CMDS)
 		screen->reorder = !(fd_mesa_debug & FD_DBG_INORDER);
 
+	if (BATCH_DEBUG)
+		screen->live_batches = _mesa_pointer_set_create(NULL);
+
 	fd_bc_init(&screen->batch_cache);
 
-	(void) mtx_init(&screen->lock, mtx_plain);
+	list_inithead(&screen->context_list);
+
+	(void) simple_mtx_init(&screen->lock, mtx_plain);
 
 	pscreen->destroy = fd_screen_destroy;
 	pscreen->get_param = fd_screen_get_param;

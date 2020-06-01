@@ -36,6 +36,8 @@
 #include "sfn_shader_fragment.h"
 #include "sfn_shader_geometry.h"
 #include "sfn_shader_compute.h"
+#include "sfn_shader_tcs.h"
+#include "sfn_shader_tess_eval.h"
 #include "sfn_nir_lower_fs_out_to_vector.h"
 #include "sfn_ir_to_assembly.h"
 
@@ -53,35 +55,35 @@ ShaderFromNir::ShaderFromNir():sh(nullptr),
 
 bool ShaderFromNir::lower(const nir_shader *shader, r600_pipe_shader *pipe_shader,
                           r600_pipe_shader_selector *sel, r600_shader_key& key,
-                          struct r600_shader* gs_shader)
+                          struct r600_shader* gs_shader, enum chip_class _chip_class)
 {
    sh = shader;
+   chip_class = _chip_class;
    assert(sh);
 
    switch (shader->info.stage) {
    case MESA_SHADER_VERTEX:
-      if (key.vs.as_es) {
-         sfn_log << SfnLog::trans << "Start VS for GS\n";
-         impl.reset(new VertexShaderFromNirForGS(pipe_shader, *sel, key, gs_shader));
-      } else if (key.vs.as_ls) {
-         sfn_log << "VS: next type TCS and TES not yet supported\n";
-         return false;
-      } else {
-         sfn_log << SfnLog::trans << "Start VS for FS\n";
-         impl.reset(new VertexShaderFromNirForFS(pipe_shader, *sel, key));
-      }
+      impl.reset(new VertexShaderFromNir(pipe_shader, *sel, key, gs_shader, chip_class));
+      break;
+   case MESA_SHADER_TESS_CTRL:
+      sfn_log << SfnLog::trans << "Start TCS\n";
+      impl.reset(new TcsShaderFromNir(pipe_shader, *sel, key, chip_class));
+      break;
+   case MESA_SHADER_TESS_EVAL:
+      sfn_log << SfnLog::trans << "Start TESS_EVAL\n";
+      impl.reset(new TEvalShaderFromNir(pipe_shader, *sel, key, gs_shader, chip_class));
       break;
    case MESA_SHADER_GEOMETRY:
       sfn_log << SfnLog::trans << "Start GS\n";
-      impl.reset(new GeometryShaderFromNir(pipe_shader, *sel, key));
+      impl.reset(new GeometryShaderFromNir(pipe_shader, *sel, key, chip_class));
       break;
    case MESA_SHADER_FRAGMENT:
       sfn_log << SfnLog::trans << "Start FS\n";
-      impl.reset(new FragmentShaderFromNir(*shader, pipe_shader->shader, *sel, key));
+      impl.reset(new FragmentShaderFromNir(*shader, pipe_shader->shader, *sel, key, chip_class));
       break;
    case MESA_SHADER_COMPUTE:
       sfn_log << SfnLog::trans << "Start CS\n";
-      impl.reset(new ComputeShaderFromNir(pipe_shader, *sel, key));
+      impl.reset(new ComputeShaderFromNir(pipe_shader, *sel, key, chip_class));
       break;
    default:
       return false;
@@ -290,7 +292,7 @@ bool ShaderFromNir::process_declaration()
    return true;
 }
 
-const std::vector<Instruction::Pointer>& ShaderFromNir::shader_ir() const
+const std::vector<InstructionBlock>& ShaderFromNir::shader_ir() const
 {
    assert(impl);
    return impl->m_output;
@@ -301,7 +303,7 @@ AssemblyFromShader::~AssemblyFromShader()
 {
 }
 
-bool AssemblyFromShader::lower(const std::vector<Instruction::Pointer>& ir)
+bool AssemblyFromShader::lower(const std::vector<InstructionBlock>& ir)
 {
    return do_lower(ir);
 }
@@ -412,7 +414,7 @@ r600_lower_ubo_to_align16_impl(nir_builder *b, nir_instr *instr, void *_options)
    load->num_components = const_address ? op->num_components : 4;
    load->src[0] = op->src[0];
    load->src[1] = nir_src_for_ssa(new_offset);
-   nir_intrinsic_set_align(load, nir_intrinsic_align(op), nir_intrinsic_align_offset(op));
+   nir_intrinsic_set_align(load, nir_intrinsic_align_mul(op), nir_intrinsic_align_offset(op));
 
    nir_ssa_dest_init(&load->instr, &load->dest, load->num_components, 32, NULL);
    nir_builder_instr_insert(b, &load->instr);
@@ -426,42 +428,37 @@ r600_lower_ubo_to_align16_impl(nir_builder *b, nir_instr *instr, void *_options)
     * because then we have to assume that any component can be the first one and we
     * have to pick the result manually. */
    nir_ssa_def *first_comp = nir_iand(b, nir_ishr(b, offset,  nir_imm_int(b, 2)),
-                                     nir_imm_int(b,3));
+                                      nir_imm_int(b,3));
 
-   const unsigned swz_000[4] = {0, 0, 0, 0};
-   nir_ssa_def *component_select = nir_ieq(b, nir_imm_ivec4(b, 0, 1, 2, 3),
-                                           nir_swizzle(b, first_comp, swz_000, 4));
-
-   const unsigned szw_0[1] = {0};
-   const unsigned szw_1[1] = {1};
-   const unsigned szw_2[1] = {2};
+   const unsigned swz_000[4] = {0, 0, 0};
+   nir_ssa_def *component_select = nir_ieq(b, r600_imm_ivec3(b, 0, 1, 2),
+                                           nir_swizzle(b, first_comp, swz_000, 3));
 
    if (op->num_components == 1) {
-      const unsigned szw_3[1] = {3};
-      nir_ssa_def *check0 = nir_bcsel(b, nir_swizzle(b, component_select, szw_0, 1),
-                                      nir_swizzle(b, &load->dest.ssa, szw_0, 1),
-                                      nir_swizzle(b, &load->dest.ssa, szw_3, 1));
-      nir_ssa_def *check1 = nir_bcsel(b, nir_swizzle(b, component_select, szw_1, 1),
-                                      nir_swizzle(b, &load->dest.ssa, szw_1, 1),
+      nir_ssa_def *check0 = nir_bcsel(b, nir_channel(b, component_select, 0),
+                                      nir_channel(b, &load->dest.ssa, 0),
+                                      nir_channel(b, &load->dest.ssa, 3));
+      nir_ssa_def *check1 = nir_bcsel(b, nir_channel(b, component_select, 1),
+                                      nir_channel(b, &load->dest.ssa, 1),
                                       check0);
-      return nir_bcsel(b, nir_swizzle(b, component_select, szw_2, 1),
-                       nir_swizzle(b, &load->dest.ssa, szw_2, 1),
+      return nir_bcsel(b, nir_channel(b, component_select, 2),
+                       nir_channel(b, &load->dest.ssa, 2),
                        check1);
    } else if (op->num_components == 2) {
       const unsigned szw_01[2] = {0, 1};
       const unsigned szw_12[2] = {1, 2};
       const unsigned szw_23[2] = {2, 3};
 
-      nir_ssa_def *check0 = nir_bcsel(b, nir_swizzle(b, component_select, szw_0, 1),
+      nir_ssa_def *check0 = nir_bcsel(b, nir_channel(b, component_select, 0),
                                       nir_swizzle(b, &load->dest.ssa, szw_01, 2),
                                       nir_swizzle(b, &load->dest.ssa, szw_23, 2));
-      return nir_bcsel(b, nir_swizzle(b, component_select, szw_1, 1),
+      return nir_bcsel(b, nir_channel(b, component_select, 1),
                                       nir_swizzle(b, &load->dest.ssa, szw_12, 2),
                                       check0);
    } else {
-      const unsigned szw_012[3] = {0, 1, 3};
+      const unsigned szw_012[3] = {0, 1, 2};
       const unsigned szw_123[3] = {1, 2, 3};
-      return nir_bcsel(b, nir_swizzle(b, component_select, szw_0, 1),
+      return nir_bcsel(b, nir_channel(b, component_select, 0),
                        nir_swizzle(b, &load->dest.ssa, szw_012, 3),
                        nir_swizzle(b, &load->dest.ssa, szw_123, 3));
    }
@@ -542,9 +539,6 @@ optimize_once(nir_shader *shader)
    NIR_PASS(progress, shader, nir_opt_conditional_discard);
    NIR_PASS(progress, shader, nir_opt_dce);
    NIR_PASS(progress, shader, nir_opt_undef);
-
-   NIR_PASS(progress, shader, nir_remove_dead_variables, nir_var_shader_in);
-   NIR_PASS(progress, shader, nir_remove_dead_variables,  nir_var_shader_out);
    return progress;
 }
 
@@ -601,13 +595,31 @@ int r600_shader_from_nir(struct r600_context *rctx,
       NIR_PASS_V(sel->nir, r600_lower_fs_out_to_vector);
 
    if (sel->nir->info.stage == MESA_SHADER_TESS_CTRL ||
-       sel->nir->info.stage == MESA_SHADER_TESS_EVAL)
-      NIR_PASS_V(sel->nir, nir_lower_io, nir_var_shader_in, r600_glsl_type_size,
-                 nir_lower_io_lower_64bit_to_32);
-
-   if (sel->nir->info.stage == MESA_SHADER_TESS_CTRL)
+       (sel->nir->info.stage == MESA_SHADER_VERTEX && key->vs.as_ls)) {
       NIR_PASS_V(sel->nir, nir_lower_io, nir_var_shader_out, r600_glsl_type_size,
                  nir_lower_io_lower_64bit_to_32);
+      NIR_PASS_V(sel->nir, r600_lower_tess_io, (pipe_prim_type)key->tcs.prim_mode);
+   }
+
+   if (sel->nir->info.stage == MESA_SHADER_TESS_CTRL ||
+       sel->nir->info.stage == MESA_SHADER_TESS_EVAL) {
+      NIR_PASS_V(sel->nir, nir_lower_io, nir_var_shader_in, r600_glsl_type_size,
+                 nir_lower_io_lower_64bit_to_32);
+   }
+
+   if (sel->nir->info.stage == MESA_SHADER_TESS_CTRL ||
+       sel->nir->info.stage == MESA_SHADER_TESS_EVAL ||
+       (sel->nir->info.stage == MESA_SHADER_VERTEX && key->vs.as_ls)) {
+      auto prim_type = sel->nir->info.stage == MESA_SHADER_TESS_CTRL ?
+                          key->tcs.prim_mode : sel->nir->info.tess.primitive_mode;
+      NIR_PASS_V(sel->nir, r600_lower_tess_io, static_cast<pipe_prim_type>(prim_type));
+   }
+
+
+   if (sel->nir->info.stage == MESA_SHADER_TESS_CTRL)
+      NIR_PASS_V(sel->nir, r600_append_tcs_TF_emission,
+                 (pipe_prim_type)key->tcs.prim_mode);
+
 
    const nir_function *func = reinterpret_cast<const nir_function *>(exec_list_get_head_const(&sel->nir->functions));
    bool optimize = func->impl->registers.length() == 0 && !has_saturate(func);
@@ -623,9 +635,13 @@ int r600_shader_from_nir(struct r600_context *rctx,
    if (optimize)
       while(optimize_once(sel->nir));
 
+   NIR_PASS_V(sel->nir, nir_remove_dead_variables, nir_var_shader_in);
+   NIR_PASS_V(sel->nir, nir_remove_dead_variables,  nir_var_shader_out);
+
+
    NIR_PASS_V(sel->nir, nir_lower_vars_to_scratch,
               nir_var_function_temp,
-              100,
+              40,
               r600_get_natural_size_align_bytes);
 
    while (optimize && optimize_once(sel->nir));
@@ -662,9 +678,9 @@ int r600_shader_from_nir(struct r600_context *rctx,
    struct r600_shader* gs_shader = nullptr;
    if (rctx->gs_shader)
       gs_shader = &rctx->gs_shader->current->shader;
+   r600_screen *rscreen = rctx->screen;
 
-   bool r = convert.lower(sel->nir, pipeshader, sel, *key, gs_shader);
-
+   bool r = convert.lower(sel->nir, pipeshader, sel, *key, gs_shader, rscreen->b.chip_class);
    if (!r || rctx->screen->b.debug_flags & DBG_ALL_SHADERS) {
       static int shnr = 0;
 
@@ -686,7 +702,6 @@ int r600_shader_from_nir(struct r600_context *rctx,
 
    auto shader = convert.shader();
 
-   r600_screen *rscreen = rctx->screen;
    r600_bytecode_init(&pipeshader->shader.bc, rscreen->b.chip_class, rscreen->b.family,
                       rscreen->has_compressed_msaa_texturing);
 

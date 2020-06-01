@@ -63,7 +63,7 @@ anv_shader_bin_create(struct anv_device *device,
    anv_multialloc_add(&ma, &sampler_to_descriptor,
                            bind_map->sampler_count);
 
-   if (!anv_multialloc_alloc(&ma, &device->alloc,
+   if (!anv_multialloc_alloc(&ma, &device->vk.alloc,
                              VK_SYSTEM_ALLOCATION_SCOPE_DEVICE))
       return NULL;
 
@@ -128,7 +128,7 @@ anv_shader_bin_destroy(struct anv_device *device,
    assert(shader->ref_cnt == 0);
    anv_state_pool_free(&device->instruction_state_pool, shader->kernel);
    anv_state_pool_free(&device->dynamic_state_pool, shader->constant_data);
-   vk_free(&device->alloc, shader);
+   vk_free(&device->vk.alloc, shader);
 }
 
 static bool
@@ -282,6 +282,8 @@ anv_pipeline_cache_init(struct anv_pipeline_cache *cache,
                         struct anv_device *device,
                         bool cache_enabled)
 {
+   vk_object_base_init(&device->vk, &cache->base,
+                       VK_OBJECT_TYPE_PIPELINE_CACHE);
    cache->device = device;
    pthread_mutex_init(&cache->mutex, NULL);
 
@@ -318,6 +320,8 @@ anv_pipeline_cache_finish(struct anv_pipeline_cache *cache)
 
       _mesa_hash_table_destroy(cache->nir_cache, NULL);
    }
+
+   vk_object_base_finish(&cache->base);
 }
 
 static struct anv_shader_bin *
@@ -514,7 +518,7 @@ VkResult anv_CreatePipelineCache(
    assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO);
    assert(pCreateInfo->flags == 0);
 
-   cache = vk_alloc2(&device->alloc, pAllocator,
+   cache = vk_alloc2(&device->vk.alloc, pAllocator,
                        sizeof(*cache), 8,
                        VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
    if (cache == NULL)
@@ -546,7 +550,7 @@ void anv_DestroyPipelineCache(
 
    anv_pipeline_cache_finish(cache);
 
-   vk_free2(&device->alloc, pAllocator, cache);
+   vk_free2(&device->vk.alloc, pAllocator, cache);
 }
 
 VkResult anv_GetPipelineCacheData(

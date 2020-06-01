@@ -187,6 +187,7 @@ struct entry {
 struct vectorize_ctx {
    nir_variable_mode modes;
    nir_should_vectorize_mem_func callback;
+   nir_variable_mode robust_modes;
    struct list_head entries[nir_num_variable_modes];
    struct hash_table *loads[nir_num_variable_modes];
    struct hash_table *stores[nir_num_variable_modes];
@@ -198,20 +199,19 @@ static uint32_t hash_entry_key(const void *key_)
     * the order of the hash table walk is deterministic */
    struct entry_key *key = (struct entry_key*)key_;
 
-   uint32_t hash = _mesa_fnv32_1a_offset_bias;
+   uint32_t hash = 0;
    if (key->resource)
-      hash = _mesa_fnv32_1a_accumulate(hash, key->resource->index);
+      hash = XXH32(&key->resource->index, sizeof(key->resource->index), hash);
    if (key->var) {
-      hash = _mesa_fnv32_1a_accumulate(hash, key->var->index);
+      hash = XXH32(&key->var->index, sizeof(key->var->index), hash);
       unsigned mode = key->var->data.mode;
-      hash = _mesa_fnv32_1a_accumulate(hash, mode);
+      hash = XXH32(&mode, sizeof(mode), hash);
    }
 
    for (unsigned i = 0; i < key->offset_def_count; i++)
-      hash = _mesa_fnv32_1a_accumulate(hash, key->offset_defs[i]->index);
+      hash = XXH32(&key->offset_defs[i]->index, sizeof(key->offset_defs[i]->index), hash);
 
-   hash = _mesa_fnv32_1a_accumulate_block(
-      hash, key->offset_defs_mul, key->offset_def_count * sizeof(uint64_t));
+   hash = XXH32(key->offset_defs_mul, key->offset_def_count * sizeof(uint64_t), hash);
 
    return hash;
 }
@@ -1054,10 +1054,27 @@ check_for_aliasing(struct vectorize_ctx *ctx, struct entry *first, struct entry 
 }
 
 static bool
+check_for_robustness(struct vectorize_ctx *ctx, struct entry *low)
+{
+   nir_variable_mode mode = get_variable_mode(low);
+   if (mode & ctx->robust_modes) {
+      unsigned low_bit_size = get_bit_size(low);
+      unsigned low_size = low->intrin->num_components * low_bit_size;
+
+      /* don't attempt to vectorize accesses if the offset can overflow. */
+      /* TODO: handle indirect accesses. */
+      return low->offset_signed < 0 && low->offset_signed + low_size >= 0;
+   }
+
+   return false;
+}
+
+static bool
 is_strided_vector(const struct glsl_type *type)
 {
    if (glsl_type_is_vector(type)) {
-      return glsl_get_explicit_stride(type) !=
+      unsigned explicit_stride = glsl_get_explicit_stride(type);
+      return explicit_stride != 0 && explicit_stride !=
              type_scalar_size_bytes(glsl_get_array_element(type));
    } else {
       return false;
@@ -1074,6 +1091,9 @@ try_vectorize(nir_function_impl *impl, struct vectorize_ctx *ctx,
       return false;
 
    if (check_for_aliasing(ctx, first, second))
+      return false;
+
+   if (check_for_robustness(ctx, low))
       return false;
 
    /* we can only vectorize non-volatile loads/stores of the same type and with
@@ -1326,13 +1346,15 @@ process_block(nir_function_impl *impl, struct vectorize_ctx *ctx, nir_block *blo
 
 bool
 nir_opt_load_store_vectorize(nir_shader *shader, nir_variable_mode modes,
-                             nir_should_vectorize_mem_func callback)
+                             nir_should_vectorize_mem_func callback,
+                             nir_variable_mode robust_modes)
 {
    bool progress = false;
 
    struct vectorize_ctx *ctx = rzalloc(NULL, struct vectorize_ctx);
    ctx->modes = modes;
    ctx->callback = callback;
+   ctx->robust_modes = robust_modes;
 
    nir_index_vars(shader, NULL, modes);
 

@@ -27,7 +27,7 @@
 
 /* This head-up display module can draw transparent graphs on top of what
  * the app is rendering, visualizing various data like framerate, cpu load,
- * performance counters, etc. It can be hook up into any state tracker.
+ * performance counters, etc. It can be hook up into any gallium frontend.
  *
  * The HUD is controlled with the GALLIUM_HUD environment variable.
  * Set GALLIUM_HUD=help for more info.
@@ -1688,7 +1688,7 @@ hud_set_draw_context(struct hud_context *hud, struct cso_context *cso)
       };
 
       struct tgsi_token tokens[1000];
-      struct pipe_shader_state state;
+      struct pipe_shader_state state = {0};
 
       if (!tgsi_text_translate(fragment_shader_text, tokens, ARRAY_SIZE(tokens))) {
          assert(0);
@@ -1725,7 +1725,7 @@ hud_set_draw_context(struct hud_context *hud, struct cso_context *cso)
       };
 
       struct tgsi_token tokens[1000];
-      struct pipe_shader_state state;
+      struct pipe_shader_state state = {0};
       if (!tgsi_text_translate(vertex_shader_text, tokens, ARRAY_SIZE(tokens))) {
          assert(0);
          goto fail;

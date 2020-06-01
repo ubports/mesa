@@ -34,12 +34,21 @@
 #include "common/gen_decoder.h"
 
 #include "iris_fence.h"
+#include "iris_fine_fence.h"
+
+struct iris_context;
 
 /* The kernel assumes batchbuffers are smaller than 256kB. */
 #define MAX_BATCH_SIZE (256 * 1024)
 
+/* Terminating the batch takes either 4 bytes for MI_BATCH_BUFFER_END
+ * or 12 bytes for MI_BATCH_BUFFER_START (when chaining).  Plus another
+ * 24 bytes for the seqno write (using PIPE_CONTROL).
+ */
+#define BATCH_RESERVED 36
+
 /* Our target batch size - flush approximately at this point. */
-#define BATCH_SZ (64 * 1024)
+#define BATCH_SZ (64 * 1024 - BATCH_RESERVED)
 
 enum iris_batch_name {
    IRIS_BATCH_RENDER,
@@ -48,15 +57,8 @@ enum iris_batch_name {
 
 #define IRIS_BATCH_COUNT 2
 
-struct iris_address {
-   struct iris_bo *bo;
-   uint64_t offset;
-   bool write;
-};
-
 struct iris_batch {
    struct iris_screen *screen;
-   struct iris_vtable *vtbl;
    struct pipe_debug_callback *dbg;
    struct pipe_device_reset_callback *reset;
 
@@ -91,13 +93,13 @@ struct iris_batch {
    bool noop_enabled;
 
    /**
-    * A list of iris_syncpts associated with this batch.
+    * A list of iris_syncobjs associated with this batch.
     *
     * The first list entry will always be a signalling sync-point, indicating
     * that this batch has completed.  The others are likely to be sync-points
     * to wait on before executing the batch.
     */
-   struct util_dynarray syncpts;
+   struct util_dynarray syncobjs;
 
    /** A list of drm_i915_exec_fences to have execbuf signal or wait on */
    struct util_dynarray exec_fences;
@@ -105,8 +107,20 @@ struct iris_batch {
    /** The amount of aperture space (in bytes) used by all exec_bos */
    int aperture_space;
 
-   /** A sync-point for the last batch that was submitted. */
-   struct iris_syncpt *last_syncpt;
+   struct {
+      /** Uploader to use for sequence numbers */
+      struct u_upload_mgr *uploader;
+
+      /** GPU buffer and CPU map where our seqno's will be written. */
+      struct iris_state_ref ref;
+      uint32_t *map;
+
+      /** The sequence number to write the next time we add a fence. */
+      uint32_t next;
+   } fine_fences;
+
+   /** A seqno (and syncobj) for the last batch that was submitted. */
+   struct iris_fine_fence *last_fence;
 
    /** List of other batches which we might need to flush to use a BO */
    struct iris_batch *other_batches[IRIS_BATCH_COUNT - 1];
@@ -136,13 +150,7 @@ struct iris_batch {
    uint32_t last_aux_map_state;
 };
 
-void iris_init_batch(struct iris_batch *batch,
-                     struct iris_screen *screen,
-                     struct iris_vtable *vtbl,
-                     struct pipe_debug_callback *dbg,
-                     struct pipe_device_reset_callback *reset,
-                     struct hash_table_u64 *state_sizes,
-                     struct iris_batch *all_batches,
+void iris_init_batch(struct iris_context *ice,
                      enum iris_batch_name name,
                      int priority);
 void iris_chain_to_new_batch(struct iris_batch *batch);
@@ -214,30 +222,30 @@ iris_batch_emit(struct iris_batch *batch, const void *data, unsigned size)
 }
 
 /**
- * Get a pointer to the batch's signalling syncpt.  Does not refcount.
+ * Get a pointer to the batch's signalling syncobj.  Does not refcount.
  */
-static inline struct iris_syncpt *
-iris_batch_get_signal_syncpt(struct iris_batch *batch)
+static inline struct iris_syncobj *
+iris_batch_get_signal_syncobj(struct iris_batch *batch)
 {
-   /* The signalling syncpt is the first one in the list. */
-   struct iris_syncpt *syncpt =
-      ((struct iris_syncpt **) util_dynarray_begin(&batch->syncpts))[0];
-   return syncpt;
+   /* The signalling syncobj is the first one in the list. */
+   struct iris_syncobj *syncobj =
+      ((struct iris_syncobj **) util_dynarray_begin(&batch->syncobjs))[0];
+   return syncobj;
 }
 
 
 /**
- * Take a reference to the batch's signalling syncpt.
+ * Take a reference to the batch's signalling syncobj.
  *
  * Callers can use this to wait for the the current batch under construction
  * to complete (after flushing it).
  */
 static inline void
-iris_batch_reference_signal_syncpt(struct iris_batch *batch,
-                                   struct iris_syncpt **out_syncpt)
+iris_batch_reference_signal_syncobj(struct iris_batch *batch,
+                                   struct iris_syncobj **out_syncobj)
 {
-   struct iris_syncpt *syncpt = iris_batch_get_signal_syncpt(batch);
-   iris_syncpt_reference(batch->screen, out_syncpt, syncpt);
+   struct iris_syncobj *syncobj = iris_batch_get_signal_syncobj(batch);
+   iris_syncobj_reference(batch->screen, out_syncobj, syncobj);
 }
 
 /**

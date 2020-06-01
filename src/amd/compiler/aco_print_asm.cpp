@@ -5,6 +5,9 @@
 #include "ac_llvm_util.h"
 
 #include <llvm/ADT/StringRef.h>
+#if LLVM_VERSION_MAJOR >= 11
+#include <llvm/MC/MCDisassembler/MCDisassembler.h>
+#endif
 
 namespace aco {
 
@@ -92,7 +95,11 @@ void print_asm(Program *program, std::vector<uint32_t>& binary,
          referenced_blocks[succ] = true;
    }
 
+   #if LLVM_VERSION_MAJOR >= 11
+   std::vector<llvm::SymbolInfoTy> symbols;
+   #else
    std::vector<std::tuple<uint64_t, llvm::StringRef, uint8_t>> symbols;
+   #endif
    std::vector<std::array<char,16>> block_names;
    block_names.reserve(program->blocks.size());
    for (Block& block : program->blocks) {
@@ -137,9 +144,14 @@ void print_asm(Program *program, std::vector<uint32_t>& binary,
 
       size_t new_pos;
       const int align_width = 60;
-      if (!l && program->chip_class == GFX9 && ((binary[pos] & 0xffff8000) == 0xd1348000)) { /* not actually an invalid instruction */
-         out << std::left << std::setw(align_width) << std::setfill(' ') << "\tv_add_u32_e64 + clamp";
-         new_pos = pos + 2;
+      if (!l &&
+          ((program->chip_class >= GFX9 && (binary[pos] & 0xffff8000) == 0xd1348000) || /* v_add_u32_e64 + clamp */
+           (program->chip_class >= GFX10 && (binary[pos] & 0xffff8000) == 0xd7038000) || /* v_add_u16_e64 + clamp */
+           (program->chip_class <= GFX9 && (binary[pos] & 0xffff8000) == 0xd1268000)) /* v_add_u16_e64 + clamp */) {
+         out << std::left << std::setw(align_width) << std::setfill(' ') << "\tinteger addition + clamp";
+         bool has_literal = program->chip_class >= GFX10 &&
+                            (((binary[pos+1] & 0x1ff) == 0xff) || (((binary[pos+1] >> 9) & 0x1ff) == 0xff));
+         new_pos = pos + 2 + has_literal;
       } else if (program->chip_class == GFX10 && l == 4 && ((binary[pos] & 0xfe0001ff) == 0x020000f9)) {
          out << std::left << std::setw(align_width) << std::setfill(' ') << "\tv_cndmask_b32 + sdwa";
          new_pos = pos + 2;

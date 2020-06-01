@@ -217,7 +217,7 @@ static void *si_create_compute_state(struct pipe_context *ctx, const struct pipe
    if (cso->ir_type != PIPE_SHADER_IR_NATIVE) {
       if (cso->ir_type == PIPE_SHADER_IR_TGSI) {
          program->ir_type = PIPE_SHADER_IR_NIR;
-         sel->nir = tgsi_to_nir(cso->prog, ctx->screen);
+         sel->nir = tgsi_to_nir(cso->prog, ctx->screen, true);
       } else {
          assert(cso->ir_type == PIPE_SHADER_IR_NIR);
          sel->nir = (struct nir_shader *)cso->prog;
@@ -805,6 +805,15 @@ static void si_launch_grid(struct pipe_context *ctx, const struct pipe_grid_info
    }
 
    si_need_gfx_cs_space(sctx);
+
+   /* If we're using a secure context, determine if cs must be secure or not */
+   if (unlikely(sctx->ws->ws_is_secure(sctx->ws))) {
+      bool secure = si_compute_resources_check_encrypted(sctx);
+      if (secure != sctx->ws->cs_is_secure(sctx->gfx_cs)) {
+         si_flush_gfx_cs(sctx, RADEON_FLUSH_ASYNC_START_NEXT_GFX_IB_NOW, NULL);
+         sctx->ws->cs_set_secure(sctx->gfx_cs, secure);
+      }
+   }
 
    if (sctx->bo_list_add_all_compute_resources)
       si_compute_resources_add_all_to_bo_list(sctx);

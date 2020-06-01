@@ -49,7 +49,6 @@ ignore_dep(struct ir3_instruction *assigner,
 
 	if (assigner->barrier_class & IR3_BARRIER_ARRAY_W) {
 		struct ir3_register *dst = assigner->regs[0];
-		struct ir3_register *src;
 
 		debug_assert(dst->flags & IR3_REG_ARRAY);
 
@@ -123,7 +122,7 @@ count_instruction(struct ir3_instruction *n)
 	 * be eliminated later in resolve_jumps().. really should do that
 	 * earlier so we don't have this constraint.
 	 */
-	return is_alu(n) || (is_flow(n) && (n->opc != OPC_JUMP) && (n->opc != OPC_BR));
+	return is_alu(n) || (is_flow(n) && (n->opc != OPC_JUMP) && (n->opc != OPC_B));
 }
 
 /**
@@ -198,7 +197,6 @@ delay_calc_srcn(struct ir3_block *block,
 	unsigned delay = 0;
 
 	if (is_meta(assigner)) {
-		struct ir3_register *src;
 		foreach_src (src, assigner) {
 			unsigned d;
 
@@ -320,7 +318,6 @@ ir3_delay_calc(struct ir3_block *block, struct ir3_instruction *instr,
 		bool soft, bool pred)
 {
 	unsigned delay = 0;
-	struct ir3_register *src;
 
 	foreach_src_n (src, i, instr) {
 		unsigned d = 0;

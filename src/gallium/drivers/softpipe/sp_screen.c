@@ -37,7 +37,7 @@
 #include "pipe/p_screen.h"
 #include "draw/draw_context.h"
 
-#include "state_tracker/sw_winsys.h"
+#include "frontend/sw_winsys.h"
 #include "tgsi/tgsi_exec.h"
 
 #include "sp_texture.h"
@@ -451,7 +451,7 @@ softpipe_is_format_supported( struct pipe_screen *screen,
       /*
        * Although possible, it is unnatural to render into compressed or YUV
        * surfaces. So disable these here to avoid going into weird paths
-       * inside the state trackers.
+       * inside gallium frontends.
        */
       if (format_desc->block.width != 1 ||
           format_desc->block.height != 1)

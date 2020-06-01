@@ -801,6 +801,9 @@ iris_resource_create_for_buffer(struct pipe_screen *pscreen,
       return NULL;
    }
 
+   if (templ->bind & PIPE_BIND_SHARED)
+      iris_bo_make_external(res->bo);
+
    return &res->base;
 }
 
@@ -923,6 +926,9 @@ iris_resource_create_with_modifiers(struct pipe_screen *pscreen,
          goto fail;
       map_aux_addresses(screen, res);
    }
+
+   if (templ->bind & PIPE_BIND_SHARED)
+      iris_bo_make_external(res->bo);
 
    return &res->base;
 
@@ -1307,7 +1313,7 @@ iris_invalidate_resource(struct pipe_context *ctx,
    /* Rebind the buffer, replacing any state referring to the old BO's
     * address, and marking state dirty so it's reemitted.
     */
-   ice->vtbl.rebind_buffer(ice, res);
+   screen->vtbl.rebind_buffer(ice, res);
 
    util_range_set_empty(&res->valid_buffer_range);
 
@@ -1803,6 +1809,9 @@ iris_transfer_map(struct pipe_context *ctx,
    struct iris_context *ice = (struct iris_context *)ctx;
    struct iris_resource *res = (struct iris_resource *)resource;
    struct isl_surf *surf = &res->surf;
+
+   if (iris_resource_unfinished_aux_import(res))
+      iris_resource_finish_aux_import(ctx->screen, res);
 
    if (usage & PIPE_TRANSFER_DISCARD_WHOLE_RESOURCE) {
       /* Replace the backing storage with a fresh buffer for non-async maps */

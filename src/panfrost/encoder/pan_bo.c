@@ -90,6 +90,11 @@ panfrost_bo_free(struct panfrost_bo *bo)
         struct drm_gem_close gem_close = { .handle = bo->gem_handle };
         int ret;
 
+        if (bo->cpu && os_munmap((void *) (uintptr_t)bo->cpu, bo->size)) {
+                perror("munmap");
+                abort();
+        }
+
         ret = drmIoctl(bo->dev->fd, DRM_IOCTL_GEM_CLOSE, &gem_close);
         if (ret) {
                 fprintf(stderr, "DRM_IOCTL_GEM_CLOSE failed: %m\n");
@@ -270,7 +275,7 @@ panfrost_bo_cache_put(struct panfrost_bo *bo)
                 return false;
 
         pthread_mutex_lock(&dev->bo_cache.lock);
-        struct list_head *bucket = pan_bucket(dev, bo->size);
+        struct list_head *bucket = pan_bucket(dev, MAX2(bo->size, 4096));
         struct drm_panfrost_madvise madv;
         struct timespec time;
 
@@ -342,20 +347,6 @@ panfrost_bo_mmap(struct panfrost_bo *bo)
                 fprintf(stderr, "mmap failed: %p %m\n", bo->cpu);
                 assert(0);
         }
-}
-
-static void
-panfrost_bo_munmap(struct panfrost_bo *bo)
-{
-        if (!bo->cpu)
-                return;
-
-        if (os_munmap((void *) (uintptr_t)bo->cpu, bo->size)) {
-                perror("munmap");
-                abort();
-        }
-
-        bo->cpu = NULL;
 }
 
 struct panfrost_bo *
@@ -436,9 +427,6 @@ panfrost_bo_unreference(struct panfrost_bo *bo)
         if (p_atomic_read(&bo->refcnt) == 0) {
                 _mesa_set_remove_key(bo->dev->active_bos, bo);
 
-                /* When the reference count goes to zero, we need to cleanup */
-                panfrost_bo_munmap(bo);
-
                 /* Rather than freeing the BO now, we'll cache the BO for later
                  * allocations if we're allowed to.
                  */
@@ -482,7 +470,7 @@ panfrost_bo_import(struct panfrost_device *dev, int fd)
                 panfrost_bo_mmap(newbo);
         } else {
                 ralloc_free(newbo);
-                /* bo->refcnt != 0 can happen if the BO
+                /* bo->refcnt == 0 can happen if the BO
                  * was being released but panfrost_bo_import() acquired the
                  * lock before panfrost_bo_unreference(). In that case, refcnt
                  * is 0 and we can't use panfrost_bo_reference() directly, we
@@ -492,7 +480,7 @@ panfrost_bo_import(struct panfrost_device *dev, int fd)
                  * make sure the object is not freed if panfrost_bo_import()
                  * acquired it in the meantime.
                  */
-                if (p_atomic_read(&bo->refcnt))
+                if (p_atomic_read(&bo->refcnt) == 0)
                         p_atomic_set(&newbo->refcnt, 1);
                 else
                         panfrost_bo_reference(bo);

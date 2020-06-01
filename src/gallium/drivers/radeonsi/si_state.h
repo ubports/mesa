@@ -485,7 +485,7 @@ struct si_buffer_resources {
 void si_set_mutable_tex_desc_fields(struct si_screen *sscreen, struct si_texture *tex,
                                     const struct legacy_surf_level *base_level_info,
                                     unsigned base_level, unsigned first_level, unsigned block_width,
-                                    bool is_stencil, uint32_t *state);
+                                    bool is_stencil, bool force_dcc_off, uint32_t *state);
 void si_update_ps_colorbuf0_slot(struct si_context *sctx);
 void si_get_pipe_constant_buffer(struct si_context *sctx, uint shader, uint slot,
                                  struct pipe_constant_buffer *cbuf);
@@ -501,7 +501,10 @@ bool si_upload_compute_shader_descriptors(struct si_context *sctx);
 void si_release_all_descriptors(struct si_context *sctx);
 void si_gfx_resources_add_all_to_bo_list(struct si_context *sctx);
 void si_compute_resources_add_all_to_bo_list(struct si_context *sctx);
-void si_all_descriptors_begin_new_cs(struct si_context *sctx);
+bool si_gfx_resources_check_encrypted(struct si_context *sctx);
+bool si_compute_resources_check_encrypted(struct si_context *sctx);
+void si_shader_pointers_mark_dirty(struct si_context *sctx);
+void si_add_all_descriptors_to_bo_list(struct si_context *sctx);
 void si_upload_const_buffer(struct si_context *sctx, struct si_resource **buf, const uint8_t *ptr,
                             unsigned size, uint32_t *const_offset);
 void si_update_all_texture_descriptors(struct si_context *sctx);

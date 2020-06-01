@@ -33,7 +33,7 @@
 #include <stdio.h>
 
 #include <xf86drm.h>
-#include <amdgpu_drm.h>
+#include "drm-uapi/amdgpu_drm.h"
 
 #include <amdgpu.h>
 
@@ -588,6 +588,7 @@ bool ac_query_gpu_info(int fd, void *dev_p,
 			        info->family == CHIP_RENOIR);
 
 	info->has_out_of_order_rast = info->chip_class >= GFX8 &&
+				      info->chip_class <= GFX9 &&
 				      info->max_se >= 2;
 
 	/* Whether chips support double rate packed math instructions. */
@@ -618,19 +619,32 @@ bool ac_query_gpu_info(int fd, void *dev_p,
 	info->num_good_compute_units = 0;
 	for (i = 0; i < info->max_se; i++) {
 		for (j = 0; j < info->max_sh_per_se; j++) {
-			info->cu_mask[i][j] = amdinfo->cu_bitmap[i][j];
+			/*
+			 * The cu bitmap in amd gpu info structure is
+			 * 4x4 size array, and it's usually suitable for Vega
+			 * ASICs which has 4*2 SE/SH layout.
+			 * But for Arcturus, SE/SH layout is changed to 8*1.
+			 * To mostly reduce the impact, we make it compatible
+			 * with current bitmap array as below:
+			 *    SE4,SH0 --> cu_bitmap[0][1]
+			 *    SE5,SH0 --> cu_bitmap[1][1]
+			 *    SE6,SH0 --> cu_bitmap[2][1]
+			 *    SE7,SH0 --> cu_bitmap[3][1]
+			 */
+			info->cu_mask[i%4][j+i/4] = amdinfo->cu_bitmap[i%4][j+i/4];
 			info->num_good_compute_units +=
 				util_bitcount(info->cu_mask[i][j]);
 		}
 	}
-	info->num_good_cu_per_sh = info->num_good_compute_units /
-				   (info->max_se * info->max_sh_per_se);
 
-	/* Round down to the nearest multiple of 2, because the hw can't
-	 * disable CUs. It can only disable whole WGPs (dual-CUs).
+	/* On GFX10, only whole WGPs (in units of 2 CUs) can be disabled,
+	 * and max - min <= 2.
 	 */
-	if (info->chip_class >= GFX10)
-		info->num_good_cu_per_sh -= info->num_good_cu_per_sh % 2;
+	unsigned cu_group = info->chip_class >= GFX10 ? 2 : 1;
+	info->max_good_cu_per_sa = DIV_ROUND_UP(info->num_good_compute_units,
+						(info->max_se * info->max_sh_per_se * cu_group)) * cu_group;
+	info->min_good_cu_per_sa = (info->num_good_compute_units /
+				    (info->max_se * info->max_sh_per_se * cu_group)) * cu_group;
 
 	memcpy(info->si_tile_mode_array, amdinfo->gb_tile_mode,
 		sizeof(amdinfo->gb_tile_mode));
@@ -647,21 +661,36 @@ bool ac_query_gpu_info(int fd, void *dev_p,
 
 	unsigned ib_align = 0;
 	ib_align = MAX2(ib_align, gfx.ib_start_alignment);
+	ib_align = MAX2(ib_align, gfx.ib_size_alignment);
 	ib_align = MAX2(ib_align, compute.ib_start_alignment);
+	ib_align = MAX2(ib_align, compute.ib_size_alignment);
 	ib_align = MAX2(ib_align, dma.ib_start_alignment);
+	ib_align = MAX2(ib_align, dma.ib_size_alignment);
 	ib_align = MAX2(ib_align, uvd.ib_start_alignment);
+	ib_align = MAX2(ib_align, uvd.ib_size_alignment);
 	ib_align = MAX2(ib_align, uvd_enc.ib_start_alignment);
+	ib_align = MAX2(ib_align, uvd_enc.ib_size_alignment);
 	ib_align = MAX2(ib_align, vce.ib_start_alignment);
+	ib_align = MAX2(ib_align, vce.ib_size_alignment);
 	ib_align = MAX2(ib_align, vcn_dec.ib_start_alignment);
+	ib_align = MAX2(ib_align, vcn_dec.ib_size_alignment);
 	ib_align = MAX2(ib_align, vcn_enc.ib_start_alignment);
+	ib_align = MAX2(ib_align, vcn_enc.ib_size_alignment);
 	ib_align = MAX2(ib_align, vcn_jpeg.ib_start_alignment);
+	ib_align = MAX2(ib_align, vcn_jpeg.ib_size_alignment);
+	/* GFX10 and maybe GFX9 need this alignment for cache coherency. */
+	if (info->chip_class >= GFX9)
+		ib_align = MAX2(ib_align, info->tcc_cache_line_size);
 	assert(ib_align);
-	info->ib_start_alignment = ib_align;
+	info->ib_alignment = ib_align;
 
-	if (info->drm_minor >= 31 &&
-	    (info->family == CHIP_RAVEN ||
-	     info->family == CHIP_RAVEN2 ||
-	     info->family == CHIP_RENOIR)) {
+        if ((info->drm_minor >= 31 &&
+             (info->family == CHIP_RAVEN ||
+              info->family == CHIP_RAVEN2 ||
+              info->family == CHIP_RENOIR)) ||
+            (info->drm_minor >= 34 &&
+             (info->family == CHIP_NAVI12 ||
+              info->family == CHIP_NAVI14))) {
 		if (info->num_render_backends == 1)
 			info->use_display_dcc_unaligned = true;
 		else
@@ -851,7 +880,7 @@ void ac_print_gpu_info(struct radeon_info *info)
 
 	printf("CP info:\n");
 	printf("    gfx_ib_pad_with_type2 = %i\n", info->gfx_ib_pad_with_type2);
-	printf("    ib_start_alignment = %u\n", info->ib_start_alignment);
+	printf("    ib_alignment = %u\n", info->ib_alignment);
 	printf("    me_fw_version = %i\n", info->me_fw_version);
 	printf("    me_fw_feature = %i\n", info->me_fw_feature);
 	printf("    pfp_fw_version = %i\n", info->pfp_fw_version);
@@ -894,7 +923,8 @@ void ac_print_gpu_info(struct radeon_info *info)
 	printf("Shader core info:\n");
 	printf("    max_shader_clock = %i\n", info->max_shader_clock);
 	printf("    num_good_compute_units = %i\n", info->num_good_compute_units);
-	printf("    num_good_cu_per_sh = %i\n", info->num_good_cu_per_sh);
+	printf("    max_good_cu_per_sa = %i\n", info->max_good_cu_per_sa);
+	printf("    min_good_cu_per_sa = %i\n", info->min_good_cu_per_sa);
 	printf("    max_se = %i\n", info->max_se);
 	printf("    max_sh_per_se = %i\n", info->max_sh_per_se);
 	printf("    max_wave64_per_simd = %i\n", info->max_wave64_per_simd);

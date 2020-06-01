@@ -918,8 +918,7 @@ static void gfx10_emit_ge_pc_alloc(struct si_context *sctx, unsigned value)
        sctx->tracked_regs.reg_value[reg] != value) {
       struct radeon_cmdbuf *cs = sctx->gfx_cs;
 
-      if (sctx->family == CHIP_NAVI10 || sctx->family == CHIP_NAVI12 ||
-          sctx->family == CHIP_NAVI14) {
+      if (sctx->chip_class == GFX10) {
          /* SQ_NON_EVENT must be emitted before GE_PC_ALLOC is written. */
          radeon_emit(cs, PKT3(PKT3_EVENT_WRITE, 0, 0));
          radeon_emit(cs, EVENT_TYPE(V_028A90_SQ_NON_EVENT) | EVENT_INDEX(0));
@@ -1144,8 +1143,8 @@ static void gfx10_shader_ngg(struct si_screen *sscreen, struct si_shader *shader
                      S_00B22C_LDS_SIZE(shader->config.lds_size));
 
    /* Determine LATE_ALLOC_GS. */
-   unsigned num_cu_per_sh = sscreen->info.num_good_cu_per_sh;
-   unsigned late_alloc_wave64; /* The limit is per SH. */
+   unsigned num_cu_per_sh = sscreen->info.min_good_cu_per_sa;
+   unsigned late_alloc_wave64; /* The limit is per SA. */
 
    /* For Wave32, the hw will launch twice the number of late
     * alloc waves, so 1 == 2x wave32.
@@ -1162,8 +1161,7 @@ static void gfx10_shader_ngg(struct si_screen *sscreen, struct si_shader *shader
       late_alloc_wave64 = (num_cu_per_sh - 2) * 4;
 
    /* Limit LATE_ALLOC_GS for prevent a hang (hw bug). */
-   if (sscreen->info.family == CHIP_NAVI10 || sscreen->info.family == CHIP_NAVI12 ||
-       sscreen->info.family == CHIP_NAVI14)
+   if (sscreen->info.chip_class == GFX10)
       late_alloc_wave64 = MIN2(late_alloc_wave64, 64);
 
    si_pm4_set_reg(
@@ -1255,8 +1253,7 @@ static void gfx10_shader_ngg(struct si_screen *sscreen, struct si_shader *shader
        *
        * Requirement: GE_CNTL.VERT_GRP_SIZE = VGT_GS_ONCHIP_CNTL.ES_VERTS_PER_SUBGRP - 5
        */
-      if ((sscreen->info.family == CHIP_NAVI10 || sscreen->info.family == CHIP_NAVI12 ||
-           sscreen->info.family == CHIP_NAVI14) &&
+      if ((sscreen->info.chip_class == GFX10) &&
           (es_type == PIPE_SHADER_VERTEX || gs_type == PIPE_SHADER_VERTEX) && /* = no tess */
           shader->ngg.hw_max_esverts != 256) {
          shader->ge_cntl &= C_03096C_VERT_GRP_SIZE;
@@ -2596,7 +2593,7 @@ static void *si_create_shader_selector(struct pipe_context *ctx,
    sel->so = state->stream_output;
 
    if (state->type == PIPE_SHADER_IR_TGSI) {
-      sel->nir = tgsi_to_nir(state->tokens, ctx->screen);
+      sel->nir = tgsi_to_nir(state->tokens, ctx->screen, true);
    } else {
       assert(state->type == PIPE_SHADER_IR_NIR);
       sel->nir = state->ir.nir;
@@ -2844,8 +2841,6 @@ static void *si_create_shader(struct pipe_context *ctx, const struct pipe_shader
          si_shader_dump_stats_for_shader_db(sscreen, sel->main_shader_part_ngg, &sctx->debug);
       if (sel->main_shader_part_ngg_es)
          si_shader_dump_stats_for_shader_db(sscreen, sel->main_shader_part_ngg_es, &sctx->debug);
-      if (sel->gs_copy_shader)
-         si_shader_dump_stats_for_shader_db(sscreen, sel->gs_copy_shader, &sctx->debug);
    }
    return sel;
 }
@@ -2950,9 +2945,7 @@ bool si_update_ngg(struct si_context *sctx)
        * VGT_FLUSH is also emitted at the beginning of IBs when legacy GS ring
        * pointers are set.
        */
-      if ((sctx->family == CHIP_NAVI10 || sctx->family == CHIP_NAVI12 ||
-           sctx->family == CHIP_NAVI14) &&
-          !new_ngg)
+      if (sctx->chip_class == GFX10 && !new_ngg)
          sctx->flags |= SI_CONTEXT_VGT_FLUSH;
 
       sctx->ngg = new_ngg;
@@ -3403,7 +3396,6 @@ static bool si_update_gs_ring_buffers(struct si_context *sctx)
 
    if (!sctx->init_config_has_vgt_flush) {
       si_init_config_add_vgt_flush(sctx);
-      si_pm4_upload_indirect_buffer(sctx, sctx->init_config);
    }
 
    /* Flush the context to re-emit both init_config states. */
@@ -3670,7 +3662,6 @@ static void si_init_tess_factor_ring(struct si_context *sctx)
    /* Flush the context to re-emit the init_config state.
     * This is done only once in a lifetime of a context.
     */
-   si_pm4_upload_indirect_buffer(sctx, sctx->init_config);
    sctx->initial_gfx_cs_size = 0; /* force flush */
    si_flush_gfx_cs(sctx, RADEON_FLUSH_ASYNC_START_NEXT_GFX_IB_NOW, NULL);
 }

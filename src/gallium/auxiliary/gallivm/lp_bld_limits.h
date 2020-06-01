@@ -40,7 +40,7 @@
  * TGSI translation limits.
  *
  * Some are slightly above SM 3.0 requirements to give some wiggle room to
- * the state trackers.
+ * the gallium frontends.
  */
 
 #define LP_MAX_TGSI_TEMPS 4096
@@ -59,7 +59,7 @@
 
 #define LP_MAX_TGSI_SHADER_BUFFER_SIZE (1 << 27)
 
-#define LP_MAX_TGSI_SHADER_IMAGES 8
+#define LP_MAX_TGSI_SHADER_IMAGES 16
 
 /*
  * For quick access we cache registers in statically

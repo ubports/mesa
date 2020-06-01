@@ -35,14 +35,6 @@
 
 DEBUG_GET_ONCE_BOOL_OPTION(noop, "RADEON_NOOP", false)
 
-#ifndef AMDGPU_IB_FLAG_RESET_GDS_MAX_WAVE_ID
-#define AMDGPU_IB_FLAG_RESET_GDS_MAX_WAVE_ID  (1 << 4)
-#endif
-
-#ifndef AMDGPU_CHUNK_ID_SCHEDULED_DEPENDENCIES
-#define AMDGPU_CHUNK_ID_SCHEDULED_DEPENDENCIES	0x07
-#endif
-
 /* FENCES */
 
 static struct pipe_fence_handle *
@@ -839,7 +831,7 @@ static void amdgpu_ib_finalize(struct amdgpu_winsys *ws, struct amdgpu_ib *ib)
 {
    amdgpu_set_ib_size(ib);
    ib->used_ib_space += ib->base.current.cdw * 4;
-   ib->used_ib_space = align(ib->used_ib_space, ws->info.ib_start_alignment);
+   ib->used_ib_space = align(ib->used_ib_space, ws->info.ib_alignment);
    ib->max_ib_size = MAX2(ib->max_ib_size, ib->base.prev_dw + ib->base.current.cdw);
 }
 
@@ -1601,6 +1593,11 @@ void amdgpu_cs_submit_ib(void *job, int thread_index)
       chunks[num_chunks].length_dw = sizeof(struct drm_amdgpu_cs_chunk_ib) / 4;
       chunks[num_chunks].chunk_data = (uintptr_t)&cs->ib[IB_MAIN];
       num_chunks++;
+
+      if (ws->secure && cs->secure)
+         cs->ib[IB_MAIN].flags |= AMDGPU_IB_FLAGS_SECURE;
+      else
+         cs->ib[IB_MAIN].flags &= ~AMDGPU_IB_FLAGS_SECURE;
 
       assert(num_chunks <= ARRAY_SIZE(chunks));
 

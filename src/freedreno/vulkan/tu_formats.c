@@ -32,8 +32,6 @@
 #include "vk_util.h"
 #include "drm-uapi/drm_fourcc.h"
 
-#define FMT6_x -1
-
 #define TU6_FMT(vkfmt, hwfmt, swapfmt, valid) \
    [VK_FORMAT_##vkfmt] = {                   \
       .fmt = FMT6_##hwfmt,                     \
@@ -45,7 +43,7 @@
 #define TU6_xTC(vk, fmt, swap) TU6_FMT(vk, fmt, swap, FMT_TEXTURE | FMT_COLOR)
 #define TU6_Vxx(vk, fmt, swap) TU6_FMT(vk, fmt, swap, FMT_VERTEX)
 #define TU6_xTx(vk, fmt, swap) TU6_FMT(vk, fmt, swap, FMT_TEXTURE)
-#define TU6_xxx(vk, fmt, swap) TU6_FMT(vk, x, WZYX, false)
+#define TU6_xxx(vk, fmt, swap) TU6_FMT(vk, NONE, WZYX, 0)
 
 static const struct tu_native_format tu6_format_table[] = {
    TU6_xxx(UNDEFINED,                  x,                 x),    /* 0 */
@@ -283,23 +281,39 @@ static const struct tu_native_format tu6_format_table[] = {
    TU6_xTx(ASTC_12x12_SRGB_BLOCK,      ASTC_12x12,        WZYX), /* 184 */
 };
 
+#define FMT_EXT_BASE VK_FORMAT_G8B8G8R8_422_UNORM
+#undef TU6_FMT
+#define TU6_FMT(vkfmt, hwfmt, swapfmt, valid) \
+   [VK_FORMAT_##vkfmt - FMT_EXT_BASE] = {                   \
+      .fmt = FMT6_##hwfmt,                     \
+      .swap = swapfmt,                       \
+      .supported = valid,                    \
+   }
+
+static const struct tu_native_format tu6_format_table_ext[] = {
+   TU6_xTx(G8B8G8R8_422_UNORM,         R8G8R8B8_422_UNORM,        WZYX), /* 0 */
+   TU6_xTx(B8G8R8G8_422_UNORM,         G8R8B8R8_422_UNORM,        WZYX), /* 1 */
+};
+
 static struct tu_native_format
 tu6_get_native_format(VkFormat format)
 {
    struct tu_native_format fmt = {};
 
-   if (format >= ARRAY_SIZE(tu6_format_table))
-      return fmt;
-
-   if (!tu6_format_table[format].supported)
-      return fmt;
-
-   if (vk_format_to_pipe_format(format) == PIPE_FORMAT_NONE) {
-      tu_finishme("vk_format %d missing matching pipe format.\n", format);
-      return fmt;
+   if (format < ARRAY_SIZE(tu6_format_table)) {
+      fmt = tu6_format_table[format];
+   } else if (format >= FMT_EXT_BASE) {
+      unsigned idx = format - FMT_EXT_BASE;
+      if (idx < ARRAY_SIZE(tu6_format_table_ext))
+         fmt = tu6_format_table_ext[idx];
    }
 
-   return tu6_format_table[format];
+   if (fmt.supported && vk_format_to_pipe_format(format) == PIPE_FORMAT_NONE) {
+      tu_finishme("vk_format %d missing matching pipe format.\n", format);
+      fmt.supported = false;
+   }
+
+   return fmt;
 }
 
 struct tu_native_format
@@ -354,6 +368,7 @@ tu6_pipe2depth(VkFormat format)
    case VK_FORMAT_D24_UNORM_S8_UINT:
       return DEPTH6_24_8;
    case VK_FORMAT_D32_SFLOAT:
+   case VK_FORMAT_S8_UINT:
       return DEPTH6_32;
    default:
       return ~0;
@@ -378,18 +393,55 @@ tu_physical_device_get_format_properties(
       buffer |= VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT;
 
    if (native_fmt.supported & FMT_TEXTURE) {
-      optimal |= VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
+      optimal |= VK_FORMAT_FEATURE_BLIT_SRC_BIT |
+                 VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
                  VK_FORMAT_FEATURE_TRANSFER_DST_BIT |
                  VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
-                 VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+                 VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
+                 VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_MINMAX_BIT |
+                 VK_FORMAT_FEATURE_COSITED_CHROMA_SAMPLES_BIT |
+                 VK_FORMAT_FEATURE_MIDPOINT_CHROMA_SAMPLES_BIT;
+
       buffer |= VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT;
+
+      if (desc->layout != UTIL_FORMAT_LAYOUT_SUBSAMPLED)
+         optimal |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_YCBCR_CONVERSION_LINEAR_FILTER_BIT;
+
+      if (physical_device->supported_extensions.EXT_filter_cubic)
+         optimal |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_CUBIC_BIT_EXT;
    }
 
    if (native_fmt.supported & FMT_COLOR) {
       assert(native_fmt.supported & FMT_TEXTURE);
       optimal |= VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
-                 VK_FORMAT_FEATURE_BLIT_SRC_BIT |
                  VK_FORMAT_FEATURE_BLIT_DST_BIT;
+
+      /* IBO's don't have a swap field at all, so swapped formats can't be
+       * supported, even with linear images.
+       *
+       * TODO: See if setting the swap field from the tex descriptor works,
+       * after we enable shaderStorageImageReadWithoutFormat and there are
+       * tests for these formats.
+       */
+      if (native_fmt.swap == WZYX) {
+         optimal |= VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
+         buffer |= VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT;
+      }
+
+      /* TODO: The blob also exposes these for R16G16_UINT/R16G16_SINT, but we
+       * don't have any tests for those.
+       */
+      if (format == VK_FORMAT_R32_UINT || format == VK_FORMAT_R32_SINT) {
+         optimal |= VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT;
+         buffer |= VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_ATOMIC_BIT;
+      }
+
+      if (vk_format_is_float(format) ||
+          vk_format_is_unorm(format) ||
+          vk_format_is_snorm(format) ||
+          vk_format_is_srgb(format)) {
+         optimal |= VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT;
+      }
    }
 
    /* For the most part, we can do anything with a linear image that we could
@@ -456,8 +508,8 @@ static VkResult
 tu_get_image_format_properties(
    struct tu_physical_device *physical_device,
    const VkPhysicalDeviceImageFormatInfo2 *info,
-   VkImageFormatProperties *pImageFormatProperties)
-
+   VkImageFormatProperties *pImageFormatProperties,
+   VkFormatFeatureFlags *p_feature_flags)
 {
    VkFormatProperties format_props;
    VkFormatFeatureFlags format_feature_flags;
@@ -579,6 +631,9 @@ tu_get_image_format_properties(
       .maxResourceSize = UINT32_MAX,
    };
 
+   if (p_feature_flags)
+      *p_feature_flags = format_feature_flags;
+
    return VK_SUCCESS;
 unsupported:
    *pImageFormatProperties = (VkImageFormatProperties) {
@@ -615,7 +670,7 @@ tu_GetPhysicalDeviceImageFormatProperties(
    };
 
    return tu_get_image_format_properties(physical_device, &info,
-                                         pImageFormatProperties);
+                                         pImageFormatProperties, NULL);
 }
 
 static VkResult
@@ -682,11 +737,15 @@ tu_GetPhysicalDeviceImageFormatProperties2(
 {
    TU_FROM_HANDLE(tu_physical_device, physical_device, physicalDevice);
    const VkPhysicalDeviceExternalImageFormatInfo *external_info = NULL;
+   const VkPhysicalDeviceImageViewImageFormatInfoEXT *image_view_info = NULL;
    VkExternalImageFormatProperties *external_props = NULL;
+   VkFilterCubicImageViewImageFormatPropertiesEXT *cubic_props = NULL;
+   VkFormatFeatureFlags format_feature_flags;
+   VkSamplerYcbcrConversionImageFormatProperties *ycbcr_props = NULL;
    VkResult result;
 
-   result = tu_get_image_format_properties(
-      physical_device, base_info, &base_props->imageFormatProperties);
+   result = tu_get_image_format_properties(physical_device,
+      base_info, &base_props->imageFormatProperties, &format_feature_flags);
    if (result != VK_SUCCESS)
       return result;
 
@@ -696,6 +755,9 @@ tu_GetPhysicalDeviceImageFormatProperties2(
       switch (s->sType) {
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO:
          external_info = (const void *) s;
+         break;
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_VIEW_IMAGE_FORMAT_INFO_EXT:
+         image_view_info = (const void *) s;
          break;
       default:
          break;
@@ -708,6 +770,12 @@ tu_GetPhysicalDeviceImageFormatProperties2(
       switch (s->sType) {
       case VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES:
          external_props = (void *) s;
+         break;
+      case VK_STRUCTURE_TYPE_FILTER_CUBIC_IMAGE_VIEW_IMAGE_FORMAT_PROPERTIES_EXT:
+         cubic_props = (void *) s;
+         break;
+      case VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_IMAGE_FORMAT_PROPERTIES:
+         ycbcr_props = (void *) s;
          break;
       default:
          break;
@@ -728,6 +796,24 @@ tu_GetPhysicalDeviceImageFormatProperties2(
          goto fail;
    }
 
+   if (cubic_props) {
+      /* note: blob only allows cubic filtering for 2D and 2D array views
+       * its likely we can enable it for 1D and CUBE, needs testing however
+       */
+      if ((image_view_info->imageViewType == VK_IMAGE_VIEW_TYPE_2D ||
+           image_view_info->imageViewType == VK_IMAGE_VIEW_TYPE_2D_ARRAY) &&
+          (format_feature_flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_CUBIC_BIT_EXT)) {
+         cubic_props->filterCubic = true;
+         cubic_props->filterCubicMinmax = true;
+      } else {
+         cubic_props->filterCubic = false;
+         cubic_props->filterCubicMinmax = false;
+      }
+   }
+
+   if (ycbcr_props)
+      ycbcr_props->combinedImageSamplerDescriptorCount = 1;
+
    return VK_SUCCESS;
 
 fail:
@@ -739,7 +825,7 @@ fail:
        *    the implementation for use in vkCreateImage, then all members of
        *    imageFormatProperties will be filled with zero.
        */
-      base_props->imageFormatProperties = (VkImageFormatProperties) { 0 };
+      base_props->imageFormatProperties = (VkImageFormatProperties) {};
    }
 
    return result;

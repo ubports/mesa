@@ -32,6 +32,7 @@
 #include "brw_ir_fs.h"
 #include "brw_fs_builder.h"
 #include "brw_fs_live_variables.h"
+#include "brw_ir_performance.h"
 #include "compiler/nir/nir.h"
 
 struct bblock_t;
@@ -124,9 +125,9 @@ public:
    bool run_tcs();
    bool run_tes();
    bool run_gs();
-   bool run_cs(unsigned min_dispatch_width);
+   bool run_cs(bool allow_spilling);
    void optimize();
-   void allocate_registers(unsigned min_dispatch_width, bool allow_spilling);
+   void allocate_registers(bool allow_spilling);
    void setup_fs_payload_gen4();
    void setup_fs_payload_gen6();
    void setup_vs_payload();
@@ -167,7 +168,6 @@ public:
    bool opt_drop_redundant_mov_to_flags();
    bool opt_register_renaming();
    bool opt_bank_conflicts();
-   unsigned bank_conflict_cycles(const fs_inst *inst) const;
    bool register_coalesce();
    bool compute_to_mrf();
    bool eliminate_find_live_channel();
@@ -350,6 +350,8 @@ public:
                 backend_shader *) live_analysis;
    BRW_ANALYSIS(regpressure_analysis, brw::register_pressure,
                 fs_visitor *) regpressure_analysis;
+   BRW_ANALYSIS(performance_analysis, brw::performance,
+                fs_visitor *) performance_analysis;
 
    /** Number of uniform variable components visited. */
    unsigned uniforms;
@@ -475,6 +477,7 @@ public:
    void enable_debug(const char *shader_name);
    int generate_code(const cfg_t *cfg, int dispatch_width,
                      struct shader_stats shader_stats,
+                     const brw::performance &perf,
                      struct brw_compile_stats *stats);
    const unsigned *get_assembly();
 

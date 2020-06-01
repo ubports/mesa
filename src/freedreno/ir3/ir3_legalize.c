@@ -113,7 +113,6 @@ legalize_block(struct ir3_legalize_ctx *ctx, struct ir3_block *block)
 	list_inithead(&block->instr_list);
 
 	foreach_instr_safe (n, &instr_list) {
-		struct ir3_register *reg;
 		unsigned i;
 
 		n->flags &= ~(IR3_INSTR_SS | IR3_INSTR_SY);
@@ -138,7 +137,7 @@ legalize_block(struct ir3_legalize_ctx *ctx, struct ir3_block *block)
 			regmask_init(&state->needs_sy);
 		}
 
-		if (last_n && (last_n->opc == OPC_IF)) {
+		if (last_n && (last_n->opc == OPC_PREDT)) {
 			n->flags |= IR3_INSTR_SS;
 			regmask_init(&state->needs_ss_war);
 			regmask_init(&state->needs_ss);
@@ -151,7 +150,7 @@ legalize_block(struct ir3_legalize_ctx *ctx, struct ir3_block *block)
 		 * resulting in undefined results:
 		 */
 		for (i = 0; i < n->regs_count; i++) {
-			reg = n->regs[i];
+			struct ir3_register *reg = n->regs[i];
 
 			if (reg_gpr(reg)) {
 
@@ -181,7 +180,7 @@ legalize_block(struct ir3_legalize_ctx *ctx, struct ir3_block *block)
 		}
 
 		if (n->regs_count > 0) {
-			reg = n->regs[0];
+			struct ir3_register *reg = n->regs[0];
 			if (regmask_get(&state->needs_ss_war, reg)) {
 				n->flags |= IR3_INSTR_SS;
 				last_input_needs_ss = false;
@@ -574,12 +573,12 @@ block_sched(struct ir3 *ir)
 			/* create "else" branch first (since "then" block should
 			 * frequently/always end up being a fall-thru):
 			 */
-			br = ir3_BR(block, block->condition, 0);
+			br = ir3_B(block, block->condition, 0);
 			br->cat0.inv = true;
 			br->cat0.target = block->successors[1];
 
 			/* "then" branch: */
-			br = ir3_BR(block, block->condition, 0);
+			br = ir3_B(block, block->condition, 0);
 			br->cat0.target = block->successors[0];
 
 		} else if (block->successors[0]) {
@@ -589,6 +588,73 @@ block_sched(struct ir3 *ir)
 			jmp = ir3_JUMP(block);
 			jmp->cat0.target = block->successors[0];
 		}
+	}
+}
+
+/* Here we workaround the fact that kill doesn't actually kill the thread as
+ * GL expects. The last instruction always needs to be an end instruction,
+ * which means that if we're stuck in a loop where kill is the only way out,
+ * then we may have to jump out to the end. kill may also have the d3d
+ * semantics of converting the thread to a helper thread, rather than setting
+ * the exec mask to 0, in which case the helper thread could get stuck in an
+ * infinite loop.
+ *
+ * We do this late, both to give the scheduler the opportunity to reschedule
+ * kill instructions earlier and to avoid having to create a separate basic
+ * block.
+ *
+ * TODO: Assuming that the wavefront doesn't stop as soon as all threads are
+ * killed, we might benefit by doing this more aggressively when the remaining
+ * part of the program after the kill is large, since that would let us
+ * skip over the instructions when there are no non-killed threads left.
+ */
+static void
+kill_sched(struct ir3 *ir, struct ir3_shader_variant *so)
+{
+	/* True if we know that this block will always eventually lead to the end
+	 * block:
+	 */
+	bool always_ends = true;
+	bool added = false;
+	struct ir3_block *last_block =
+		list_last_entry(&ir->block_list, struct ir3_block, node);
+
+	foreach_block_rev (block, &ir->block_list) {
+		for (unsigned i = 0; i < 2 && block->successors[i]; i++) {
+			if (block->successors[i]->start_ip <= block->end_ip)
+				always_ends = false;
+		}
+
+		if (always_ends)
+			continue;
+
+		foreach_instr_safe (instr, &block->instr_list) {
+			if (instr->opc != OPC_KILL)
+				continue;
+
+			struct ir3_instruction *br = ir3_instr_create(block, OPC_B);
+			br->regs[1] = instr->regs[1];
+			br->cat0.target =
+				list_last_entry(&ir->block_list, struct ir3_block, node);
+
+			list_del(&br->node);
+			list_add(&br->node, &instr->node);
+
+			added = true;
+		}
+	}
+
+	if (added) {
+		/* I'm not entirely sure how the branchstack works, but we probably
+		 * need to add at least one entry for the divergence which is resolved
+		 * at the end:
+		 */
+		so->branchstack++;
+
+		/* We don't update predecessors/successors, so we have to do this
+		 * manually:
+		 */
+		mark_jp(last_block);
 	}
 }
 
@@ -640,7 +706,7 @@ nop_sched(struct ir3 *ir)
 	}
 }
 
-void
+bool
 ir3_legalize(struct ir3 *ir, struct ir3_shader_variant *so, int *max_bary)
 {
 	struct ir3_legalize_ctx *ctx = rzalloc(ir, struct ir3_legalize_ctx);
@@ -669,6 +735,8 @@ ir3_legalize(struct ir3 *ir, struct ir3_shader_variant *so, int *max_bary)
 	*max_bary = ctx->max_bary;
 
 	block_sched(ir);
+	if (so->type == MESA_SHADER_FRAGMENT)
+		kill_sched(ir, so);
 	nop_sched(ir);
 
 	do {
@@ -678,4 +746,6 @@ ir3_legalize(struct ir3 *ir, struct ir3_shader_variant *so, int *max_bary)
 	mark_xvergence_points(ir);
 
 	ralloc_free(ctx);
+
+	return true;
 }

@@ -67,6 +67,7 @@ static const struct debug_named_value debug_options[] = {
    {"w64ge", DBG(W64_GE), "Use Wave64 for vertex, tessellation, and geometry shaders."},
    {"w64ps", DBG(W64_PS), "Use Wave64 for pixel shaders."},
    {"w64cs", DBG(W64_CS), "Use Wave64 for computes shaders."},
+   {"noinfinterp", DBG(KILL_PS_INF_INTERP), "Kill PS with infinite interp coeff"},
 
    /* Shader compiler options (with no effect on the shader cache): */
    {"checkir", DBG(CHECK_IR), "Enable additional sanity checks on shader IR"},
@@ -235,6 +236,8 @@ static void si_destroy_context(struct pipe_context *context)
       sctx->b.delete_compute_state(&sctx->b, sctx->cs_clear_render_target_1d_array);
    if (sctx->cs_clear_12bytes_buffer)
       sctx->b.delete_compute_state(&sctx->b, sctx->cs_clear_12bytes_buffer);
+   if (sctx->cs_dcc_decompress)
+      sctx->b.delete_compute_state(&sctx->b, sctx->cs_dcc_decompress);
    if (sctx->cs_dcc_retile)
       sctx->b.delete_compute_state(&sctx->b, sctx->cs_dcc_retile);
 
@@ -319,7 +322,7 @@ static enum pipe_reset_status si_get_reset_status(struct pipe_context *ctx)
    enum pipe_reset_status status = sctx->ws->ctx_query_reset_status(sctx->ctx);
 
    if (status != PIPE_NO_RESET) {
-      /* Call the state tracker to set a no-op API dispatch. */
+		/* Call the gallium frontend to set a no-op API dispatch. */
       if (sctx->device_reset_callback.reset) {
          sctx->device_reset_callback.reset(sctx->device_reset_callback.data, status);
       }
@@ -471,13 +474,13 @@ static struct pipe_context *si_create_context(struct pipe_screen *screen, unsign
 
    if (sscreen->info.num_rings[RING_DMA] && !(sscreen->debug_flags & DBG(NO_SDMA)) &&
        /* SDMA causes corruption on RX 580:
-        *    https://gitlab.freedesktop.org/mesa/mesa/issues/1399
-        *    https://gitlab.freedesktop.org/mesa/mesa/issues/1889
+        *    https://gitlab.freedesktop.org/mesa/mesa/-/issues/1399
+        *    https://gitlab.freedesktop.org/mesa/mesa/-/issues/1889
         */
        (sctx->chip_class != GFX8 || sscreen->debug_flags & DBG(FORCE_SDMA)) &&
        /* SDMA timeouts sometimes on gfx10 so disable it for now. See:
         *    https://bugs.freedesktop.org/show_bug.cgi?id=111481
-        *    https://gitlab.freedesktop.org/mesa/mesa/issues/1907
+        *    https://gitlab.freedesktop.org/mesa/mesa/-/issues/1907
         */
        (sctx->chip_class != GFX10 || sscreen->debug_flags & DBG(FORCE_SDMA))) {
       sctx->sdma_cs = sctx->ws->cs_create(sctx->ctx, RING_DMA, (void *)si_flush_dma_cs, sctx,
@@ -686,6 +689,7 @@ static struct pipe_context *si_pipe_create_context(struct pipe_screen *screen, v
 {
    struct si_screen *sscreen = (struct si_screen *)screen;
    struct pipe_context *ctx;
+   uint64_t total_ram;
 
    if (sscreen->debug_flags & DBG(CHECK_VM))
       flags |= PIPE_CONTEXT_DEBUG;
@@ -706,9 +710,16 @@ static struct pipe_context *si_pipe_create_context(struct pipe_screen *screen, v
 
    /* Use asynchronous flushes only on amdgpu, since the radeon
     * implementation for fence_server_sync is incomplete. */
-   return threaded_context_create(ctx, &sscreen->pool_transfers, si_replace_buffer_storage,
-                                  sscreen->info.is_amdgpu ? si_create_fence : NULL,
-                                  &((struct si_context *)ctx)->tc);
+   struct pipe_context * tc = threaded_context_create(
+            ctx, &sscreen->pool_transfers, si_replace_buffer_storage,
+            sscreen->info.is_amdgpu ? si_create_fence : NULL,
+            &((struct si_context *)ctx)->tc);
+
+   if (tc && tc != ctx && os_get_total_physical_memory(&total_ram)) {
+      ((struct threaded_context *) tc)->bytes_mapped_limit = total_ram / 4;
+   }
+
+   return tc;
 }
 
 /*
@@ -842,7 +853,7 @@ static void si_test_gds_memory_management(struct si_context *sctx, unsigned allo
             SI_CPDMA_SKIP_BO_LIST_UPDATE | SI_CPDMA_SKIP_CHECK_CS_SPACE | SI_CPDMA_SKIP_GFX_SYNC, 0,
             0);
 
-         ws->cs_add_buffer(cs[i], gds_bo[i], domain, RADEON_USAGE_READWRITE, 0);
+         ws->cs_add_buffer(cs[i], gds_bo[i], RADEON_USAGE_READWRITE, domain, 0);
          ws->cs_flush(cs[i], PIPE_FLUSH_ASYNC, NULL);
       }
    }
@@ -869,7 +880,7 @@ static void si_disk_cache_create(struct si_screen *sscreen)
    disk_cache_format_hex_id(cache_id, sha1, 20 * 2);
 
 /* These flags affect shader compilation. */
-#define ALL_FLAGS (DBG(GISEL))
+#define ALL_FLAGS (DBG(GISEL) | DBG(KILL_PS_INF_INTERP))
    uint64_t shader_debug_flags = sscreen->debug_flags & ALL_FLAGS;
 
    /* Add the high bits of 32-bit addresses, which affects
@@ -984,6 +995,10 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
 #define OPT_BOOL(name, dflt, description)                                                          \
    sscreen->options.name = driQueryOptionb(config->options, "radeonsi_" #name);
 #include "si_debug_options.h"
+   }
+
+   if (sscreen->options.no_infinite_interp) {
+      sscreen->debug_flags |= DBG(KILL_PS_INF_INTERP);
    }
 
    si_disk_cache_create(sscreen);

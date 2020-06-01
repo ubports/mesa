@@ -89,7 +89,7 @@ static void translate_image(struct fd6_image *img, const struct pipe_image_view 
 		/* size is encoded with low 15b in WIDTH and high bits in
 		 * HEIGHT, in units of elements:
 		 */
-		unsigned sz = prsc->width0;
+		unsigned sz = pimg->u.buf.size / util_format_get_blocksize(format);
 		img->width  = sz & MASK(15);
 		img->height = sz >> 15;
 		img->depth  = 0;
@@ -102,7 +102,7 @@ static void translate_image(struct fd6_image *img, const struct pipe_image_view 
 
 		img->ubwc_offset = fd_resource_ubwc_offset(rsc, lvl, pimg->u.tex.first_layer);
 		img->offset = fd_resource_offset(rsc, lvl, pimg->u.tex.first_layer);
-		img->pitch  = slice->pitch * rsc->layout.cpp;
+		img->pitch  = slice->pitch;
 
 		switch (prsc->target) {
 		case PIPE_TEXTURE_RECT:
@@ -262,7 +262,7 @@ static void emit_image_ssbo(struct fd_ringbuffer *ring, struct fd6_image *img)
 	OUT_RING(ring, A6XX_IBO_3_ARRAY_PITCH(img->array_pitch) |
 		COND(ubwc_enabled, A6XX_IBO_3_FLAG | A6XX_IBO_3_UNK27));
 	if (img->bo) {
-		OUT_RELOCW(ring, img->bo, img->offset,
+		OUT_RELOC(ring, img->bo, img->offset,
 			(uint64_t)A6XX_IBO_5_DEPTH(img->depth) << 32, 0);
 	} else {
 		OUT_RING(ring, 0x00000000);
@@ -272,7 +272,7 @@ static void emit_image_ssbo(struct fd_ringbuffer *ring, struct fd6_image *img)
 
 	if (ubwc_enabled) {
 		struct fdl_slice *ubwc_slice = &rsc->layout.ubwc_slices[img->level];
-		OUT_RELOCW(ring, rsc->bo, img->ubwc_offset, 0, 0);
+		OUT_RELOC(ring, rsc->bo, img->ubwc_offset, 0, 0);
 		OUT_RING(ring, A6XX_IBO_9_FLAG_BUFFER_ARRAY_PITCH(rsc->layout.ubwc_layer_size >> 2));
 		OUT_RING(ring, A6XX_IBO_10_FLAG_BUFFER_PITCH(ubwc_slice->pitch));
 	} else {

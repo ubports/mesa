@@ -44,7 +44,7 @@
 #include "lp_screen.h"
 #include "lp_memory.h"
 #include "lp_cs_tpool.h"
-#include "state_tracker/sw_winsys.h"
+#include "frontend/sw_winsys.h"
 #include "nir/nir_to_tgsi_info.h"
 #include "nir_serialize.h"
 struct lp_cs_job_info {
@@ -523,6 +523,8 @@ llvmpipe_delete_compute_state(struct pipe_context *pipe,
       llvmpipe_remove_cs_shader_variant(llvmpipe, li->base);
       li = next;
    }
+   if (shader->base.ir.nir)
+      ralloc_free(shader->base.ir.nir);
    tgsi_free_tokens(shader->base.tokens);
    FREE(shader);
 }
@@ -860,6 +862,8 @@ lp_csctx_set_sampler_views(struct lp_cs_context *csctx,
                jit_tex->mip_offsets[0] = 0;
                jit_tex->row_stride[0] = 0;
                jit_tex->img_stride[0] = 0;
+               jit_tex->num_samples = 0;
+               jit_tex->sample_stride = 0;
             }
             else {
                jit_tex->width = res->width0;
@@ -867,6 +871,8 @@ lp_csctx_set_sampler_views(struct lp_cs_context *csctx,
                jit_tex->depth = res->depth0;
                jit_tex->first_level = first_level;
                jit_tex->last_level = last_level;
+               jit_tex->num_samples = res->nr_samples;
+               jit_tex->sample_stride = 0;
 
                if (llvmpipe_resource_is_texture(res)) {
                   for (j = first_level; j <= last_level; j++) {
@@ -874,6 +880,7 @@ lp_csctx_set_sampler_views(struct lp_cs_context *csctx,
                      jit_tex->row_stride[j] = lp_tex->row_stride[j];
                      jit_tex->img_stride[j] = lp_tex->img_stride[j];
                   }
+                  jit_tex->sample_stride = lp_tex->sample_stride;
 
                   if (res->target == PIPE_TEXTURE_1D_ARRAY ||
                       res->target == PIPE_TEXTURE_2D_ARRAY ||
@@ -933,6 +940,8 @@ lp_csctx_set_sampler_views(struct lp_cs_context *csctx,
             jit_tex->height = res->height0;
             jit_tex->depth = res->depth0;
             jit_tex->first_level = jit_tex->last_level = 0;
+            jit_tex->num_samples = res->nr_samples;
+            jit_tex->sample_stride = 0;
             assert(jit_tex->base);
          }
       }
@@ -1042,6 +1051,7 @@ lp_csctx_set_cs_images(struct lp_cs_context *csctx,
          jit_image->width = res->width0;
          jit_image->height = res->height0;
          jit_image->depth = res->depth0;
+         jit_image->num_samples = res->nr_samples;
 
          if (llvmpipe_resource_is_texture(res)) {
             uint32_t mip_offset = lp_res->mip_offsets[image->u.tex.level];
@@ -1067,6 +1077,7 @@ lp_csctx_set_cs_images(struct lp_cs_context *csctx,
 
             jit_image->row_stride = lp_res->row_stride[image->u.tex.level];
             jit_image->img_stride = lp_res->img_stride[image->u.tex.level];
+            jit_image->sample_stride = lp_res->sample_stride;
             jit_image->base = (uint8_t *)jit_image->base + mip_offset;
          } else {
             unsigned view_blocksize = util_format_get_blocksize(image->format);

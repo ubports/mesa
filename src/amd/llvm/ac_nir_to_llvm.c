@@ -51,6 +51,7 @@ struct ac_nir_context {
 	struct hash_table *defs;
 	struct hash_table *phis;
 	struct hash_table *vars;
+        struct hash_table *verified_interp;
 
 	LLVMValueRef main_function;
 	LLVMBasicBlockRef continue_block;
@@ -589,6 +590,10 @@ static void visit_alu(struct ac_nir_context *ctx, const nir_alu_instr *instr)
 	unsigned num_components = instr->dest.dest.ssa.num_components;
 	unsigned src_components;
 	LLVMTypeRef def_type = get_def_type(ctx, &instr->dest.dest.ssa);
+	bool saved_inexact = false;
+
+	if (instr->exact)
+		saved_inexact = ac_disable_inexact_math(ctx->ac.builder);
 
 	assert(nir_op_infos[instr->op].num_inputs <= ARRAY_SIZE(src));
 	switch (instr->op) {
@@ -1182,6 +1187,9 @@ static void visit_alu(struct ac_nir_context *ctx, const nir_alu_instr *instr)
 		result = ac_to_integer_or_pointer(&ctx->ac, result);
 		ctx->ssa_defs[instr->dest.dest.ssa.index] = result;
 	}
+
+	if (instr->exact)
+		ac_restore_inexact_math(ctx->ac.builder, saved_inexact);
 }
 
 static void visit_load_const(struct ac_nir_context *ctx,
@@ -1462,7 +1470,8 @@ static LLVMValueRef build_tex_intrinsic(struct ac_nir_context *ctx,
 		break;
 	case nir_texop_tg4:
 		args->opcode = ac_image_gather4;
-		args->level_zero = true;
+                if (!args->lod && !args->bias)
+			args->level_zero = true;
 		break;
 	case nir_texop_lod:
 		args->opcode = ac_image_get_lod;
@@ -1672,7 +1681,7 @@ static unsigned get_cache_policy(struct ac_nir_context *ctx,
 	}
 
 	if (access & ACCESS_STREAM_CACHE_POLICY)
-		cache_policy |= ac_slc;
+		cache_policy |= ac_slc | ac_glc;
 
 	return cache_policy;
 }
@@ -3504,13 +3513,26 @@ static LLVMValueRef load_interpolated_input(struct ac_nir_context *ctx,
 					    unsigned bitsize)
 {
 	LLVMValueRef attr_number = LLVMConstInt(ctx->ac.i32, index, false);
+        LLVMValueRef interp_param_f;
 
-	interp_param = LLVMBuildBitCast(ctx->ac.builder,
+	interp_param_f = LLVMBuildBitCast(ctx->ac.builder,
 				interp_param, ctx->ac.v2f32, "");
 	LLVMValueRef i = LLVMBuildExtractElement(
-		ctx->ac.builder, interp_param, ctx->ac.i32_0, "");
+		ctx->ac.builder, interp_param_f, ctx->ac.i32_0, "");
 	LLVMValueRef j = LLVMBuildExtractElement(
-		ctx->ac.builder, interp_param, ctx->ac.i32_1, "");
+		ctx->ac.builder, interp_param_f, ctx->ac.i32_1, "");
+
+	/* Workaround for issue 2647: kill threads with infinite interpolation coeffs */
+	if (ctx->verified_interp &&
+            !_mesa_hash_table_search(ctx->verified_interp, interp_param)) {
+		LLVMValueRef args[2];
+		args[0] = i;
+		args[1] = LLVMConstInt(ctx->ac.i32, S_NAN | Q_NAN | N_INFINITY | P_INFINITY, false);
+		LLVMValueRef cond = ac_build_intrinsic(&ctx->ac, "llvm.amdgcn.class.f32", ctx->ac.i1,
+                                                       args, 2, AC_FUNC_ATTR_READNONE);
+		ac_build_kill_if_false(&ctx->ac, LLVMBuildNot(ctx->ac.builder, cond, ""));
+                _mesa_hash_table_insert(ctx->verified_interp, interp_param, interp_param);
+	}
 
 	LLVMValueRef values[4];
 	assert(bitsize == 16 || bitsize == 32);
@@ -3843,7 +3865,8 @@ static void visit_intrinsic(struct ac_nir_context *ctx,
 		result = visit_image_size(ctx, instr, false);
 		break;
 	case nir_intrinsic_shader_clock:
-		result = ac_build_shader_clock(&ctx->ac);
+		result = ac_build_shader_clock(&ctx->ac,
+					       nir_intrinsic_memory_scope(instr));
 		break;
 	case nir_intrinsic_discard:
 	case nir_intrinsic_discard_if:
@@ -4426,8 +4449,7 @@ static void visit_tex(struct ac_nir_context *ctx, nir_tex_instr *instr)
 			offset_src = i;
 			break;
 		case nir_tex_src_bias:
-			if (instr->op == nir_texop_txb)
-				args.bias = get_src(ctx, instr->src[i].src);
+			args.bias = get_src(ctx, instr->src[i].src);
 			break;
 		case nir_tex_src_lod: {
 			if (nir_src_is_const(instr->src[i].src) && nir_src_as_uint(instr->src[i].src) == 0)
@@ -4447,6 +4469,9 @@ static void visit_tex(struct ac_nir_context *ctx, nir_tex_instr *instr)
 		case nir_tex_src_ddy:
 			ddy = get_src(ctx, instr->src[i].src);
 			break;
+		case nir_tex_src_min_lod:
+			args.min_lod = get_src(ctx, instr->src[i].src);
+			break;
 		case nir_tex_src_texture_offset:
 		case nir_tex_src_sampler_offset:
 		case nir_tex_src_plane:
@@ -4462,6 +4487,8 @@ static void visit_tex(struct ac_nir_context *ctx, nir_tex_instr *instr)
 
 	if (instr->op == nir_texop_texture_samples) {
 		LLVMValueRef res, samples, is_msaa;
+		LLVMValueRef default_sample;
+
 		res = LLVMBuildBitCast(ctx->ac.builder, args.resource, ctx->ac.v8i32, "");
 		samples = LLVMBuildExtractElement(ctx->ac.builder, res,
 						  LLVMConstInt(ctx->ac.i32, 3, false), "");
@@ -4478,8 +4505,27 @@ static void visit_tex(struct ac_nir_context *ctx, nir_tex_instr *instr)
 				       LLVMConstInt(ctx->ac.i32, 0xf, false), "");
 		samples = LLVMBuildShl(ctx->ac.builder, ctx->ac.i32_1,
 				       samples, "");
+
+		if (ctx->abi->robust_buffer_access) {
+			LLVMValueRef dword1, is_null_descriptor;
+
+			/* Extract the second dword of the descriptor, if it's
+			 * all zero, then it's a null descriptor.
+			 */
+			dword1 = LLVMBuildExtractElement(ctx->ac.builder, res,
+							 LLVMConstInt(ctx->ac.i32, 1, false), "");
+			is_null_descriptor =
+				LLVMBuildICmp(ctx->ac.builder, LLVMIntEQ, dword1,
+					      LLVMConstInt(ctx->ac.i32, 0, false), "");
+			default_sample =
+				LLVMBuildSelect(ctx->ac.builder, is_null_descriptor,
+						ctx->ac.i32_0, ctx->ac.i32_1, "");
+		} else {
+			default_sample = ctx->ac.i32_1;
+		}
+
 		samples = LLVMBuildSelect(ctx->ac.builder, is_msaa, samples,
-					  ctx->ac.i32_1, "");
+					  default_sample, "");
 		result = samples;
 		goto write_result;
 	}
@@ -4757,19 +4803,46 @@ static void phi_post_pass(struct ac_nir_context *ctx)
 }
 
 
+static bool is_def_used_in_an_export(const nir_ssa_def* def) {
+	nir_foreach_use(use_src, def) {
+		if (use_src->parent_instr->type == nir_instr_type_intrinsic) {
+			nir_intrinsic_instr *instr = nir_instr_as_intrinsic(use_src->parent_instr);
+			if (instr->intrinsic == nir_intrinsic_store_deref)
+				return true;
+		} else if (use_src->parent_instr->type == nir_instr_type_alu) {
+			nir_alu_instr *instr = nir_instr_as_alu(use_src->parent_instr);
+			if (instr->op == nir_op_vec4 &&
+			    is_def_used_in_an_export(&instr->dest.dest.ssa)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 static void visit_ssa_undef(struct ac_nir_context *ctx,
 			    const nir_ssa_undef_instr *instr)
 {
 	unsigned num_components = instr->def.num_components;
 	LLVMTypeRef type = LLVMIntTypeInContext(ctx->ac.context, instr->def.bit_size);
-	LLVMValueRef undef;
 
-	if (num_components == 1)
-		undef = LLVMGetUndef(type);
-	else {
-		undef = LLVMGetUndef(LLVMVectorType(type, num_components));
+	if (!ctx->abi->convert_undef_to_zero || is_def_used_in_an_export(&instr->def)) {
+		LLVMValueRef undef;
+
+		if (num_components == 1)
+			undef = LLVMGetUndef(type);
+		else {
+			undef = LLVMGetUndef(LLVMVectorType(type, num_components));
+		}
+		ctx->ssa_defs[instr->def.index] = undef;
+	} else {
+		LLVMValueRef zero = LLVMConstInt(type, 0, false);
+		if (num_components > 1) {
+			zero = ac_build_gather_values_extended(
+				&ctx->ac, &zero, 4, 0, false, false);
+		}
+		ctx->ssa_defs[instr->def.index] = zero;
 	}
-	ctx->ssa_defs[instr->def.index] = undef;
 }
 
 static void visit_jump(struct ac_llvm_context *ctx,
@@ -5225,6 +5298,10 @@ void ac_nir_translate(struct ac_llvm_context *ac, struct ac_shader_abi *abi,
 	ctx.vars = _mesa_hash_table_create(NULL, _mesa_hash_pointer,
 	                                   _mesa_key_pointer_equal);
 
+        if (ctx.abi->kill_ps_if_inf_interp)
+                ctx.verified_interp = _mesa_hash_table_create(NULL, _mesa_hash_pointer,
+                                                              _mesa_key_pointer_equal);
+
 	func = (struct nir_function *)exec_list_get_head(&nir->functions);
 
 	nir_index_ssa_defs(func->impl);
@@ -5259,6 +5336,8 @@ void ac_nir_translate(struct ac_llvm_context *ac, struct ac_shader_abi *abi,
 	ralloc_free(ctx.defs);
 	ralloc_free(ctx.phis);
 	ralloc_free(ctx.vars);
+        if (ctx.abi->kill_ps_if_inf_interp)
+                ralloc_free(ctx.verified_interp);
 }
 
 bool

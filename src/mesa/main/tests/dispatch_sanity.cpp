@@ -911,6 +911,10 @@ const struct function common_desktop_functions_possible[] = {
    { "glDepthRangeArrayv", 43, -1 },
    { "glDepthRangeIndexed", 43, -1 },
 
+/* GL 4.4 */
+   /* GL_NV_alpha_to_coverage_dither_control */
+   { "glAlphaToCoverageDitherControlNV", 44, -1 },
+
 /* GL 4.5 */
    /* aliased versions checked above */
    //{ "glGetGraphicsResetStatus", 45, -1 },
@@ -1437,6 +1441,8 @@ const struct function common_desktop_functions_possible[] = {
 
    /* GL_NV_viewport_swizzle */
    { "glViewportSwizzleNV", 11, -1 },
+
+   { "glInternalBufferSubDataCopyMESA", 11, -1 },
 
    { NULL, 0, -1 }
 };
@@ -2453,6 +2459,8 @@ const struct function gles2_functions_possible[] = {
    /* GL_KHR_parallel_shader_compile */
    { "glMaxShaderCompilerThreadsKHR", 20, -1 },
 
+   { "glInternalBufferSubDataCopyMESA", 20, -1 },
+
    { NULL, 0, -1 }
 };
 
@@ -2649,6 +2657,8 @@ const struct function gles3_functions_possible[] = {
 
    /* EXT_EGL_image_storage */
    { "glEGLImageTargetTexStorageEXT", 30, -1 },
+
+   { "glDrawElementsInstancedBaseVertex", 30, -1 },
 
    { NULL, 0, -1 }
 };

@@ -42,6 +42,7 @@
 struct ir3_cp_ctx {
 	struct ir3 *shader;
 	struct ir3_shader_variant *so;
+	bool progress;
 };
 
 /* is it a type preserving mov, with ok flags?
@@ -232,8 +233,8 @@ static bool valid_flags(struct ir3_instruction *instr, unsigned n,
 			if (instr->opc == OPC_LDLW && n == 0)
 				return false;
 
-			/* disallow CP into anything but the SSBO slot argument for
-			 * atomics:
+			/* disallow immediates in anything but the SSBO slot argument for
+			 * cat6 instructions:
 			 */
 			if (is_atomic(instr->opc) && (n != 0))
 				return false;
@@ -244,11 +245,19 @@ static bool valid_flags(struct ir3_instruction *instr, unsigned n,
 			if (instr->opc == OPC_STG && (instr->flags & IR3_INSTR_G) && (n != 2))
 				return false;
 
-			/* as with atomics, ldib and ldc on a6xx can only have immediate
-			 * for SSBO slot argument
+			/* as with atomics, these cat6 instrs can only have an immediate
+			 * for SSBO/IBO slot argument
 			 */
-			if ((instr->opc == OPC_LDIB || instr->opc == OPC_LDC) && (n != 0))
-				return false;
+			switch (instr->opc) {
+			case OPC_LDIB:
+			case OPC_LDC:
+			case OPC_RESINFO:
+				if (n != 0)
+					return false;
+				break;
+			default:
+				break;
+			}
 		}
 
 		break;
@@ -343,6 +352,9 @@ lower_immed(struct ir3_cp_ctx *ctx, struct ir3_register *reg, unsigned new_flags
 		const_state->immediates_size += 4;
 		const_state->immediates = realloc (const_state->immediates,
 			const_state->immediates_size * sizeof(const_state->immediates[0]));
+
+		for (int i = const_state->immediate_idx; i < const_state->immediates_size * 4; i++)
+			const_state->immediates[i / 4].val[i % 4] = 0xd0d0d0d0;
 	}
 
 	for (i = 0; i < const_state->immediate_idx; i++) {
@@ -478,8 +490,8 @@ reg_cp(struct ir3_cp_ctx *ctx, struct ir3_instruction *instr,
 		if (!valid_flags(instr, n, new_flags)) {
 			/* See if lowering an immediate to const would help. */
 			if (valid_flags(instr, n, (new_flags & ~IR3_REG_IMMED) | IR3_REG_CONST)) {
-				bool f_opcode = (ir3_cat2_float(instr->opc) ||
-						ir3_cat3_float(instr->opc)) ? true : false;
+				bool f_opcode = (is_cat2_float(instr->opc) ||
+						is_cat3_float(instr->opc)) ? true : false;
 
 				debug_assert(new_flags & IR3_REG_IMMED);
 
@@ -533,7 +545,7 @@ reg_cp(struct ir3_cp_ctx *ctx, struct ir3_instruction *instr,
 			if (src->cat1.dst_type == TYPE_F16) {
 				if (instr->opc == OPC_MOV && !type_float(instr->cat1.src_type))
 					return false;
-				if (!ir3_cat2_float(instr->opc) && !ir3_cat3_float(instr->opc))
+				if (!is_cat2_float(instr->opc) && !is_cat3_float(instr->opc))
 					return false;
 			}
 
@@ -594,8 +606,8 @@ reg_cp(struct ir3_cp_ctx *ctx, struct ir3_instruction *instr,
 
 				return true;
 			} else if (valid_flags(instr, n, (new_flags & ~IR3_REG_IMMED) | IR3_REG_CONST)) {
-				bool f_opcode = (ir3_cat2_float(instr->opc) ||
-						ir3_cat3_float(instr->opc)) ? true : false;
+				bool f_opcode = (is_cat2_float(instr->opc) ||
+						is_cat3_float(instr->opc)) ? true : false;
 
 				/* See if lowering an immediate to const would help. */
 				instr->regs[n+1] = lower_immed(ctx, src_reg, new_flags, f_opcode);
@@ -614,13 +626,14 @@ reg_cp(struct ir3_cp_ctx *ctx, struct ir3_instruction *instr,
  * be eliminated)
  */
 static struct ir3_instruction *
-eliminate_output_mov(struct ir3_instruction *instr)
+eliminate_output_mov(struct ir3_cp_ctx *ctx, struct ir3_instruction *instr)
 {
 	if (is_eligible_mov(instr, NULL, false)) {
 		struct ir3_register *reg = instr->regs[1];
 		if (!(reg->flags & IR3_REG_ARRAY)) {
 			struct ir3_instruction *src_instr = ssa(reg);
 			debug_assert(src_instr);
+			ctx->progress = true;
 			return src_instr;
 		}
 	}
@@ -634,8 +647,6 @@ eliminate_output_mov(struct ir3_instruction *instr)
 static void
 instr_cp(struct ir3_cp_ctx *ctx, struct ir3_instruction *instr)
 {
-	struct ir3_register *reg;
-
 	if (instr->regs_count == 0)
 		return;
 
@@ -665,6 +676,7 @@ instr_cp(struct ir3_cp_ctx *ctx, struct ir3_instruction *instr)
 				continue;
 
 			progress |= reg_cp(ctx, instr, reg, n);
+			ctx->progress |= progress;
 		}
 	} while (progress);
 
@@ -676,7 +688,7 @@ instr_cp(struct ir3_cp_ctx *ctx, struct ir3_instruction *instr)
 
 	if (instr->address) {
 		instr_cp(ctx, instr->address);
-		ir3_instr_set_address(instr, eliminate_output_mov(instr->address));
+		ir3_instr_set_address(instr, eliminate_output_mov(ctx, instr->address));
 	}
 
 	/* we can end up with extra cmps.s from frontend, which uses a
@@ -692,7 +704,8 @@ instr_cp(struct ir3_cp_ctx *ctx, struct ir3_instruction *instr)
 			(instr->regs[0]->num == regid(REG_P0, 0)) &&
 			ssa(instr->regs[1]) &&
 			(instr->regs[2]->flags & IR3_REG_IMMED) &&
-			(instr->regs[2]->iim_val == 0)) {
+			(instr->regs[2]->iim_val == 0) &&
+			(instr->cat2.condition == IR3_COND_NE)) {
 		struct ir3_instruction *cond = ssa(instr->regs[1]);
 		switch (cond->opc) {
 		case OPC_CMPS_S:
@@ -707,6 +720,7 @@ instr_cp(struct ir3_cp_ctx *ctx, struct ir3_instruction *instr)
 			instr->barrier_class |= cond->barrier_class;
 			instr->barrier_conflict |= cond->barrier_conflict;
 			unuse(cond);
+			ctx->progress = true;
 			break;
 		default:
 			break;
@@ -745,11 +759,13 @@ instr_cp(struct ir3_cp_ctx *ctx, struct ir3_instruction *instr)
 			for (unsigned i = 1; i < instr->regs_count; i++) {
 				instr->regs[i] = instr->regs[i + 1];
 			}
+
+			ctx->progress = true;
 		}
 	}
 }
 
-void
+bool
 ir3_cp(struct ir3 *ir, struct ir3_shader_variant *so)
 {
 	struct ir3_cp_ctx ctx = {
@@ -765,7 +781,6 @@ ir3_cp(struct ir3 *ir, struct ir3_shader_variant *so)
 	 */
 	foreach_block (block, &ir->block_list) {
 		foreach_instr (instr, &block->instr_list) {
-			struct ir3_instruction *src;
 
 			/* by the way, we don't account for false-dep's, so the CP
 			 * pass should always happen before false-dep's are inserted
@@ -780,21 +795,22 @@ ir3_cp(struct ir3 *ir, struct ir3_shader_variant *so)
 
 	ir3_clear_mark(ir);
 
-	struct ir3_instruction *out;
 	foreach_output_n (out, n, ir) {
 		instr_cp(&ctx, out);
-		ir->outputs[n] = eliminate_output_mov(out);
+		ir->outputs[n] = eliminate_output_mov(&ctx, out);
 	}
 
 	foreach_block (block, &ir->block_list) {
 		if (block->condition) {
 			instr_cp(&ctx, block->condition);
-			block->condition = eliminate_output_mov(block->condition);
+			block->condition = eliminate_output_mov(&ctx, block->condition);
 		}
 
 		for (unsigned i = 0; i < block->keeps_count; i++) {
 			instr_cp(&ctx, block->keeps[i]);
-			block->keeps[i] = eliminate_output_mov(block->keeps[i]);
+			block->keeps[i] = eliminate_output_mov(&ctx, block->keeps[i]);
 		}
 	}
+
+	return ctx.progress;
 }

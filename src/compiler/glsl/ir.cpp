@@ -345,9 +345,6 @@ ir_expression::ir_expression(int op, ir_rvalue *op0)
       this->type = glsl_type::get_instance(GLSL_TYPE_UINT64,
 					   op0->type->vector_elements, 1);
       break;
-   case ir_unop_noise:
-      this->type = glsl_type::float_type;
-      break;
 
    case ir_unop_unpack_double_2x32:
    case ir_unop_unpack_uint_2x32:
@@ -1837,6 +1834,7 @@ ir_variable::ir_variable(const struct glsl_type *type, const char *name,
    this->data.explicit_binding = false;
    this->data.explicit_component = false;
    this->data.has_initializer = false;
+   this->data.is_implicit_initializer = false;
    this->data.is_unmatched_generic_inout = false;
    this->data.is_xfb_only = false;
    this->data.explicit_xfb_buffer = false;

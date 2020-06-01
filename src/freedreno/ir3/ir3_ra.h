@@ -27,13 +27,7 @@
 #ifndef IR3_RA_H_
 #define IR3_RA_H_
 
-//#include "util/u_math.h"
-//#include "util/register_allocate.h"
-//#include "util/ralloc.h"
 #include "util/bitset.h"
-
-//#include "ir3.h"
-//#include "ir3_compiler.h"
 
 
 static const unsigned class_sizes[] = {
@@ -150,6 +144,8 @@ struct ir3_ra_ctx {
 	bool scalar_pass;
 
 	unsigned alloc_count;
+	unsigned r0_xyz_nodes; /* ra node numbers for r0.[xyz] precolors */
+	unsigned hr0_xyz_nodes; /* ra node numbers for hr0.[xyz] precolors pre-a6xx */
 	/* one per class, plus one slot for arrays: */
 	unsigned class_alloc_count[total_class_count + 1];
 	unsigned class_base[total_class_count + 1];
@@ -207,20 +203,6 @@ scalar_name(struct ir3_ra_ctx *ctx, struct ir3_instruction *instr, unsigned n)
 	}
 
 	return ra_name(ctx, &ctx->instrd[instr->ip]) + n;
-}
-
-static inline bool
-writes_gpr(struct ir3_instruction *instr)
-{
-	if (dest_regs(instr) == 0)
-		return false;
-	/* is dest a normal temp register: */
-	struct ir3_register *reg = instr->regs[0];
-	debug_assert(!(reg->flags & (IR3_REG_CONST | IR3_REG_IMMED)));
-	if ((reg_num(reg) == REG_A0) ||
-			(reg->num == regid(REG_P0, 0)))
-		return false;
-	return true;
 }
 
 #define NO_NAME ~0
@@ -326,7 +308,6 @@ __ra_init_use_itr(struct ir3_ra_ctx *ctx, struct ir3_instruction *instr)
 
 	ctx->namecnt = ctx->nameidx = 0;
 
-	struct ir3_register *reg;
 	foreach_src (reg, instr) {
 		if (reg->flags & IR3_REG_ARRAY) {
 			struct ir3_array *arr =

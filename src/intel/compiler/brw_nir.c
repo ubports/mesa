@@ -881,7 +881,8 @@ brw_vectorize_lower_mem_access(nir_shader *nir,
       OPT(nir_opt_load_store_vectorize,
           nir_var_mem_ubo | nir_var_mem_ssbo |
           nir_var_mem_global | nir_var_mem_shared,
-          brw_nir_should_vectorize_mem);
+          brw_nir_should_vectorize_mem,
+          (nir_variable_mode)0);
    }
 
    OPT(brw_nir_lower_mem_access_bit_sizes, devinfo);
@@ -982,7 +983,6 @@ brw_postprocess_nir(nir_shader *nir, const struct brw_compiler *compiler,
       OPT(nir_opt_cse);
    }
 
-   OPT(nir_lower_to_source_mods, nir_lower_all_source_mods);
    OPT(nir_copy_prop);
    OPT(nir_opt_dce);
    OPT(nir_opt_move, nir_move_comparisons);

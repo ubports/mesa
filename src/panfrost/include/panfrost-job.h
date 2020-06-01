@@ -297,7 +297,7 @@ enum mali_format {
 	MALI_RGB332_UNORM   = MALI_FORMAT_SPECIAL | 0xb,
 	MALI_RGB233_UNORM   = MALI_FORMAT_SPECIAL | 0xc,
 
-	MALI_Z32_UNORM      = MALI_FORMAT_SPECIAL | 0xd,
+	MALI_Z24X8_UNORM    = MALI_FORMAT_SPECIAL | 0xd,
 	MALI_R32_FIXED      = MALI_FORMAT_SPECIAL | 0x11,
 	MALI_RG32_FIXED     = MALI_FORMAT_SPECIAL | 0x12,
 	MALI_RGB32_FIXED    = MALI_FORMAT_SPECIAL | 0x13,
@@ -415,6 +415,38 @@ enum mali_format {
 /* Should be set when the fragment shader updates the stencil value. */
 #define MALI_WRITES_S (1 << 2)
 
+/* Mode to suppress generation of Infinity and NaN values by clamping inf
+ * (-inf) to MAX_FLOAT (-MIN_FLOAT) and flushing NaN to 0.0
+ *
+ * Compare suppress_inf/suppress_nan flags on the Bifrost clause header for the
+ * same functionality.
+ *
+ * This is not conformant on GLES3 or OpenCL, but is optional on GLES2, where
+ * it works around app bugs (e.g. in glmark2-es2 -bterrain with FP16).
+ */
+#define MALI_SUPPRESS_INF_NAN (1 << 3)
+
+/* Flags for bifrost1.unk1 */
+
+/* Shader uses less than 32 registers, partitioned as [R0, R15] U [R48, R63],
+ * allowing for full thread count. If clear, the full [R0, R63] register set is
+ * available at half thread count */
+#define MALI_BIFROST_FULL_THREAD (1 << 9)
+
+/* Enable early-z testing (presumably). This flag may not be set if the shader:
+ *
+ *  - Uses blending
+ *  - Uses discard
+ *  - Writes gl_FragDepth
+ *
+ * This differs from Midgard which sets the MALI_EARLY_Z flag even with
+ * blending, although I've begun to suspect that flag does not in fact enable
+ * EARLY_Z alone. */
+#define MALI_BIFROST_EARLY_Z (1 << 15)
+
+/* First clause type is ATEST */
+#define MALI_BIFROST_FIRST_ATEST (1 << 26)
+
 /* The raw Midgard blend payload can either be an equation or a shader
  * address, depending on the context */
 
@@ -457,6 +489,17 @@ struct midgard_blend_rt {
 /* On Bifrost systems (all MRT), each render target gets one of these
  * descriptors */
 
+enum bifrost_shader_type {
+        BIFROST_BLEND_F16 = 0,
+        BIFROST_BLEND_F32 = 1,
+        BIFROST_BLEND_I32 = 2,
+        BIFROST_BLEND_U32 = 3,
+        BIFROST_BLEND_I16 = 4,
+        BIFROST_BLEND_U16 = 5,
+};
+
+#define BIFROST_MAX_RENDER_TARGET_COUNT 8
+
 struct bifrost_blend_rt {
         /* This is likely an analogue of the flags on
          * midgard_blend_rt */
@@ -473,57 +516,53 @@ struct bifrost_blend_rt {
          * constant_hi = int(f / 255)
          * constant_lo = 65535*f - (65535/255) * constant_hi
          */
-
         u16 constant;
 
         struct mali_blend_equation equation;
+
         /*
          * - 0x19 normally
          * - 0x3 when this slot is unused (everything else is 0 except the index)
          * - 0x11 when this is the fourth slot (and it's used)
-+	 * - 0 when there is a blend shader
+         * - 0 when there is a blend shader
          */
         u16 unk2;
+
         /* increments from 0 to 3 */
         u16 index;
 
-	union {
-		struct {
-			/* So far, I've only seen:
-			 * - R001 for 1-component formats
-			 * - RG01 for 2-component formats
-			 * - RGB1 for 3-component formats
-			 * - RGBA for 4-component formats
-			 */
-			u32 swizzle : 12;
-			enum mali_format format : 8;
+        union {
+                struct {
+                        /* So far, I've only seen:
+                         * - R001 for 1-component formats
+                         * - RG01 for 2-component formats
+                         * - RGB1 for 3-component formats
+                         * - RGBA for 4-component formats
+                         */
+                        u32 swizzle : 12;
+                        enum mali_format format : 8;
 
-			/* Type of the shader output variable. Note, this can
-			 * be different from the format.
-			 *
-			 * 0: f16 (mediump float)
-			 * 1: f32 (highp float)
-			 * 2: i32 (highp int)
-			 * 3: u32 (highp uint)
-			 * 4: i16 (mediump int)
-			 * 5: u16 (mediump uint)
-			 */
-			u32 shader_type : 3;
-			u32 zero : 9;
-		};
+                        /* Type of the shader output variable. Note, this can
+                          * be different from the format.
+                          * enum bifrost_shader_type
+                         */
+                        u32 zero1 : 4;
+                        u32 shader_type : 3;
+                        u32 zero2 : 5;
+                };
 
-		/* Only the low 32 bits of the blend shader are stored, the
-		 * high 32 bits are implicitly the same as the original shader.
-		 * According to the kernel driver, the program counter for
-		 * shaders is actually only 24 bits, so shaders cannot cross
-		 * the 2^24-byte boundary, and neither can the blend shader.
-		 * The blob handles this by allocating a 2^24 byte pool for
-		 * shaders, and making sure that any blend shaders are stored
-		 * in the same pool as the original shader. The kernel will
-		 * make sure this allocation is aligned to 2^24 bytes.
-		 */
-		u32 shader;
-	};
+                /* Only the low 32 bits of the blend shader are stored, the
+                 * high 32 bits are implicitly the same as the original shader.
+                 * According to the kernel driver, the program counter for
+                 * shaders is actually only 24 bits, so shaders cannot cross
+                 * the 2^24-byte boundary, and neither can the blend shader.
+                 * The blob handles this by allocating a 2^24 byte pool for
+                 * shaders, and making sure that any blend shaders are stored
+                 * in the same pool as the original shader. The kernel will
+                 * make sure this allocation is aligned to 2^24 bytes.
+                 */
+                u32 shader;
+        };
 } __attribute__((packed));
 
 /* Descriptor for the shader. Following this is at least one, up to four blend
@@ -1028,16 +1067,19 @@ struct bifrost_tiler_heap_meta {
         mali_ptr tiler_heap_end;
 
         /* hierarchy weights? but they're still 0 after the job has run... */
-        u32 zeros[12];
+        u32 zeros[10];
+        u32 unk1;
+        u32 unk7e007e;
 } __attribute__((packed));
 
 struct bifrost_tiler_meta {
-        u64 zero0;
-        u16 hierarchy_mask;
+        u32 tiler_heap_next_start;  /* To be written by the GPU */
+        u32 used_hierarchy_mask;  /* To be written by the GPU */
+        u16 hierarchy_mask; /* Five values observed: 0xa, 0x14, 0x28, 0x50, 0xa0 */
         u16 flags;
         u16 width;
         u16 height;
-        u64 zero1;
+        u64 zero0;
         mali_ptr tiler_heap_meta;
         /* TODO what is this used for? */
         u64 zeros[20];
@@ -1080,11 +1122,12 @@ struct mali_vertex_tiler_postfix {
          */
         u64 uniform_buffers;
 
-        /* This is a pointer to an array of pointers to the texture
+        /* On Bifrost, this is a pointer to an array of bifrost_texture_descriptor.
+         * On Midgard, this is a pointer to an array of pointers to the texture
          * descriptors, number of pointers bounded by number of textures. The
          * indirection is needed to accomodate varying numbers and sizes of
          * texture descriptors */
-        u64 texture_trampoline;
+        u64 textures;
 
         /* For OpenGL, from what I've seen, this is intimately connected to
          * texture_meta. cwabbott says this is not the case under Vulkan, hence
@@ -1236,6 +1279,39 @@ struct mali_texture_descriptor {
         uint32_t unknown7;
 } __attribute__((packed));
 
+/* While Midgard texture descriptors are variable length, Bifrost descriptors
+ * are fixed like samplers with more pointers to expand if necessary */
+
+struct bifrost_texture_descriptor {
+        unsigned format_unk : 4; /* 2 */
+        enum mali_texture_type type : 2;
+        unsigned zero : 4;
+        unsigned format_swizzle : 12;
+        enum mali_format format : 8;
+        unsigned srgb : 1;
+        unsigned format_unk3 : 1; /* 0 */
+
+        uint16_t width; /* MALI_POSITIVE */
+        uint16_t height; /* MALI_POSITIVE */
+
+        /* OpenGL swizzle */
+        unsigned swizzle : 12;
+        enum mali_texture_layout layout : 4;
+        uint8_t levels : 8; /* Number of levels-1 if mipmapped, 0 if not */
+        unsigned unk1 : 8;
+
+        unsigned levels_unk : 24; /* 0 */
+        unsigned level_2 : 8; /* Number of levels, again? */
+
+        mali_ptr payload;
+
+        uint16_t array_size;
+        uint16_t unk4;
+
+        uint16_t depth;
+        uint16_t unk5;
+} __attribute__((packed));
+
 /* filter_mode */
 
 #define MALI_SAMP_MAG_NEAREST (1 << 0)
@@ -1295,6 +1371,35 @@ struct mali_sampler_descriptor {
 
         uint32_t zero2;
         float border_color[4];
+} __attribute__((packed));
+
+/* Bifrost sampler descriptors look pretty similar */
+
+#define BIFROST_SAMP_MIN_NEAREST        (1)
+#define BIFROST_SAMP_MAG_LINEAR         (1)
+
+struct bifrost_sampler_descriptor {
+        uint8_t unk1;
+
+        enum mali_wrap_mode wrap_r : 4;
+        enum mali_wrap_mode wrap_t : 4;
+        enum mali_wrap_mode wrap_s : 4;
+        uint8_t unk8 : 4;
+
+        uint8_t unk2 : 1;
+        uint8_t norm_coords : 1;
+        uint8_t unk3 : 1;
+        uint8_t min_filter : 1;
+        uint8_t zero1 : 1;
+        uint8_t mag_filter : 1;
+        uint8_t mip_filter : 1;
+
+        int16_t min_lod;
+        int16_t max_lod;
+
+        uint64_t zero2;
+        uint64_t zero3;
+        uint64_t zero4;
 } __attribute__((packed));
 
 /* viewport0/viewport1 form the arguments to glViewport. viewport1 is
@@ -1566,7 +1671,8 @@ struct mali_rt_format {
 
         unsigned nr_channels : 2; /* MALI_POSITIVE */
 
-        unsigned unk3 : 5;
+        unsigned unk3 : 4;
+        unsigned unk4 : 1;
         enum mali_block_format block : 2;
         unsigned flags : 4;
 
@@ -1668,7 +1774,9 @@ struct mali_framebuffer_extra  {
         };
 
 
-        u64 zero3, zero4;
+        u32 clear_color_1;
+        u32 clear_color_2;
+        u64 zero3;
 } __attribute__((packed));
 
 /* Flags for mfbd_flags */

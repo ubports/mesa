@@ -160,11 +160,14 @@ VkResult radv_CreateShaderModule(
 	assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO);
 	assert(pCreateInfo->flags == 0);
 
-	module = vk_alloc2(&device->alloc, pAllocator,
+	module = vk_alloc2(&device->vk.alloc, pAllocator,
 			     sizeof(*module) + pCreateInfo->codeSize, 8,
 			     VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
 	if (module == NULL)
 		return vk_error(device->instance, VK_ERROR_OUT_OF_HOST_MEMORY);
+
+	vk_object_base_init(&device->vk, &module->base,
+			    VK_OBJECT_TYPE_SHADER_MODULE);
 
 	module->nir = NULL;
 	module->size = pCreateInfo->codeSize;
@@ -188,7 +191,8 @@ void radv_DestroyShaderModule(
 	if (!module)
 		return;
 
-	vk_free2(&device->alloc, pAllocator, module);
+	vk_object_base_finish(&module->base);
+	vk_free2(&device->vk.alloc, pAllocator, module);
 }
 
 void
@@ -320,24 +324,40 @@ radv_shader_compile_to_nir(struct radv_device *device,
 		struct nir_spirv_specialization *spec_entries = NULL;
 		if (spec_info && spec_info->mapEntryCount > 0) {
 			num_spec_entries = spec_info->mapEntryCount;
-			spec_entries = malloc(num_spec_entries * sizeof(*spec_entries));
+			spec_entries = calloc(num_spec_entries, sizeof(*spec_entries));
 			for (uint32_t i = 0; i < num_spec_entries; i++) {
 				VkSpecializationMapEntry entry = spec_info->pMapEntries[i];
 				const void *data = spec_info->pData + entry.offset;
 				assert(data + entry.size <= spec_info->pData + spec_info->dataSize);
 
 				spec_entries[i].id = spec_info->pMapEntries[i].constantID;
-				if (spec_info->dataSize == 8)
-					spec_entries[i].data64 = *(const uint64_t *)data;
-				else
-					spec_entries[i].data32 = *(const uint32_t *)data;
+				switch (entry.size) {
+				case 8:
+					spec_entries[i].value.u64 = *(const uint64_t *)data;
+					break;
+				case 4:
+					spec_entries[i].value.u32 = *(const uint32_t *)data;
+					break;
+				case 2:
+					spec_entries[i].value.u16 = *(const uint16_t *)data;
+					break;
+				case 1:
+					spec_entries[i].value.u8 = *(const uint8_t *)data;
+					break;
+				default:
+					assert(!"Invalid spec constant size");
+					break;
+				}
 			}
 		}
+		bool int8_int16_enable = !device->physical_device->use_aco ||
+					 device->physical_device->rad_info.chip_class >= GFX8;
 		const struct spirv_to_nir_options spirv_options = {
 			.lower_ubo_ssbo_access_to_offsets = true,
 			.caps = {
 				.amd_fragment_mask = true,
 				.amd_gcn_shader = true,
+				.amd_image_gather_bias_lod = true,
 				.amd_image_read_write_lod = true,
 				.amd_shader_ballot = device->physical_device->use_shader_ballot,
 				.amd_shader_explicit_vertex_parameter = true,
@@ -356,10 +376,11 @@ radv_shader_compile_to_nir(struct radv_device *device,
 				.image_ms_array = true,
 				.image_read_without_format = true,
 				.image_write_without_format = true,
-				.int8 = !device->physical_device->use_aco,
-				.int16 = !device->physical_device->use_aco,
+				.int8 = int8_int16_enable,
+				.int16 = int8_int16_enable,
 				.int64 = true,
 				.int64_atomics = true,
+				.min_lod = true,
 				.multiview = true,
 				.physical_storage_buffer_address = true,
 				.post_depth_coverage = true,
@@ -367,8 +388,8 @@ radv_shader_compile_to_nir(struct radv_device *device,
 				.shader_clock = true,
 				.shader_viewport_index_layer = true,
 				.stencil_export = true,
-				.storage_8bit = !device->physical_device->use_aco,
-				.storage_16bit = !device->physical_device->use_aco,
+				.storage_8bit = int8_int16_enable,
+				.storage_16bit = int8_int16_enable,
 				.storage_image_ms = true,
 				.subgroup_arithmetic = true,
 				.subgroup_ballot = true,
@@ -628,7 +649,7 @@ radv_alloc_shader_memory(struct radv_device *device,
 			}
 			offset = align_u64(s->bo_offset + s->code_size, 256);
 		}
-		if (slab->size - offset >= shader->code_size) {
+		if (offset <= slab->size && slab->size - offset >= shader->code_size) {
 			shader->bo = slab->bo;
 			shader->bo_offset = offset;
 			list_addtail(&shader->slab_list, &slab->shaders);
@@ -640,7 +661,7 @@ radv_alloc_shader_memory(struct radv_device *device,
 	mtx_unlock(&device->shader_slab_mutex);
 	struct radv_shader_slab *slab = calloc(1, sizeof(struct radv_shader_slab));
 
-	slab->size = 256 * 1024;
+	slab->size = MAX2(256 * 1024, shader->code_size);
 	slab->bo = device->ws->buffer_create(device->ws, slab->size, 256,
 	                                     RADEON_DOMAIN_VRAM,
 					     RADEON_FLAG_NO_INTERPROCESS_SHARING |
@@ -798,8 +819,8 @@ static void radv_postprocess_config(const struct radv_physical_device *pdevice,
 			}
 
 			config_out->rsrc1 |= S_00B128_MEM_ORDERED(pdevice->rad_info.chip_class >= GFX10);
-			config_out->rsrc2 |= S_00B12C_SHARED_VGPR_CNT(num_shared_vgpr_blocks);
 		}
+		config_out->rsrc2 |= S_00B12C_SHARED_VGPR_CNT(num_shared_vgpr_blocks);
 		break;
 	case MESA_SHADER_FRAGMENT:
 		config_out->rsrc1 |= S_00B028_MEM_ORDERED(pdevice->rad_info.chip_class >= GFX10);

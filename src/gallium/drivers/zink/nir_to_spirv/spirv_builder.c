@@ -27,6 +27,8 @@
 #include "util/u_bitcast.h"
 #include "util/u_memory.h"
 #include "util/hash_table.h"
+#define XXH_INLINE_ALL
+#include "util/xxhash.h"
 
 #include <stdbool.h>
 #include <inttypes.h>
@@ -595,16 +597,27 @@ spirv_builder_emit_image_fetch(struct spirv_builder *b,
                                SpvId result_type,
                                SpvId image,
                                SpvId coordinate,
-                               SpvId lod)
+                               SpvId lod,
+                               SpvId sample)
 {
    SpvId result = spirv_builder_new_id(b);
 
-   SpvId extra_operands[2];
+   SpvImageOperandsMask operand_mask = SpvImageOperandsMaskNone;
+   SpvId extra_operands[3];
    int num_extra_operands = 0;
    if (lod) {
-      extra_operands[0] = SpvImageOperandsLodMask;
-      extra_operands[1] = lod;
-      num_extra_operands = 2;
+      extra_operands[++num_extra_operands] = lod;
+      operand_mask |= SpvImageOperandsLodMask;
+   }
+   if (sample) {
+      extra_operands[++num_extra_operands] = sample;
+      operand_mask |= SpvImageOperandsSampleMask;
+   }
+
+   /* finalize num_extra_operands / extra_operands */
+   if (num_extra_operands > 0) {
+      extra_operands[0] = operand_mask;
+      num_extra_operands++;
    }
 
    spirv_buffer_prepare(&b->instructions, 5 + num_extra_operands);
@@ -677,10 +690,9 @@ non_aggregate_type_hash(const void *arg)
 {
    const struct spirv_type *type = arg;
 
-   uint32_t hash = _mesa_fnv32_1a_offset_bias;
-   hash = _mesa_fnv32_1a_accumulate(hash, type->op);
-   hash = _mesa_fnv32_1a_accumulate_block(hash, type->args, sizeof(uint32_t) *
-                                          type->num_args);
+   uint32_t hash = 0;
+   hash = XXH32(&type->op, sizeof(type->op), hash);
+   hash = XXH32(type->args, sizeof(uint32_t) * type->num_args, hash);
    return hash;
 }
 
@@ -883,11 +895,10 @@ const_hash(const void *arg)
 {
    const struct spirv_const *key = arg;
 
-   uint32_t hash = _mesa_fnv32_1a_offset_bias;
-   hash = _mesa_fnv32_1a_accumulate(hash, key->op);
-   hash = _mesa_fnv32_1a_accumulate(hash, key->type);
-   hash = _mesa_fnv32_1a_accumulate_block(hash, key->args, sizeof(uint32_t) *
-                                          key->num_args);
+   uint32_t hash = 0;
+   hash = XXH32(&key->op, sizeof(key->op), hash);
+   hash = XXH32(&key->type, sizeof(key->type), hash);
+   hash = XXH32(key->args, sizeof(uint32_t) * key->num_args, hash);
    return hash;
 }
 

@@ -105,7 +105,7 @@
 #define SI_MAP_BUFFER_ALIGNMENT           64
 #define SI_MAX_VARIABLE_THREADS_PER_BLOCK 1024
 
-#define SI_RESOURCE_FLAG_TRANSFER          (PIPE_RESOURCE_FLAG_DRV_PRIV << 0)
+#define SI_RESOURCE_FLAG_FORCE_LINEAR      (PIPE_RESOURCE_FLAG_DRV_PRIV << 0)
 #define SI_RESOURCE_FLAG_FLUSHED_DEPTH     (PIPE_RESOURCE_FLAG_DRV_PRIV << 1)
 #define SI_RESOURCE_FLAG_FORCE_MSAA_TILING (PIPE_RESOURCE_FLAG_DRV_PRIV << 2)
 #define SI_RESOURCE_FLAG_DISABLE_DCC       (PIPE_RESOURCE_FLAG_DRV_PRIV << 3)
@@ -122,6 +122,7 @@
    (((x)&0x3) << SI_RESOURCE_FLAG_MICRO_TILE_MODE_SHIFT)
 #define SI_RESOURCE_FLAG_MICRO_TILE_MODE_GET(x)                                                    \
    (((x) >> SI_RESOURCE_FLAG_MICRO_TILE_MODE_SHIFT) & 0x3)
+#define SI_RESOURCE_FLAG_UNCACHED          (PIPE_RESOURCE_FLAG_DRV_PRIV << 12)
 
 enum si_clear_code
 {
@@ -134,6 +135,7 @@ enum si_clear_code
 };
 
 #define SI_IMAGE_ACCESS_AS_BUFFER (1 << 7)
+#define SI_IMAGE_ACCESS_DCC_OFF   (1 << 8)
 
 /* Debug flags. */
 enum
@@ -159,6 +161,7 @@ enum
    DBG_W64_GE,
    DBG_W64_PS,
    DBG_W64_CS,
+   DBG_KILL_PS_INF_INTERP,
 
    /* Shader compiler options (with no effect on the shader cache): */
    DBG_CHECK_IR,
@@ -237,6 +240,7 @@ enum si_coherency
    SI_COHERENCY_NONE, /* no cache flushes needed */
    SI_COHERENCY_SHADER,
    SI_COHERENCY_CB_META,
+   SI_COHERENCY_DB_META,
    SI_COHERENCY_CP,
 };
 
@@ -334,6 +338,7 @@ struct si_texture {
    uint8_t stencil_clear_value;
    bool fmask_is_identity : 1;
    bool tc_compatible_htile : 1;
+   bool enable_tc_compatible_htile_next_clear : 1;
    bool htile_stencil_disabled : 1;
    bool depth_cleared : 1;   /* if it was cleared at least once */
    bool stencil_cleared : 1; /* if it was cleared at least once */
@@ -926,6 +931,7 @@ struct si_context {
    void *cs_clear_render_target;
    void *cs_clear_render_target_1d_array;
    void *cs_clear_12bytes_buffer;
+   void *cs_dcc_decompress;
    void *cs_dcc_retile;
    void *cs_fmask_expand[3][2]; /* [log2(samples)-1][is_array] */
    struct si_screen *screen;
@@ -1315,7 +1321,8 @@ void si_copy_buffer(struct si_context *sctx, struct pipe_resource *dst, struct p
                     uint64_t dst_offset, uint64_t src_offset, unsigned size);
 void si_compute_copy_image(struct si_context *sctx, struct pipe_resource *dst, unsigned dst_level,
                            struct pipe_resource *src, unsigned src_level, unsigned dstx,
-                           unsigned dsty, unsigned dstz, const struct pipe_box *src_box);
+                           unsigned dsty, unsigned dstz, const struct pipe_box *src_box,
+                           bool is_dcc_decompress);
 void si_compute_clear_render_target(struct pipe_context *ctx, struct pipe_surface *dstsurf,
                                     const union pipe_color_union *color, unsigned dstx,
                                     unsigned dsty, unsigned width, unsigned height,
@@ -1330,9 +1337,10 @@ void si_init_compute_blit_functions(struct si_context *sctx);
 #define SI_CPDMA_SKIP_SYNC_BEFORE    (1 << 2) /* don't wait for DMA before the copy (RAW hazards) */
 #define SI_CPDMA_SKIP_GFX_SYNC       (1 << 3) /* don't flush caches and don't wait for PS/CS */
 #define SI_CPDMA_SKIP_BO_LIST_UPDATE (1 << 4) /* don't update the BO list */
+#define SI_CPDMA_SKIP_TMZ            (1 << 5) /* don't update tmz state */
 #define SI_CPDMA_SKIP_ALL                                                                          \
    (SI_CPDMA_SKIP_CHECK_CS_SPACE | SI_CPDMA_SKIP_SYNC_AFTER | SI_CPDMA_SKIP_SYNC_BEFORE |          \
-    SI_CPDMA_SKIP_GFX_SYNC | SI_CPDMA_SKIP_BO_LIST_UPDATE)
+    SI_CPDMA_SKIP_GFX_SYNC | SI_CPDMA_SKIP_BO_LIST_UPDATE | SI_CPDMA_SKIP_TMZ)
 
 void si_cp_dma_wait_for_idle(struct si_context *sctx);
 void si_cp_dma_clear_buffer(struct si_context *sctx, struct radeon_cmdbuf *cs,
@@ -1399,6 +1407,7 @@ void si_init_screen_get_functions(struct si_screen *sscreen);
 /* si_gfx_cs.c */
 void si_flush_gfx_cs(struct si_context *ctx, unsigned flags, struct pipe_fence_handle **fence);
 void si_allocate_gds(struct si_context *ctx);
+void si_set_tracked_regs_to_clear_state(struct si_context *ctx);
 void si_begin_new_gfx_cs(struct si_context *ctx);
 void si_need_gfx_cs_space(struct si_context *ctx);
 void si_unref_sdma_uploads(struct si_context *sctx);
@@ -1454,6 +1463,7 @@ void *si_create_dma_compute_shader(struct pipe_context *ctx, unsigned num_dwords
                                    bool dst_stream_cache_policy, bool is_copy);
 void *si_create_copy_image_compute_shader(struct pipe_context *ctx);
 void *si_create_copy_image_compute_shader_1d_array(struct pipe_context *ctx);
+void *si_create_dcc_decompress_cs(struct pipe_context *ctx);
 void *si_clear_render_target_shader(struct pipe_context *ctx);
 void *si_clear_render_target_shader_1d_array(struct pipe_context *ctx);
 void *si_clear_12bytes_buffer_shader(struct pipe_context *ctx);
@@ -1489,7 +1499,8 @@ void si_init_viewport_functions(struct si_context *ctx);
 bool si_prepare_for_dma_blit(struct si_context *sctx, struct si_texture *dst, unsigned dst_level,
                              unsigned dstx, unsigned dsty, unsigned dstz, struct si_texture *src,
                              unsigned src_level, const struct pipe_box *src_box);
-void si_eliminate_fast_color_clear(struct si_context *sctx, struct si_texture *tex);
+void si_eliminate_fast_color_clear(struct si_context *sctx, struct si_texture *tex,
+                                   bool *ctx_flushed);
 void si_texture_discard_cmask(struct si_screen *sscreen, struct si_texture *tex);
 bool si_init_flushed_depth_texture(struct pipe_context *ctx, struct pipe_resource *texture);
 void si_print_texture_info(struct si_screen *sscreen, struct si_texture *tex,

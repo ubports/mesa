@@ -36,17 +36,13 @@
 #include "util/u_hash_table.h"
 #include "util/hash_table.h"
 #include "util/xmlconfig.h"
-#include <amdgpu_drm.h>
+#include "drm-uapi/amdgpu_drm.h"
 #include <xf86drm.h>
 #include <stdio.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include "ac_llvm_util.h"
 #include "sid.h"
-
-#ifndef AMDGPU_INFO_NUM_VRAM_CPU_PAGE_FAULTS
-#define AMDGPU_INFO_NUM_VRAM_CPU_PAGE_FAULTS	0x1E
-#endif
 
 static struct hash_table *dev_tab = NULL;
 static simple_mtx_t dev_tab_mutex = _SIMPLE_MTX_INITIALIZER_NP;
@@ -116,6 +112,11 @@ static bool do_winsys_init(struct amdgpu_winsys *ws,
    ws->zero_all_vram_allocs = strstr(debug_get_option("R600_DEBUG", ""), "zerovram") != NULL ||
                               strstr(debug_get_option("AMD_DEBUG", ""), "zerovram") != NULL ||
                               driQueryOptionb(config->options, "radeonsi_zerovram");
+   ws->secure = strstr(debug_get_option("AMD_DEBUG", ""), "tmz");
+
+   if (ws->secure) {
+      fprintf(stderr, "=== TMZ usage enabled ===\n");
+   }
 
    return true;
 
@@ -329,6 +330,24 @@ static bool kms_handle_equals(const void *a, const void *b)
    return a == b;
 }
 
+static bool amdgpu_ws_is_secure(struct radeon_winsys *rws)
+{
+   struct amdgpu_winsys *ws = amdgpu_winsys(rws);
+   return ws->secure;
+}
+
+static bool amdgpu_cs_is_secure(struct radeon_cmdbuf *rcs)
+{
+   struct amdgpu_cs *cs = amdgpu_cs(rcs);
+   return cs->csc->secure;
+}
+
+static void amdgpu_cs_set_secure(struct radeon_cmdbuf *rcs, bool secure)
+{
+   struct amdgpu_cs *cs = amdgpu_cs(rcs);
+   cs->csc->secure = secure;
+}
+
 PUBLIC struct radeon_winsys *
 amdgpu_winsys_create(int fd, const struct pipe_screen_config *config,
 		     radeon_screen_create_t screen_create)
@@ -437,8 +456,20 @@ amdgpu_winsys_create(int fd, const struct pipe_screen_config *config,
                             RADEON_MAX_SLAB_HEAPS,
                             aws,
                             amdgpu_bo_can_reclaim_slab,
-                            amdgpu_bo_slab_alloc,
+                            amdgpu_bo_slab_alloc_normal,
                             amdgpu_bo_slab_free)) {
+            amdgpu_winsys_destroy(&ws->base);
+            simple_mtx_unlock(&dev_tab_mutex);
+            return NULL;
+         }
+
+         if (aws->secure && !pb_slabs_init(&aws->bo_slabs_encrypted[i],
+                                           min_order, max_order,
+                                           RADEON_MAX_SLAB_HEAPS,
+                                           aws,
+                                           amdgpu_bo_can_reclaim_slab,
+                                           amdgpu_bo_slab_alloc_encrypted,
+                                           amdgpu_bo_slab_free)) {
             amdgpu_winsys_destroy(&ws->base);
             simple_mtx_unlock(&dev_tab_mutex);
             return NULL;
@@ -489,6 +520,9 @@ amdgpu_winsys_create(int fd, const struct pipe_screen_config *config,
    ws->base.query_value = amdgpu_query_value;
    ws->base.read_registers = amdgpu_read_registers;
    ws->base.pin_threads_to_L3_cache = amdgpu_pin_threads_to_L3_cache;
+   ws->base.ws_is_secure = amdgpu_ws_is_secure;
+   ws->base.cs_is_secure = amdgpu_cs_is_secure;
+   ws->base.cs_set_secure = amdgpu_cs_set_secure;
 
    amdgpu_bo_init_functions(ws);
    amdgpu_cs_init_functions(ws);

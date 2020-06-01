@@ -46,6 +46,7 @@ vtn_handle_amd_gcn_shader_instruction(struct vtn_builder *b, SpvOp ext_opcode,
       nir_intrinsic_instr *intrin = nir_intrinsic_instr_create(b->nb.shader,
                                     nir_intrinsic_shader_clock);
       nir_ssa_dest_init(&intrin->instr, &intrin->dest, 2, 32, NULL);
+      nir_intrinsic_set_memory_scope(intrin, NIR_SCOPE_SUBGROUP);
       nir_builder_instr_insert(&b->nb, &intrin->instr);
       val->ssa->def = nir_pack_64_2x32(&b->nb, &intrin->dest.ssa);
       break;
@@ -219,13 +220,8 @@ vtn_handle_amd_shader_explicit_vertex_parameter_instruction(struct vtn_builder *
 
    if (vec_array_deref) {
       assert(vec_deref);
-      if (nir_src_is_const(vec_deref->arr.index)) {
-         val->ssa->def = vtn_vector_extract(b, &intrin->dest.ssa,
-                                            nir_src_as_uint(vec_deref->arr.index));
-      } else {
-         val->ssa->def = vtn_vector_extract_dynamic(b, &intrin->dest.ssa,
-                                                    vec_deref->arr.index.ssa);
-      }
+      val->ssa->def = nir_vector_extract(&b->nb, &intrin->dest.ssa,
+                                         vec_deref->arr.index.ssa);
    } else {
       val->ssa->def = &intrin->dest.ssa;
    }

@@ -65,7 +65,9 @@
 
 #include <llvm/Support/TargetSelect.h>
 
+#if LLVM_VERSION_MAJOR < 11
 #include <llvm/IR/CallSite.h>
+#endif
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Support/CBindingWrapping.h>
@@ -141,11 +143,11 @@ static void init_native_targets()
 extern "C" void
 lp_set_target_options(void)
 {
-   /* The llvm target registry is not thread-safe, so drivers and state-trackers
+   /* The llvm target registry is not thread-safe, so drivers and gallium frontends
     * that want to initialize targets should use the lp_set_target_options()
     * function to safely initialize targets.
     *
-    * LLVM targets should be initialized before the driver or state-tracker tries
+    * LLVM targets should be initialized before the driver or gallium frontend tries
     * to access the registry.
     */
    call_once(&init_native_targets_once_flag, init_native_targets);

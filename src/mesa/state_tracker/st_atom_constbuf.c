@@ -31,7 +31,7 @@
  *   Brian Paul
  */
 
-#include "util/imports.h"
+
 #include "program/prog_parameter.h"
 #include "program/prog_print.h"
 #include "main/shaderapi.h"
@@ -204,7 +204,7 @@ st_bind_ubos(struct st_context *st, struct gl_program *prog,
    if (!prog)
       return;
 
-   for (i = 0; i < prog->info.num_ubos; i++) {
+   for (i = 0; i < prog->sh.NumUniformBlocks; i++) {
       struct gl_buffer_binding *binding;
       struct st_buffer_object *st_obj;
 

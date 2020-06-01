@@ -141,22 +141,13 @@ static int emit_cat0(struct ir3_instruction *instr, void *ptr,
 	}
 	cat0->repeat   = instr->repeat;
 	cat0->ss       = !!(instr->flags & IR3_INSTR_SS);
-	cat0->inv      = instr->cat0.inv;
-	cat0->comp     = instr->cat0.comp;
+	cat0->inv0     = instr->cat0.inv;
+	cat0->comp0    = instr->cat0.comp;
 	cat0->opc      = instr->opc;
+	cat0->opc_hi   = instr->opc >= 16;
 	cat0->jmp_tgt  = !!(instr->flags & IR3_INSTR_JP);
 	cat0->sync     = !!(instr->flags & IR3_INSTR_SY);
 	cat0->opc_cat  = 0;
-
-	switch (instr->opc) {
-	case OPC_IF:
-	case OPC_ELSE:
-	case OPC_ENDIF:
-		cat0->dummy4 = 16;
-		break;
-	default:
-		break;
-	}
 
 	return 0;
 }
@@ -544,24 +535,13 @@ static int emit_cat5(struct ir3_instruction *instr, void *ptr,
 static int emit_cat6_a6xx(struct ir3_instruction *instr, void *ptr,
 		struct ir3_info *info)
 {
-	struct ir3_register *src1, *src2, *ssbo;
+	struct ir3_register *ssbo;
 	instr_cat6_a6xx_t *cat6 = ptr;
-	bool has_dest = (instr->opc == OPC_LDIB || instr->opc == OPC_LDC);
 
 	ssbo = instr->regs[1];
-	src1 = instr->regs[2];
-
-	if (has_dest) {
-		/* the src2 field in the instruction is actually the destination
-		 * register for load instructions:
-		 */
-		src2 = instr->regs[0];
-	} else {
-		src2 = instr->regs[3];
-	}
 
 	cat6->type      = instr->cat6.type;
-	cat6->d         = instr->cat6.d - 1;
+	cat6->d         = instr->cat6.d - (instr->opc == OPC_LDC ? 0 : 1);
 	cat6->typed     = instr->cat6.typed;
 	cat6->type_size = instr->cat6.iim_val - 1;
 	cat6->opc       = instr->opc;
@@ -569,9 +549,26 @@ static int emit_cat6_a6xx(struct ir3_instruction *instr, void *ptr,
 	cat6->sync      = !!(instr->flags & IR3_INSTR_SY);
 	cat6->opc_cat   = 6;
 
-	cat6->src1 = reg(src1, info, instr->repeat, 0);
-	cat6->src2 = reg(src2, info, instr->repeat, 0);
 	cat6->ssbo = reg(ssbo, info, instr->repeat, IR3_REG_IMMED);
+
+	/* For unused sources in an opcode, initialize contents with the ir3 dest
+	 * reg
+	 */
+	switch (instr->opc) {
+	case OPC_RESINFO:
+		cat6->src1 = reg(instr->regs[0], info, instr->repeat, 0);
+		cat6->src2 = reg(instr->regs[0], info, instr->repeat, 0);
+		break;
+	case OPC_LDC:
+	case OPC_LDIB:
+		cat6->src1 = reg(instr->regs[2], info, instr->repeat, 0);
+		cat6->src2 = reg(instr->regs[0], info, instr->repeat, 0);
+		break;
+	default:
+		cat6->src1 = reg(instr->regs[2], info, instr->repeat, 0);
+		cat6->src2 = reg(instr->regs[3], info, instr->repeat, 0);
+		break;
+	}
 
 	if (instr->flags & IR3_INSTR_B) {
 		if (ssbo->flags & IR3_REG_IMMED) {
@@ -581,9 +578,10 @@ static int emit_cat6_a6xx(struct ir3_instruction *instr, void *ptr,
 		}
 		cat6->base = instr->cat6.base;
 	} else {
-		/* TODO figure out mode for indirect SSBO index in !bindless */
-		iassert(ssbo->flags & IR3_REG_IMMED);
-		cat6->desc_mode = CAT6_IMM;
+		if (ssbo->flags & IR3_REG_IMMED)
+			cat6->desc_mode = CAT6_IMM;
+		else
+			cat6->desc_mode = CAT6_UNIFORM;
 	}
 
 	switch (instr->opc) {
@@ -608,6 +606,7 @@ static int emit_cat6_a6xx(struct ir3_instruction *instr, void *ptr,
 		cat6->pad5 = 0x2;
 		break;
 	case OPC_LDIB:
+	case OPC_RESINFO:
 		cat6->pad1 = 0x1;
 		cat6->pad3 = 0xc;
 		cat6->pad5 = 0x2;
@@ -655,6 +654,7 @@ static int emit_cat6(struct ir3_instruction *instr, void *ptr,
 		case OPC_STIB:
 		case OPC_LDIB:
 		case OPC_LDC:
+		case OPC_RESINFO:
 			return emit_cat6_a6xx(instr, ptr, info);
 		default:
 			break;
@@ -742,6 +742,7 @@ static int emit_cat6(struct ir3_instruction *instr, void *ptr,
 			/* first src is src_ssbo: */
 			iassert(src1->flags & IR3_REG_IMMED);
 			ldgb->src_ssbo = src1->uim_val;
+			ldgb->src_ssbo_im = 0x1;
 
 			ldgb->src1 = reg(src2, info, instr->repeat, IR3_REG_IMMED);
 			ldgb->src1_im = !!(src2->flags & IR3_REG_IMMED);
@@ -750,14 +751,13 @@ static int emit_cat6(struct ir3_instruction *instr, void *ptr,
 
 			ldgb->src3 = reg(src4, info, instr->repeat, 0);
 			ldgb->pad0 = 0x1;
-			ldgb->pad3 = 0x1;
 		} else {
 			ldgb->src1 = reg(src1, info, instr->repeat, IR3_REG_IMMED);
 			ldgb->src1_im = !!(src1->flags & IR3_REG_IMMED);
 			ldgb->src2 = reg(src2, info, instr->repeat, IR3_REG_IMMED);
 			ldgb->src2_im = !!(src2->flags & IR3_REG_IMMED);
 			ldgb->pad0 = 0x1;
-			ldgb->pad3 = 0x0;
+			ldgb->src_ssbo_im = 0x0;
 		}
 
 		return 0;
@@ -785,7 +785,7 @@ static int emit_cat6(struct ir3_instruction *instr, void *ptr,
 		ldgb->src2_im = !!(src3->flags & IR3_REG_IMMED);
 
 		ldgb->pad0 = 0x0;
-		ldgb->pad3 = 0x1;
+		ldgb->src_ssbo_im = true;
 
 		return 0;
 	} else if (instr->opc == OPC_RESINFO) {
@@ -796,8 +796,8 @@ static int emit_cat6(struct ir3_instruction *instr, void *ptr,
 		ldgb->dst = reg(dst, info, instr->repeat, IR3_REG_R | IR3_REG_HALF);
 
 		/* first src is src_ssbo: */
-		iassert(src1->flags & IR3_REG_IMMED);
-		ldgb->src_ssbo = src1->uim_val;
+		ldgb->src_ssbo = reg(src1, info, instr->repeat, IR3_REG_IMMED);
+		ldgb->src_ssbo_im = !!(src1->flags & IR3_REG_IMMED);
 
 		return 0;
 	} else if ((instr->opc == OPC_STGB) || (instr->opc == OPC_STIB)) {
@@ -917,13 +917,11 @@ void * ir3_assemble(struct ir3 *shader, struct ir3_info *info,
 {
 	uint32_t *ptr, *dwords;
 
+	memset(info, 0, sizeof(*info));
 	info->gpu_id        = gpu_id;
 	info->max_reg       = -1;
 	info->max_half_reg  = -1;
 	info->max_const     = -1;
-	info->instrs_count  = 0;
-	info->sizedwords    = 0;
-	info->ss = info->sy = 0;
 
 	foreach_block (block, &shader->block_list) {
 		foreach_instr (instr, &block->instr_list) {
@@ -958,6 +956,13 @@ void * ir3_assemble(struct ir3 *shader, struct ir3_info *info,
 			info->nops_count += instr->nop;
 			if (instr->opc == OPC_NOP)
 				info->nops_count += 1 + instr->repeat;
+			if (instr->opc == OPC_MOV) {
+				if (instr->cat1.src_type == instr->cat1.dst_type) {
+					info->mov_count += 1 + instr->repeat;
+				} else {
+					info->cov_count += 1 + instr->repeat;
+				}
+			}
 			dwords += 2;
 
 			if (instr->flags & IR3_INSTR_SS) {
@@ -1018,6 +1023,7 @@ struct ir3_block * ir3_block_create(struct ir3 *shader)
 	block->shader = shader;
 	list_inithead(&block->node);
 	list_inithead(&block->instr_list);
+	block->predecessors = _mesa_pointer_set_create(block);
 	return block;
 }
 
@@ -1144,18 +1150,39 @@ ir3_clear_mark(struct ir3 *ir)
 	}
 }
 
-/* note: this will destroy instr->depth, don't do it until after sched! */
 unsigned
 ir3_count_instructions(struct ir3 *ir)
 {
 	unsigned cnt = 1;
 	foreach_block (block, &ir->block_list) {
 		block->start_ip = cnt;
-		block->end_ip = cnt;
 		foreach_instr (instr, &block->instr_list) {
 			instr->ip = cnt++;
-			block->end_ip = instr->ip;
 		}
+		block->end_ip = cnt;
+	}
+	return cnt;
+}
+
+/* When counting instructions for RA, we insert extra fake instructions at the
+ * beginning of each block, where values become live, and at the end where
+ * values die. This prevents problems where values live-in at the beginning or
+ * live-out at the end of a block from being treated as if they were
+ * live-in/live-out at the first/last instruction, which would be incorrect.
+ * In ir3_legalize these ip's are assumed to be actual ip's of the final
+ * program, so it would be incorrect to use this everywhere.
+ */
+
+unsigned
+ir3_count_instructions_ra(struct ir3 *ir)
+{
+	unsigned cnt = 1;
+	foreach_block (block, &ir->block_list) {
+		block->start_ip = cnt++;
+		foreach_instr (instr, &block->instr_list) {
+			instr->ip = cnt++;
+		}
+		block->end_ip = cnt++;
 	}
 	return cnt;
 }
@@ -1170,7 +1197,7 @@ ir3_lookup_array(struct ir3 *ir, unsigned id)
 }
 
 void
-ir3_find_ssa_uses(struct ir3 *ir, void *mem_ctx)
+ir3_find_ssa_uses(struct ir3 *ir, void *mem_ctx, bool falsedeps)
 {
 	/* We could do this in a single pass if we can assume instructions
 	 * are always sorted.  Which currently might not always be true.
@@ -1182,13 +1209,79 @@ ir3_find_ssa_uses(struct ir3 *ir, void *mem_ctx)
 
 	foreach_block (block, &ir->block_list) {
 		foreach_instr (instr, &block->instr_list) {
-			struct ir3_instruction *src;
-
-			foreach_ssa_src (src, instr) {
+			foreach_ssa_src_n (src, n, instr) {
+				if (__is_false_dep(instr, n) && !falsedeps)
+					continue;
 				if (!src->uses)
 					src->uses = _mesa_pointer_set_create(mem_ctx);
 				_mesa_set_add(src->uses, instr);
 			}
 		}
+	}
+}
+
+/**
+ * Set the destination type of an instruction, for example if a
+ * conversion is folded in, handling the special cases where the
+ * instruction's dest type or opcode needs to be fixed up.
+ */
+void
+ir3_set_dst_type(struct ir3_instruction *instr, bool half)
+{
+	if (half) {
+		instr->regs[0]->flags |= IR3_REG_HALF;
+	} else {
+		instr->regs[0]->flags &= ~IR3_REG_HALF;
+	}
+
+	switch (opc_cat(instr->opc)) {
+	case 1: /* move instructions */
+		if (half) {
+			instr->cat1.dst_type = half_type(instr->cat1.dst_type);
+		} else {
+			instr->cat1.dst_type = full_type(instr->cat1.dst_type);
+		}
+		break;
+	case 4:
+		if (half) {
+			instr->opc = cat4_half_opc(instr->opc);
+		} else {
+			instr->opc = cat4_full_opc(instr->opc);
+		}
+		break;
+	case 5:
+		if (half) {
+			instr->cat5.type = half_type(instr->cat5.type);
+		} else {
+			instr->cat5.type = full_type(instr->cat5.type);
+		}
+		break;
+	}
+}
+
+/**
+ * One-time fixup for instruction src-types.  Other than cov's that
+ * are folded, an instruction's src type does not change.
+ */
+void
+ir3_fixup_src_type(struct ir3_instruction *instr)
+{
+	bool half = !!(instr->regs[1]->flags & IR3_REG_HALF);
+
+	switch (opc_cat(instr->opc)) {
+	case 1: /* move instructions */
+		if (half) {
+			instr->cat1.src_type = half_type(instr->cat1.src_type);
+		} else {
+			instr->cat1.src_type = full_type(instr->cat1.src_type);
+		}
+		break;
+	case 3:
+		if (half) {
+			instr->opc = cat3_half_opc(instr->opc);
+		} else {
+			instr->opc = cat3_full_opc(instr->opc);
+		}
+		break;
 	}
 }
