@@ -82,6 +82,7 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "main/state.h"
 #include "main/varray.h"
 #include "util/bitscan.h"
+#include "util/u_memory.h"
 
 #include "vbo_noop.h"
 #include "vbo_private.h"
@@ -433,7 +434,8 @@ update_vao(struct gl_context *ctx,
     */
 
    /* Bind the buffer object at binding point 0 */
-   _mesa_bind_vertex_buffer(ctx, *vao, 0, bo, buffer_offset, stride);
+   _mesa_bind_vertex_buffer(ctx, *vao, 0, bo, buffer_offset, stride, false,
+                            false);
 
    /* Retrieve the mapping from VBO_ATTRIB to VERT_ATTRIB space
     * Note that the position/generic0 aliasing is done in the VAO.
@@ -737,10 +739,13 @@ copy_from_current(struct gl_context *ctx)
       switch (save->attrsz[i]) {
       case 4:
          save->attrptr[i][3] = save->current[i][3];
+         /* fallthrough */
       case 3:
          save->attrptr[i][2] = save->current[i][2];
+         /* fallthrough */
       case 2:
          save->attrptr[i][1] = save->current[i][1];
+         /* fallthrough */
       case 1:
          save->attrptr[i][0] = save->current[i][0];
          break;

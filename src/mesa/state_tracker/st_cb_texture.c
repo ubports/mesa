@@ -34,7 +34,7 @@
 #include "main/format_utils.h"
 #include "main/glformats.h"
 #include "main/image.h"
-#include "util/imports.h"
+
 #include "main/macros.h"
 #include "main/mipmap.h"
 #include "main/pack.h"
@@ -195,6 +195,22 @@ st_DeleteTextureObject(struct gl_context *ctx,
    _mesa_delete_texture_object(ctx, texObj);
 }
 
+/**
+ * Called via ctx->Driver.TextureRemovedFromShared()
+ * When texture is removed from ctx->Shared->TexObjects we lose
+ * the ability to clean up views on context destruction, which may
+ * lead to dangling pointers to destroyed contexts.
+ * Release the views to prevent this.
+ */
+static void
+st_TextureReleaseAllSamplerViews(struct gl_context *ctx,
+                                 struct gl_texture_object *texObj)
+{
+   struct st_context *st = st_context(ctx);
+   struct st_texture_object *stObj = st_texture_object(texObj);
+
+   st_texture_release_all_sampler_views(st, stObj);
+}
 
 /** called via ctx->Driver.FreeTextureImageBuffer() */
 static void
@@ -215,7 +231,9 @@ st_FreeTextureImageBuffer(struct gl_context *ctx,
    stImage->transfer = NULL;
    stImage->num_transfers = 0;
 
-   if (stImage->compressed_data) {
+   if (stImage->compressed_data &&
+       pipe_reference(&stImage->compressed_data->reference, NULL)) {
+      free(stImage->compressed_data->ptr);
       free(stImage->compressed_data);
       stImage->compressed_data = NULL;
    }
@@ -264,16 +282,21 @@ compressed_tex_fallback_allocate(struct st_context *st,
    if (!st_compressed_format_fallback(st, texImage->TexFormat))
       return;
 
-   if (stImage->compressed_data)
+   if (stImage->compressed_data &&
+       pipe_reference(&stImage->compressed_data->reference, NULL)) {
+      free(stImage->compressed_data->ptr);
       free(stImage->compressed_data);
+   }
 
    unsigned data_size = _mesa_format_image_size(texImage->TexFormat,
                                                 texImage->Width2,
                                                 texImage->Height2,
                                                 texImage->Depth2);
 
-   stImage->compressed_data =
+   stImage->compressed_data = ST_CALLOC_STRUCT(st_compressed_data);
+   stImage->compressed_data->ptr =
       malloc(data_size * _mesa_num_tex_faces(texImage->TexObject->Target));
+   pipe_reference_init(&stImage->compressed_data->reference, 1);
 }
 
 
@@ -320,8 +343,9 @@ st_MapTextureImage(struct gl_context *ctx,
             _mesa_format_row_stride(texImage->TexFormat, texImage->Width2);
          unsigned block_size = _mesa_get_format_bytes(texImage->TexFormat);
 
+         assert(stImage->compressed_data);
          *mapOut = itransfer->temp_data =
-            stImage->compressed_data +
+            stImage->compressed_data->ptr +
             (z * y_blocks + (y / blk_h)) * stride +
             (x / blk_w) * block_size;
          itransfer->map = map;
@@ -685,7 +709,6 @@ st_AllocTextureImageBuffer(struct gl_context *ctx,
    struct st_context *st = st_context(ctx);
    struct st_texture_image *stImage = st_texture_image(texImage);
    struct st_texture_object *stObj = st_texture_object(texImage->TexObject);
-   const GLuint level = texImage->Level;
    GLuint width = texImage->Width;
    GLuint height = texImage->Height;
    GLuint depth = texImage->Depth;
@@ -697,29 +720,34 @@ st_AllocTextureImageBuffer(struct gl_context *ctx,
    stObj->needs_validation = true;
 
    compressed_tex_fallback_allocate(st, stImage);
+   const bool allowAllocateToStObj = !stObj->pt ||
+                                     stObj->pt->last_level == 0 ||
+                                     texImage->Level == 0;
 
-   /* Look if the parent texture object has space for this image */
-   if (stObj->pt &&
-       level <= stObj->pt->last_level &&
-       st_texture_match_image(st, stObj->pt, texImage)) {
-      /* this image will fit in the existing texture object's memory */
-      pipe_resource_reference(&stImage->pt, stObj->pt);
-      return GL_TRUE;
-   }
+   if (allowAllocateToStObj) {
+      /* Look if the parent texture object has space for this image */
+      if (stObj->pt &&
+          st_texture_match_image(st, stObj->pt, texImage)) {
+         /* this image will fit in the existing texture object's memory */
+         pipe_resource_reference(&stImage->pt, stObj->pt);
+         assert(stImage->pt);
+         return GL_TRUE;
+      }
 
-   /* The parent texture object does not have space for this image */
+      /* The parent texture object does not have space for this image */
 
-   pipe_resource_reference(&stObj->pt, NULL);
-   st_texture_release_all_sampler_views(st, stObj);
+      pipe_resource_reference(&stObj->pt, NULL);
+      st_texture_release_all_sampler_views(st, stObj);
 
-   if (!guess_and_alloc_texture(st, stObj, stImage)) {
-      /* Probably out of memory.
-       * Try flushing any pending rendering, then retry.
-       */
-      st_finish(st);
       if (!guess_and_alloc_texture(st, stObj, stImage)) {
-         _mesa_error(ctx, GL_OUT_OF_MEMORY, "glTexImage");
-         return GL_FALSE;
+         /* Probably out of memory.
+         * Try flushing any pending rendering, then retry.
+         */
+         st_finish(st);
+         if (!guess_and_alloc_texture(st, stObj, stImage)) {
+            _mesa_error(ctx, GL_OUT_OF_MEMORY, "glTexImage");
+            return GL_FALSE;
+         }
       }
    }
 
@@ -2312,6 +2340,10 @@ fallback_copy_texsubimage(struct gl_context *ctx,
                            PIPE_TRANSFER_READ,
                            srcX, srcY,
                            width, height, &src_trans);
+   if (!map) {
+      _mesa_error(ctx, GL_OUT_OF_MEMORY, "glCopyTexSubImage()");
+      return;
+   }
 
    if ((baseFormat == GL_DEPTH_COMPONENT ||
         baseFormat == GL_DEPTH_STENCIL) &&
@@ -2324,6 +2356,10 @@ fallback_copy_texsubimage(struct gl_context *ctx,
                                   destX, destY, slice,
                                   dst_width, dst_height, dst_depth,
                                   &transfer);
+   if (!texDest) {
+      _mesa_error(ctx, GL_OUT_OF_MEMORY, "glCopyTexSubImage()");
+      goto err;
+   }
 
    if (baseFormat == GL_DEPTH_COMPONENT ||
        baseFormat == GL_DEPTH_STENCIL) {
@@ -2371,7 +2407,7 @@ fallback_copy_texsubimage(struct gl_context *ctx,
       GLfloat *tempSrc =
          malloc(width * height * 4 * sizeof(GLfloat));
 
-      if (tempSrc && texDest) {
+      if (tempSrc) {
          const GLint dims = 2;
          GLint dstRowStride;
          struct gl_texture_image *texImage = &stImage->base;
@@ -2419,6 +2455,7 @@ fallback_copy_texsubimage(struct gl_context *ctx,
    }
 
    st_texture_image_unmap(st, stImage, slice);
+err:
    pipe->transfer_unmap(pipe, src_trans);
 }
 
@@ -3056,7 +3093,7 @@ st_TestProxyTexImage(struct gl_context *ctx, GLenum target,
       }
       else {
          /* assume a full set of mipmaps */
-         pt.last_level = _mesa_logbase2(MAX3(width, height, depth));
+         pt.last_level = util_logbase2(MAX3(width, height, depth));
       }
 
       return pipe->screen->can_create_resource(pipe->screen, &pt);
@@ -3091,7 +3128,15 @@ st_TextureView(struct gl_context *ctx,
       for (face = 0; face < numFaces; face++) {
          struct st_texture_image *stImage =
             st_texture_image(texObj->Image[face][level]);
+         struct st_texture_image *origImage =
+            st_texture_image(origTexObj->Image[face][level]);
          pipe_resource_reference(&stImage->pt, tex->pt);
+         if (origImage &&
+             origImage->compressed_data) {
+            pipe_reference(NULL,
+                           &origImage->compressed_data->reference);
+            stImage->compressed_data = origImage->compressed_data;
+         }
       }
    }
 
@@ -3346,6 +3391,7 @@ st_init_texture_functions(struct dd_function_table *functions)
    functions->NewTextureImage = st_NewTextureImage;
    functions->DeleteTextureImage = st_DeleteTextureImage;
    functions->DeleteTexture = st_DeleteTextureObject;
+   functions->TextureRemovedFromShared = st_TextureReleaseAllSamplerViews;
    functions->AllocTextureImageBuffer = st_AllocTextureImageBuffer;
    functions->FreeTextureImageBuffer = st_FreeTextureImageBuffer;
    functions->MapTextureImage = st_MapTextureImage;

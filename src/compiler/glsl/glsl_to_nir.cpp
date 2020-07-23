@@ -37,7 +37,6 @@
 #include "compiler/nir/nir_builtin_builder.h"
 #include "compiler/nir/nir_deref.h"
 #include "main/errors.h"
-#include "util/imports.h"
 #include "main/mtypes.h"
 #include "main/shaderobj.h"
 #include "util/u_math.h"
@@ -164,6 +163,12 @@ public:
             unsupported = true;
             return visit_stop;
          }
+      }
+
+      if (!glsl_type_is_vector_or_scalar(ir->return_type) &&
+          !ir->return_type->is_void()) {
+         unsupported = true;
+         return visit_stop;
       }
 
       return visit_continue;
@@ -306,6 +311,14 @@ nir_visitor::constant_copy(ir_constant *ir, void *mem_ctx)
 
       break;
 
+   case GLSL_TYPE_UINT16:
+      /* Only float base types can be matrices. */
+      assert(cols == 1);
+
+      for (unsigned r = 0; r < rows; r++)
+         ret->values[r].u16 = ir->value.u16[r];
+      break;
+
    case GLSL_TYPE_INT:
       /* Only float base types can be matrices. */
       assert(cols == 1);
@@ -313,6 +326,14 @@ nir_visitor::constant_copy(ir_constant *ir, void *mem_ctx)
       for (unsigned r = 0; r < rows; r++)
          ret->values[r].i32 = ir->value.i[r];
 
+      break;
+
+   case GLSL_TYPE_INT16:
+      /* Only float base types can be matrices. */
+      assert(cols == 1);
+
+      for (unsigned r = 0; r < rows; r++)
+         ret->values[r].i16 = ir->value.i16[r];
       break;
 
    case GLSL_TYPE_FLOAT:
@@ -464,6 +485,7 @@ nir_visitor::visit(ir_variable *ir)
 
    var->data.precision = ir->data.precision;
    var->data.explicit_location = ir->data.explicit_location;
+   var->data.matrix_layout = ir->data.matrix_layout;
    var->data.from_named_ifc_block = ir->data.from_named_ifc_block;
    var->data.compact = false;
 
@@ -902,7 +924,7 @@ deref_get_qualifier(nir_deref_instr *deref)
          if (field->memory_restrict)
             qualifiers |= ACCESS_RESTRICT;
       }
-      
+
       parent_type = cur->type;
    }
 
@@ -1378,7 +1400,7 @@ nir_visitor::visit(ir_call *ir)
          break;
       case nir_intrinsic_shader_clock:
          nir_ssa_dest_init(&instr->instr, &instr->dest, 2, 32, NULL);
-         instr->num_components = 2;
+         nir_intrinsic_set_memory_scope(instr, NIR_SCOPE_SUBGROUP);
          nir_builder_instr_insert(&b, &instr->instr);
          break;
       case nir_intrinsic_begin_invocation_interlock:
@@ -1512,11 +1534,12 @@ nir_visitor::visit(ir_call *ir)
          nir_builder_instr_insert(&b, &instr->instr);
          break;
       }
-      case nir_intrinsic_vote_any:
-      case nir_intrinsic_vote_all:
-      case nir_intrinsic_vote_ieq: {
-         nir_ssa_dest_init(&instr->instr, &instr->dest, 1, 1, NULL);
+      case nir_intrinsic_vote_ieq:
          instr->num_components = 1;
+         /* fall-through */
+      case nir_intrinsic_vote_any:
+      case nir_intrinsic_vote_all: {
+         nir_ssa_dest_init(&instr->instr, &instr->dest, 1, 1, NULL);
 
          ir_rvalue *value = (ir_rvalue *) ir->actual_parameters.get_head();
          instr->src[0] = nir_src_for_ssa(evaluate_rvalue(value));
@@ -1563,7 +1586,6 @@ nir_visitor::visit(ir_call *ir)
       }
       case nir_intrinsic_is_helper_invocation: {
          nir_ssa_dest_init(&instr->instr, &instr->dest, 1, 1, NULL);
-         instr->num_components = 1;
          nir_builder_instr_insert(&b, &instr->instr);
          break;
       }
@@ -1910,6 +1932,8 @@ nir_visitor::visit(ir_expression *ir)
    case ir_unop_f2f16:
    case ir_unop_f162b:
    case ir_unop_b2f16:
+   case ir_unop_i2i:
+   case ir_unop_u2u:
    case ir_unop_d2i:
    case ir_unop_d2u:
    case ir_unop_d2b:
@@ -1950,6 +1974,16 @@ nir_visitor::visit(ir_expression *ir)
 
    case ir_unop_f2fmp: {
       result = nir_build_alu(&b, nir_op_f2fmp, srcs[0], NULL, NULL, NULL);
+      break;
+   }
+
+   case ir_unop_i2imp: {
+      result = nir_build_alu(&b, nir_op_i2imp, srcs[0], NULL, NULL, NULL);
+      break;
+   }
+
+   case ir_unop_u2ump: {
+      result = nir_build_alu(&b, nir_op_u2ump, srcs[0], NULL, NULL, NULL);
       break;
    }
 
@@ -2046,48 +2080,6 @@ nir_visitor::visit(ir_expression *ir)
       result = nir_find_lsb(&b, srcs[0]);
       break;
 
-   case ir_unop_noise:
-      switch (ir->type->vector_elements) {
-      case 1:
-         switch (ir->operands[0]->type->vector_elements) {
-            case 1: result = nir_fnoise1_1(&b, srcs[0]); break;
-            case 2: result = nir_fnoise1_2(&b, srcs[0]); break;
-            case 3: result = nir_fnoise1_3(&b, srcs[0]); break;
-            case 4: result = nir_fnoise1_4(&b, srcs[0]); break;
-            default: unreachable("not reached");
-         }
-         break;
-      case 2:
-         switch (ir->operands[0]->type->vector_elements) {
-            case 1: result = nir_fnoise2_1(&b, srcs[0]); break;
-            case 2: result = nir_fnoise2_2(&b, srcs[0]); break;
-            case 3: result = nir_fnoise2_3(&b, srcs[0]); break;
-            case 4: result = nir_fnoise2_4(&b, srcs[0]); break;
-            default: unreachable("not reached");
-         }
-         break;
-      case 3:
-         switch (ir->operands[0]->type->vector_elements) {
-            case 1: result = nir_fnoise3_1(&b, srcs[0]); break;
-            case 2: result = nir_fnoise3_2(&b, srcs[0]); break;
-            case 3: result = nir_fnoise3_3(&b, srcs[0]); break;
-            case 4: result = nir_fnoise3_4(&b, srcs[0]); break;
-            default: unreachable("not reached");
-         }
-         break;
-      case 4:
-         switch (ir->operands[0]->type->vector_elements) {
-            case 1: result = nir_fnoise4_1(&b, srcs[0]); break;
-            case 2: result = nir_fnoise4_2(&b, srcs[0]); break;
-            case 3: result = nir_fnoise4_3(&b, srcs[0]); break;
-            case 4: result = nir_fnoise4_4(&b, srcs[0]); break;
-            default: unreachable("not reached");
-         }
-         break;
-      default:
-         unreachable("not reached");
-      }
-      break;
    case ir_unop_get_buffer_size: {
       nir_intrinsic_instr *load = nir_intrinsic_instr_create(
          this->shader,
@@ -2430,6 +2422,12 @@ nir_visitor::visit(ir_texture *ir)
       break;
    case GLSL_TYPE_FLOAT16:
       instr->dest_type = nir_type_float16;
+      break;
+   case GLSL_TYPE_INT16:
+      instr->dest_type = nir_type_int16;
+      break;
+   case GLSL_TYPE_UINT16:
+      instr->dest_type = nir_type_uint16;
       break;
    case GLSL_TYPE_INT:
       instr->dest_type = nir_type_int;

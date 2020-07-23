@@ -40,7 +40,6 @@
 #include <sys/mman.h>
 
 #include "egl_dri2.h"
-#include "egl_dri2_fallbacks.h"
 #include "loader.h"
 #include "util/u_vector.h"
 #include "util/anon_file.h"
@@ -305,7 +304,7 @@ get_wl_surface_proxy(struct wl_egl_window *window)
 }
 
 /**
- * Called via eglCreateWindowSurface(), drv->API.CreateWindowSurface().
+ * Called via eglCreateWindowSurface(), drv->CreateWindowSurface().
  */
 static _EGLSurface *
 dri2_wl_create_window_surface(_EGLDriver *drv, _EGLDisplay *disp,
@@ -427,7 +426,7 @@ dri2_wl_create_pixmap_surface(_EGLDriver *drv, _EGLDisplay *disp,
 }
 
 /**
- * Called via eglDestroySurface(), drv->API.DestroySurface().
+ * Called via eglDestroySurface(), drv->DestroySurface().
  */
 static EGLBoolean
 dri2_wl_destroy_surface(_EGLDriver *drv, _EGLDisplay *disp, _EGLSurface *surf)
@@ -929,19 +928,27 @@ create_wl_buffer(struct dri2_egl_display *dri2_dpy,
    }
 
    bool supported_modifier = false;
-   if (modifier != DRM_FORMAT_MOD_INVALID) {
-      supported_modifier = true;
-   } else {
-      int visual_idx = dri2_wl_visual_idx_from_fourcc(fourcc);
-      assert(visual_idx != -1);
+   bool mod_invalid_supported = false;
+   int visual_idx = dri2_wl_visual_idx_from_fourcc(fourcc);
+   assert(visual_idx != -1);
 
-      uint64_t *mod;
-      u_vector_foreach(mod, &dri2_dpy->wl_modifiers[visual_idx]) {
-         if (*mod == DRM_FORMAT_MOD_INVALID) {
-            supported_modifier = true;
-            break;
-         }
+   uint64_t *mod;
+   u_vector_foreach(mod, &dri2_dpy->wl_modifiers[visual_idx]) {
+      if (*mod == DRM_FORMAT_MOD_INVALID) {
+         mod_invalid_supported = true;
       }
+      if (*mod == modifier) {
+         supported_modifier = true;
+         break;
+      }
+   }
+   if (!supported_modifier && mod_invalid_supported) {
+      /* If the server has advertised DRM_FORMAT_MOD_INVALID then we trust
+       * that the client has allocated the buffer with the right implicit
+       * modifier for the format, even though it's allocated a buffer the
+       * server hasn't explicitly claimed to support. */
+      modifier = DRM_FORMAT_MOD_INVALID;
+      supported_modifier = true;
    }
 
    if (dri2_dpy->wl_dmabuf && supported_modifier) {
@@ -1041,8 +1048,9 @@ try_damage_buffer(struct dri2_egl_surface *dri2_surf,
    }
    return EGL_TRUE;
 }
+
 /**
- * Called via eglSwapBuffers(), drv->API.SwapBuffers().
+ * Called via eglSwapBuffers(), drv->SwapBuffers().
  */
 static EGLBoolean
 dri2_wl_swap_buffers_with_damage(_EGLDriver *drv,
@@ -1374,17 +1382,12 @@ static const struct dri2_egl_display_vtbl dri2_wl_display_vtbl = {
    .authenticate = dri2_wl_authenticate,
    .create_window_surface = dri2_wl_create_window_surface,
    .create_pixmap_surface = dri2_wl_create_pixmap_surface,
-   .create_pbuffer_surface = dri2_fallback_create_pbuffer_surface,
    .destroy_surface = dri2_wl_destroy_surface,
    .create_image = dri2_create_image_khr,
    .swap_buffers = dri2_wl_swap_buffers,
    .swap_buffers_with_damage = dri2_wl_swap_buffers_with_damage,
-   .swap_buffers_region = dri2_fallback_swap_buffers_region,
-   .post_sub_buffer = dri2_fallback_post_sub_buffer,
-   .copy_buffers = dri2_fallback_copy_buffers,
    .query_buffer_age = dri2_wl_query_buffer_age,
    .create_wayland_buffer_from_image = dri2_wl_create_wayland_buffer_from_image,
-   .get_sync_values = dri2_fallback_get_sync_values,
    .get_dri_drawable = dri2_surface_get_dri_drawable,
 };
 
@@ -1994,17 +1997,9 @@ static const struct dri2_egl_display_vtbl dri2_wl_swrast_display_vtbl = {
    .authenticate = NULL,
    .create_window_surface = dri2_wl_create_window_surface,
    .create_pixmap_surface = dri2_wl_create_pixmap_surface,
-   .create_pbuffer_surface = dri2_fallback_create_pbuffer_surface,
    .destroy_surface = dri2_wl_destroy_surface,
    .create_image = dri2_create_image_khr,
    .swap_buffers = dri2_wl_swrast_swap_buffers,
-   .swap_buffers_with_damage = dri2_fallback_swap_buffers_with_damage,
-   .swap_buffers_region = dri2_fallback_swap_buffers_region,
-   .post_sub_buffer = dri2_fallback_post_sub_buffer,
-   .copy_buffers = dri2_fallback_copy_buffers,
-   .query_buffer_age = dri2_fallback_query_buffer_age,
-   .create_wayland_buffer_from_image = dri2_fallback_create_wayland_buffer_from_image,
-   .get_sync_values = dri2_fallback_get_sync_values,
    .get_dri_drawable = dri2_surface_get_dri_drawable,
 };
 

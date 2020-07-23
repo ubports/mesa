@@ -347,7 +347,7 @@ etna_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info)
       }
    }
 
-   ctx->stats.prims_emitted += u_reduced_prims_for_vertices(info->mode, info->count);
+   ctx->stats.prims_generated += u_reduced_prims_for_vertices(info->mode, info->count);
    ctx->stats.draw_calls++;
 
    /* Update state for this draw operation */
@@ -423,7 +423,6 @@ etna_reset_gpu_state(struct etna_context *ctx)
    if (screen->specs.halti >= 5) { /* Only on HALTI5+ */
       etna_set_state(stream, VIVS_NTE_DESCRIPTOR_UNK14C40, 0x00000001);
       etna_set_state(stream, VIVS_FE_HALTI5_UNK007D8, 0x00000002);
-      etna_set_state(stream, VIVS_FE_HALTI5_ID_CONFIG, 0x00000000);
       etna_set_state(stream, VIVS_PS_SAMPLER_BASE, 0x00000000);
       etna_set_state(stream, VIVS_VS_SAMPLER_BASE, 0x00000020);
       etna_set_state(stream, VIVS_SH_CONFIG, VIVS_SH_CONFIG_RTNE_ROUNDING);
@@ -575,7 +574,7 @@ etna_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
 
    /* context ctxate setup */
    ctx->screen = screen;
-   /* need some sane default in case state tracker doesn't set some state: */
+   /* need some sane default in case gallium frontends don't set some state: */
    ctx->sample_mask = 0xffff;
 
    /*  Set sensible defaults for state */

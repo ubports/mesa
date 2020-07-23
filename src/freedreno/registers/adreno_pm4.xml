@@ -45,6 +45,10 @@ xsi:schemaLocation="http://nouveau.freedesktop.org/ rules-ng.xsd">
 	<value name="BLIT" value="30" variants="A5XX,A6XX"/>
 	<value name="UNK_25" value="37" variants="A5XX"/>
 	<value name="LRZ_FLUSH" value="38" variants="A5XX,A6XX"/>
+	<value name="BLIT_OP_FILL_2D" value="39" variants="A5XX,A6XX"/>
+	<value name="BLIT_OP_COPY_2D" value="40" variants="A5XX,A6XX"/>
+	<value name="BLIT_OP_SCALE_2D" value="42" variants="A5XX,A6XX"/>
+	<value name="CONTEXT_DONE_2D" value="43" variants="A5XX,A6XX"/>
 	<value name="UNK_2C" value="44" variants="A5XX"/>
 	<value name="UNK_2D" value="45" variants="A5XX"/>
 
@@ -107,7 +111,7 @@ xsi:schemaLocation="http://nouveau.freedesktop.org/ rules-ng.xsd">
 	<value name="DI_SRC_SEL_DMA" value="0"/>
 	<value name="DI_SRC_SEL_IMMEDIATE" value="1"/>
 	<value name="DI_SRC_SEL_AUTO_INDEX" value="2"/>
-	<value name="DI_SRC_SEL_RESERVED" value="3"/>
+	<value name="DI_SRC_SEL_AUTO_XFB" value="3"/>
 </enum>
 
 <enum name="pc_di_face_cull_sel">
@@ -306,6 +310,7 @@ xsi:schemaLocation="http://nouveau.freedesktop.org/ rules-ng.xsd">
 	<value name="CP_DRAW_INDX_OFFSET" value="0x38"/>
 	<value name="CP_DRAW_INDIRECT" value="0x28" variants="A4XX,A5XX,A6XX"/>
 	<value name="CP_DRAW_INDX_INDIRECT" value="0x29" variants="A4XX,A5XX,A6XX"/>
+	<value name="CP_DRAW_INDIRECT_MULTI" value="0x2a" variants="A6XX"/>
 	<value name="CP_DRAW_AUTO" value="0x24"/>
 
 	<value name="CP_UNKNOWN_19" value="0x19"/>
@@ -343,7 +348,7 @@ xsi:schemaLocation="http://nouveau.freedesktop.org/ rules-ng.xsd">
 		for a5xx
 	</doc>
 	<value name="CP_PERFCOUNTER_ACTION" value="0x50" variants="A5XX"/>
-	<!-- switches SMMU pagetable, used on a5xx only -->
+	<!-- switches SMMU pagetable, used on a5xx+ only -->
 	<value name="CP_SMMU_TABLE_UPDATE" value="0x53" variants="A5XX,A6XX"/>
 	<!-- for a6xx -->
 	<doc>Tells CP the current mode of GPU operation</doc>
@@ -609,6 +614,14 @@ opcode: CP_LOAD_STATE4 (30) (4 dwords)
 		<value name="SS6_DIRECT" value="0"/>
 		<value name="SS6_BINDLESS" value="1"/> <!-- TODO does this exist on a4xx/a5xx? -->
 		<value name="SS6_INDIRECT" value="2"/>
+		<doc>
+		SS6_UBO used by the a6xx vulkan blob with tesselation constants
+		in this case, EXT_SRC_ADDR is (ubo_id shl 16 | offset)
+		to load constants from a UBO loaded with DST_OFF = 14 and offset 0,
+		EXT_SRC_ADDR = 0xe0000
+		(offset is a guess, should be in bytes given that maxUniformBufferRange=64k)
+		</doc>
+		<value name="SS6_UBO" value="3"/>
 	</enum>
 	<reg32 offset="0" name="0">
 		<bitfield name="DST_OFF" low="0" high="13" type="uint"/>
@@ -623,6 +636,7 @@ opcode: CP_LOAD_STATE4 (30) (4 dwords)
 	<reg32 offset="2" name="2">
 		<bitfield name="EXT_SRC_ADDR_HI" low="0" high="31" shr="0"/>
 	</reg32>
+	<reg64 offset="1" name="EXT_SRC_ADDR" type="address"/>
 </domain>
 
 <bitset name="vgt_draw_initiator" inline="yes">
@@ -696,6 +710,7 @@ opcode: CP_LOAD_STATE4 (30) (4 dwords)
 		<bitfield name="NUM_INDICES" low="0" high="31" type="uint"/>
 	</reg32>
 	<reg32 offset="3" name="3">
+		<bitfield name="FIRST_INDX" low="0" high="31"/>
 	</reg32>
 
 	<stripe variants="A5XX-">
@@ -705,29 +720,37 @@ opcode: CP_LOAD_STATE4 (30) (4 dwords)
 		<reg32 offset="5" name="5">
 			<bitfield name="INDX_BASE_HI" low="0" high="31"/>
 		</reg32>
+		<reg64 offset="4" name="INDX_BASE" type="address"/>
 		<reg32 offset="6" name="6">
-			<bitfield name="INDX_SIZE" low="0" high="31"/>
+			<!-- max # of elements in index buffer -->
+			<bitfield name="MAX_INDICES" low="0" high="31"/>
 		</reg32>
 	</stripe>
 
 	<reg32 offset="4" name="4">
-		<bitfield name="INDX_BASE" low="0" high="31"/>
+		<bitfield name="INDX_BASE" low="0" high="31" type="address"/>
 	</reg32>
 
 	<reg32 offset="5" name="5">
-		<bitfield name="INDX_SIZE" low="0" high="31"/>
+		<bitfield name="INDX_SIZE" low="0" high="31" type="uint"/>
 	</reg32>
 </domain>
 
 <domain name="CP_DRAW_INDIRECT" width="32" varset="chip" prefix="chip" variants="A4XX-">
 	<reg32 offset="0" name="0" type="vgt_draw_initiator_a4xx"/>
-	<reg32 offset="1" name="1">
-		<bitfield name="INDIRECT" low="0" high="31"/>
-	</reg32>
+	<stripe variants="A4XX">
+		<reg32 offset="1" name="1">
+			<bitfield name="INDIRECT" low="0" high="31"/>
+		</reg32>
+	</stripe>
 	<stripe variants="A5XX-">
+		<reg32 offset="1" name="1">
+			<bitfield name="INDIRECT_LO" low="0" high="31"/>
+		</reg32>
 		<reg32 offset="2" name="2">
 			<bitfield name="INDIRECT_HI" low="0" high="31"/>
 		</reg32>
+		<reg64 offset="1" name="INDIRECT" type="address"/>
 	</stripe>
 </domain>
 
@@ -752,6 +775,7 @@ opcode: CP_LOAD_STATE4 (30) (4 dwords)
 		<reg32 offset="2" name="2">
 			<bitfield name="INDX_BASE_HI" low="0" high="31"/>
 		</reg32>
+		<reg64 offset="1" name="INDX_BASE" type="address"/>
 		<reg32 offset="3" name="3">
 			<!-- max # of elements in index buffer -->
 			<bitfield name="MAX_INDICES" low="0" high="31" type="uint"/>
@@ -762,7 +786,39 @@ opcode: CP_LOAD_STATE4 (30) (4 dwords)
 		<reg32 offset="5" name="5">
 			<bitfield name="INDIRECT_HI" low="0" high="31"/>
 		</reg32>
+		<reg64 offset="4" name="INDIRECT" type="address"/>
 	</stripe>
+</domain>
+
+<domain name="CP_DRAW_INDIRECT_MULTI" width="32" varset="chip" prefix="chip" variants="A6XX-">
+	<enum name="a6xx_draw_indirect_opcode">
+		<value name="INDIRECT_OP_NORMAL"  value="0x2"/>
+		<value name="INDIRECT_OP_INDEXED" value="0x4"/>
+	</enum>
+	<reg32 offset="0" name="0" type="vgt_draw_initiator_a4xx"/>
+	<reg32 offset="1" name="1">
+		<bitfield name="OPCODE" low="0" high="3" type="a6xx_draw_indirect_opcode"/>
+		<doc>
+		DST_OFF same as in CP_LOAD_STATE6 - vec4 VS const at this offset will
+		be updated for each draw to {draw_id, first_vertex, first_instance, 0}
+		value of 0 disables it
+		</doc>
+		<bitfield name="DST_OFF" low="8" high="21" type="hex"/>
+	</reg32>
+	<reg32 offset="2" name="2">
+		<bitfield name="DRAW_COUNT" low="0" high="31" type="hex"/>
+	</reg32>
+	<doc>for opcode 2: indirect address. for opcode 4: index address</doc>
+	<reg64 offset="3" name="ADDRESS_0" type="address"/>
+	<reg32 offset="5" name="5">
+		<doc>for opcode 2: stride. for opcode 4: max_indices</doc>
+		<bitfield name="PARAM_0" low="0" high="31" type="hex"/>
+	</reg32>
+	<doc>last 3 dwords only for opcode 4</doc>
+	<reg64 offset="6" name="INDIRECT" type="address"/>
+	<reg32 offset="8" name="8">
+		<bitfield name="STRIDE" low="0" high="31" type="hex"/>
+	</reg32>
 </domain>
 
 <domain name="CP_SET_DRAW_STATE" width="32" varset="chip" variants="A4XX-">
@@ -832,12 +888,12 @@ opcode: CP_LOAD_STATE4 (30) (4 dwords)
 	<reg32 offset="4" name="4">
 		<bitfield name="BIN_SIZE_ADDRESS_HI" low="0" high="31"/>
 	</reg32>
-	<!-- what is this new address? -->
+	<!-- new on a6xx, where BIN_DATA_ADDR is the DRAW_STRM: -->
 	<reg32 offset="5" name="5">
-		<bitfield name="BIN_DATA_ADDR2_LO" low="0" high="31"/>
+		<bitfield name="BIN_PRIM_STRM_LO" low="0" high="31"/>
 	</reg32>
 	<reg32 offset="6" name="6">
-		<bitfield name="BIN_DATA_ADDR2_HI" low="0" high="31"/>
+		<bitfield name="BIN_PRIM_STRM_HI" low="0" high="31"/>
 	</reg32>
 </domain>
 
@@ -898,7 +954,7 @@ opcode: CP_LOAD_STATE4 (30) (4 dwords)
 
 <domain name="CP_REG_TO_MEM" width="32">
 	<reg32 offset="0" name="0">
-		<bitfield name="REG" low="0" high="15" type="hex"/>
+		<bitfield name="REG" low="0" high="17" type="hex"/>
 		<!-- number of registers/dwords copied is max(CNT, 1). -->
 		<bitfield name="CNT" low="18" high="29" type="uint"/>
 		<bitfield name="64B" pos="30" type="boolean"/>
@@ -919,7 +975,7 @@ opcode: CP_LOAD_STATE4 (30) (4 dwords)
                 registers.
 	</doc>
 	<reg32 offset="0" name="0">
-		<bitfield name="REG" low="0" high="15" type="hex"/>
+		<bitfield name="REG" low="0" high="17" type="hex"/>
 		<!-- number of registers/dwords copied is max(CNT, 1). -->
 		<bitfield name="CNT" low="18" high="29" type="uint"/>
 		<bitfield name="64B" pos="30" type="boolean"/>
@@ -944,7 +1000,7 @@ opcode: CP_LOAD_STATE4 (30) (4 dwords)
                 offsetted using a DWORD in memory.
 	</doc>
 	<reg32 offset="0" name="0">
-		<bitfield name="REG" low="0" high="15" type="hex"/>
+		<bitfield name="REG" low="0" high="17" type="hex"/>
 		<!-- number of registers/dwords copied is max(CNT, 1). -->
 		<bitfield name="CNT" low="18" high="29" type="uint"/>
 		<bitfield name="64B" pos="30" type="boolean"/>
@@ -966,7 +1022,7 @@ opcode: CP_LOAD_STATE4 (30) (4 dwords)
 
 <domain name="CP_MEM_TO_REG" width="32">
 	<reg32 offset="0" name="0">
-		<bitfield name="REG" low="0" high="15" type="hex"/>
+		<bitfield name="REG" low="0" high="17" type="hex"/>
 		<!-- number of registers/dwords copied is max(CNT, 1). -->
 		<bitfield name="CNT" low="19" high="29" type="uint"/>
 		<!-- shift each DWORD left by 2 while copying -->
@@ -1459,7 +1515,7 @@ opcode: CP_LOAD_STATE4 (30) (4 dwords)
 	</doc>
 	<reg32 offset="0" name="0">
 		<!-- the register to test -->
-		<bitfield name="REG" low="0" high="11"/>
+		<bitfield name="REG" low="0" high="17"/>
 		<!-- the bit to test -->
 		<bitfield name="BIT" low="20" high="24" type="uint"/>
 		<!-- execute CP_WAIT_FOR_ME beforehand -->
@@ -1608,6 +1664,28 @@ opcode: CP_LOAD_STATE4 (30) (4 dwords)
 	</enum>
 	<reg32 offset="0" name="0">
 		<bitfield name="TRACKER" low="0" high="2" type="reg_tracker"/>
+	</reg32>
+</domain>
+
+<domain name="CP_SMMU_TABLE_UPDATE" width="32">
+	<doc>
+		Note that the SMMU's definition of TTBRn can take different forms
+		depending on the pgtable format.  But a5xx+ only uses aarch64
+		format.
+	</doc>
+	<reg32 offset="0" name="0">
+		<bitfield name="TTBR0_LO" low="0" high="31"/>
+	</reg32>
+	<reg32 offset="1" name="1">
+		<bitfield name="TTBR0_HI" low="0" high="15"/>
+		<bitfield name="ASID" low="16" high="31"/>
+	</reg32>
+	<reg32 offset="2" name="2">
+		<doc>Unused, does not apply to aarch64 pgtable format</doc>
+		<bitfield name="CONTEXTIDR" low="0" high="31"/>
+	</reg32>
+	<reg32 offset="3" name="3">
+		<bitfield name="CONTEXTBANK" low="0" high="31"/>
 	</reg32>
 </domain>
 

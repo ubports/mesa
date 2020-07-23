@@ -26,7 +26,7 @@
 #include "compiler/nir/nir.h"
 #include "compiler/nir/nir_builder.h"
 #include "compiler/glsl/list.h"
-#include "util/imports.h"
+
 #include "main/mtypes.h"
 #include "util/ralloc.h"
 
@@ -540,8 +540,10 @@ ptn_tex(struct ptn_compile *c, nir_alu_dest dest, nir_ssa_def **src,
    nir_variable *var = c->sampler_vars[prog_inst->TexSrcUnit];
    if (!var) {
       const struct glsl_type *type =
-         glsl_sampler_type(instr->sampler_dim, false, false, GLSL_TYPE_FLOAT);
-      var = nir_variable_create(b->shader, nir_var_uniform, type, "sampler");
+         glsl_sampler_type(instr->sampler_dim, instr->is_shadow, false, GLSL_TYPE_FLOAT);
+      char samplerName[20];
+      snprintf(samplerName, sizeof(samplerName), "sampler_%d", prog_inst->TexSrcUnit);
+      var = nir_variable_create(b->shader, nir_var_uniform, type, samplerName);
       var->data.binding = prog_inst->TexSrcUnit;
       var->data.explicit_binding = true;
       c->sampler_vars[prog_inst->TexSrcUnit] = var;

@@ -56,6 +56,8 @@ xsi:schemaLocation="http://nouveau.freedesktop.org/ rules-ng.xsd">
 	<value name="RB4_R32G32B32A32_FLOAT" value="0x3c"/>
 	<value name="RB4_R32G32B32A32_UINT" value="0x3d"/>
 	<value name="RB4_R32G32B32A32_SINT" value="0x3e"/>
+
+	<value name="RB4_NONE" value="0xff"/>
 </enum>
 
 <enum name="a4xx_tile_mode">
@@ -135,6 +137,8 @@ xsi:schemaLocation="http://nouveau.freedesktop.org/ rules-ng.xsd">
 	<value name="VFMT4_2_10_10_10_UNORM" value="0x3d"/>
 	<value name="VFMT4_2_10_10_10_SINT" value="0x3e"/>
 	<value name="VFMT4_2_10_10_10_SNORM" value="0x3f"/>
+
+	<value name="VFMT4_NONE" value="0xff"/>
 </enum>
 
 <enum name="a4xx_tex_fmt">
@@ -260,18 +264,8 @@ xsi:schemaLocation="http://nouveau.freedesktop.org/ rules-ng.xsd">
 	<value name="TFMT4_ASTC_12x10"            value="0x7b"/>
 	<value name="TFMT4_ASTC_12x12"            value="0x7c"/>
 	<!-- 0x7d .. 0x7f -->
-</enum>
 
-<enum name="a4xx_tex_fetchsize">
-	<doc>
-		Size pixel to fetch, in bytes.  Doesn't seem to be required, setting
-		it to 0x0 seems to work ok, but may be less optimal.
-	</doc>
-	<value name="TFETCH4_1_BYTE"  value="0"/>
-	<value name="TFETCH4_2_BYTE"  value="1"/>
-	<value name="TFETCH4_4_BYTE"  value="2"/>
-	<value name="TFETCH4_8_BYTE"  value="3"/>
-	<value name="TFETCH4_16_BYTE" value="4"/>
+	<value name="TFMT4_NONE"                  value="0xff"/>
 </enum>
 
 <enum name="a4xx_depth_format">
@@ -911,17 +905,19 @@ perhaps they should be taken with a grain of salt
 		<bitfield name="SAMPLES" low="13" high="15" type="uint"/>
 	</reg32>
 	<reg32 offset="0x20a3" name="RB_RENDER_CONTROL2">
-		<bitfield name="XCOORD" pos="0" type="boolean"/>
-		<bitfield name="YCOORD" pos="1" type="boolean"/>
-		<!-- assuming zcoord/wcoord follows.. -->
-		<bitfield name="ZCOORD" pos="2" type="boolean"/>
-		<bitfield name="WCOORD" pos="3" type="boolean"/>
+		<bitfield name="COORD_MASK" low="0" high="3" type="hex"/>
 		<bitfield name="SAMPLEMASK" pos="4" type="boolean"/>
 		<bitfield name="FACENESS" pos="5" type="boolean"/>
 		<bitfield name="SAMPLEID" pos="6" type="boolean"/>
 		<bitfield name="MSAA_SAMPLES" low="7" high="9" type="uint"/>
 		<bitfield name="SAMPLEID_HR" pos="11" type="boolean"/>
-		<bitfield name="VARYING" pos="12" type="boolean"/>
+		<bitfield name="IJ_PERSP_PIXEL" pos="12" type="boolean"/>
+		<!-- the 2 below are just educated guesses -->
+		<bitfield name="IJ_PERSP_CENTROID" pos="13" type="boolean"/>
+		<bitfield name="IJ_PERSP_SAMPLE" pos="14" type="boolean"/>
+		<!-- needs to be enabled to get nopersp values,
+		     perhaps other cases too? -->
+		<bitfield name="SIZE" pos="15" type="boolean"/>
 	</reg32>
 	<array offset="0x20a4" name="RB_MRT" stride="5" length="8">
 		<reg32 offset="0x0" name="CONTROL">
@@ -1942,10 +1938,9 @@ perhaps they should be taken with a grain of salt
 		<bitfield name="ZFAR_CLIP_DISABLE" pos="17" type="boolean"/>
 		<bitfield name="ZERO_GB_SCALE_Z" pos="22" type="boolean"/>
 	</reg32>
-	<reg32 offset="0x2003" name="GRAS_CLEAR_CNTL">
-		<!-- probably not the right name, but.. -->
-		<!-- bit0 set for everything *but* fastclear -->
-		<bitfield name="NOT_FASTCLEAR" pos="0" type="boolean"/>
+	<reg32 offset="0x2003" name="GRAS_CNTL">
+		<bitfield name="IJ_PERSP" pos="0" type="boolean"/>
+		<bitfield name="IJ_LINEAR" pos="1" type="boolean"/>
 	</reg32>
 	<reg32 offset="0x2004" name="GRAS_CL_GB_CLIP_ADJ">
 		<bitfield name="HORZ" low="0" high="9" type="uint"/>
@@ -2056,11 +2051,17 @@ perhaps they should be taken with a grain of salt
 		<bitfield name="SAMPLEMASK_REGID" low="18" high="25" type="a3xx_regid"/>
 	</reg32>
 	<reg32 offset="0x23c3" name="HLSQ_CONTROL_3_REG">
-		<!-- register loaded with position (bary.f, gl_FragCoord, etc) -->
-		<bitfield name="REGID" low="0" high="7" type="a3xx_regid"/>
+		<!-- register loaded with position (bary.f) -->
+		<bitfield name="IJ_PERSP_PIXEL" low="0" high="7" type="a3xx_regid"/>
+		<bitfield name="IJ_LINEAR_PIXEL" low="8" high="15" type="a3xx_regid"/>
+		<bitfield name="IJ_PERSP_CENTROID" low="16" high="23" type="a3xx_regid"/>
+		<bitfield name="IJ_LINEAR_CENTROID" low="24" high="31" type="a3xx_regid"/>
 	</reg32>
 	<!-- 0x23c4 3 regids, lowest one goes to 0 when *not* per-sample shading -->
-	<reg32 offset="0x23c4" name="HLSQ_CONTROL_4_REG"/>
+	<reg32 offset="0x23c4" name="HLSQ_CONTROL_4_REG">
+		<bitfield name="IJ_PERSP_SAMPLE" low="0" high="7" type="a3xx_regid"/>
+		<bitfield name="IJ_LINEAR_SAMPLE" low="8" high="15" type="a3xx_regid"/>
+	</reg32>
 
 	<bitset name="a4xx_xs_control_reg" inline="yes">
 		<bitfield name="CONSTLENGTH" low="0" high="7" type="uint"/>
@@ -2333,7 +2334,8 @@ perhaps they should be taken with a grain of salt
 		<bitfield name="WIDTH" low="15" high="29" type="uint"/>
 	</reg32>
 	<reg32 offset="2" name="2">
-		<bitfield name="FETCHSIZE" low="0" high="3" type="a4xx_tex_fetchsize"/>
+		<!-- minimum pitch (for mipmap levels): log2(pitchalign / 32) -->
+		<bitfield name="PITCHALIGN" low="0" high="3" type="uint"/>
 		<doc>Pitch in bytes (so actually stride)</doc>
 		<bitfield name="PITCH" low="9" high="29" type="uint"/>
 		<bitfield name="SWAP" low="30" high="31" type="a3xx_color_swap"/>

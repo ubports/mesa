@@ -1,8 +1,8 @@
 /**************************************************************************
- * 
+ *
  * Copyright 2007 VMware, Inc.
  * All Rights Reserved.
- * 
+ *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the
  * "Software"), to deal in the Software without restriction, including
@@ -10,11 +10,11 @@
  * distribute, sub license, and/or sell copies of the Software, and to
  * permit persons to whom the Software is furnished to do so, subject to
  * the following conditions:
- * 
+ *
  * The above copyright notice and this permission notice (including the
  * next paragraph) shall be included in all copies or substantial portions
  * of the Software.
- * 
+ *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
  * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
  * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT.
@@ -22,7 +22,7 @@
  * ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
  * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- * 
+ *
  **************************************************************************/
 
  /*
@@ -31,7 +31,7 @@
   */
 
 #include "main/errors.h"
-#include "util/imports.h"
+
 #include "main/image.h"
 #include "main/bufferobj.h"
 #include "main/blit.h"
@@ -977,7 +977,7 @@ draw_stencil_pixels(struct gl_context *ctx, GLint x, GLint y,
       y = ctx->DrawBuffer->Height - y - height;
    }
 
-   if (format == GL_STENCIL_INDEX && 
+   if (format == GL_STENCIL_INDEX &&
        _mesa_is_format_packed_depth_stencil(strb->Base.Format)) {
       /* writing stencil to a combined depth+stencil buffer */
       usage = PIPE_TRANSFER_READ_WRITE;
@@ -1704,6 +1704,8 @@ st_CopyPixels(struct gl_context *ctx, GLint srcx, GLint srcy,
    GLboolean invertTex = GL_FALSE;
    GLint readX, readY, readW, readH;
    struct gl_pixelstore_attrib pack = ctx->DefaultPacking;
+   GLboolean write_stencil = GL_FALSE;
+   GLboolean write_depth = GL_FALSE;
 
    _mesa_update_draw_buffer_bounds(ctx, ctx->DrawBuffer);
 
@@ -1722,8 +1724,9 @@ st_CopyPixels(struct gl_context *ctx, GLint srcx, GLint srcy,
       return;
    }
 
-   if (type == GL_STENCIL) {
-      /* can't use texturing to do stencil */
+   /* fallback if the driver can't do stencil exports */
+   if (type == GL_STENCIL &&
+       !pipe->screen->get_param(pipe->screen, PIPE_CAP_SHADER_STENCIL_EXPORT)) {
       copy_stencil_pixels(ctx, srcx, srcy, width, height, dstx, dsty);
       return;
    }
@@ -1757,13 +1760,15 @@ st_CopyPixels(struct gl_context *ctx, GLint srcx, GLint srcy,
        * into the constant buffer, we need to update them
        */
       st_upload_constants(st, &st->fp->Base);
-   }
-   else {
-      assert(type == GL_DEPTH);
+   } else if (type == GL_DEPTH) {
       rbRead = st_renderbuffer(ctx->ReadBuffer->
                                Attachment[BUFFER_DEPTH].Renderbuffer);
-
       driver_fp = get_drawpix_z_stencil_program(st, GL_TRUE, GL_FALSE);
+   } else {
+      assert(type == GL_STENCIL);
+      rbRead = st_renderbuffer(ctx->ReadBuffer->
+                               Attachment[BUFFER_STENCIL].Renderbuffer);
+      driver_fp = get_drawpix_z_stencil_program(st, GL_FALSE, GL_TRUE);
    }
 
    /* Choose the format for the temporary texture. */
@@ -1778,6 +1783,11 @@ st_CopyPixels(struct gl_context *ctx, GLint srcx, GLint srcy,
          srcFormat = st_choose_format(st, GL_DEPTH_COMPONENT, GL_NONE,
                                       GL_NONE, st->internal_target, 0, 0,
                                       srcBind, false, false);
+      }
+      else if (type == GL_STENCIL) {
+         /* can't use texturing, fallback to copy */
+         copy_stencil_pixels(ctx, srcx, srcy, width, height, dstx, dsty);
+         return;
       }
       else {
          assert(type == GL_COLOR);
@@ -1854,6 +1864,23 @@ st_CopyPixels(struct gl_context *ctx, GLint srcx, GLint srcy,
       return;
    }
 
+   /* Create a second sampler view to read stencil */
+   if (type == GL_STENCIL) {
+      write_stencil = GL_TRUE;
+      enum pipe_format stencil_format =
+         util_format_stencil_only(pt->format);
+      /* we should not be doing pixel map/transfer (see above) */
+      assert(num_sampler_view == 1);
+      sv[1] = st_create_texture_sampler_view_format(st->pipe, pt,
+                                                    stencil_format);
+      if (!sv[1]) {
+         _mesa_error(ctx, GL_OUT_OF_MEMORY, "glCopyPixels");
+         pipe_resource_reference(&pt, NULL);
+         pipe_sampler_view_reference(&sv[0], NULL);
+         return;
+      }
+      num_sampler_view++;
+   }
    /* Copy the src region to the temporary texture. */
    {
       struct pipe_blit_info blit;
@@ -1877,7 +1904,10 @@ st_CopyPixels(struct gl_context *ctx, GLint srcx, GLint srcy,
       blit.dst.box.width = readW;
       blit.dst.box.height = readH;
       blit.dst.box.depth = 1;
-      blit.mask = util_format_get_mask(pt->format) & ~PIPE_MASK_S;
+      if (type != GL_STENCIL)
+         blit.mask = util_format_get_mask(pt->format) & ~PIPE_MASK_S;
+      else
+         blit.mask = util_format_get_mask(pt->format) & ~PIPE_MASK_Z;
       blit.filter = PIPE_TEX_FILTER_NEAREST;
 
       pipe->blit(pipe, &blit);
@@ -1894,7 +1924,7 @@ st_CopyPixels(struct gl_context *ctx, GLint srcx, GLint srcy,
                       st->passthrough_vs,
                       driver_fp, fpv,
                       ctx->Current.Attrib[VERT_ATTRIB_COLOR0],
-                      invertTex, GL_FALSE, GL_FALSE);
+                      invertTex, write_depth, write_stencil);
 
    pipe_resource_reference(&pt, NULL);
    pipe_sampler_view_reference(&sv[0], NULL);

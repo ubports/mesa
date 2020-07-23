@@ -778,9 +778,15 @@ vote(const _mesa_glsl_parse_state *state)
 }
 
 static bool
+vote_ext(const _mesa_glsl_parse_state *state)
+{
+   return state->EXT_shader_group_vote_enable;
+}
+
+static bool
 vote_or_v460_desktop(const _mesa_glsl_parse_state *state)
 {
-   return state->ARB_shader_group_vote_enable || v460_desktop(state);
+   return state->EXT_shader_group_vote_enable || state->ARB_shader_group_vote_enable || v460_desktop(state);
 }
 
 static bool
@@ -1247,6 +1253,7 @@ enum image_function_flags {
    IMAGE_FUNCTION_AVAIL_ATOMIC_EXCHANGE = (1 << 8),
    IMAGE_FUNCTION_AVAIL_ATOMIC_ADD = (1 << 9),
    IMAGE_FUNCTION_EXT_ONLY = (1 << 10),
+   IMAGE_FUNCTION_SUPPORTS_SIGNED_DATA_TYPE = (1 << 11),
 };
 
 } /* anonymous namespace */
@@ -4274,6 +4281,18 @@ builtin_builder::create_builtins()
                 _vote("__intrinsic_vote_eq", vote),
                 NULL);
 
+   add_function("anyInvocationEXT",
+                _vote("__intrinsic_vote_any", vote_ext),
+                NULL);
+
+   add_function("allInvocationsEXT",
+                _vote("__intrinsic_vote_all", vote_ext),
+                NULL);
+
+   add_function("allInvocationsEqualEXT",
+                _vote("__intrinsic_vote_eq", vote_ext),
+                NULL);
+
    add_function("anyInvocation",
                 _vote("__intrinsic_vote_any", v460_desktop),
                 NULL);
@@ -4613,14 +4632,15 @@ builtin_builder::add_image_function(const char *name,
    ir_function *f = new(mem_ctx) ir_function(name);
 
    for (unsigned i = 0; i < ARRAY_SIZE(types); ++i) {
-      if ((types[i]->sampled_type != GLSL_TYPE_FLOAT ||
-           (flags & IMAGE_FUNCTION_SUPPORTS_FLOAT_DATA_TYPE)) &&
-          (types[i]->sampler_dimensionality == GLSL_SAMPLER_DIM_MS ||
-           !(flags & IMAGE_FUNCTION_MS_ONLY)))
-         f->add_signature(_image(prototype, types[i], intrinsic_name,
-                                 num_arguments, flags, intrinsic_id));
+      if (types[i]->sampled_type == GLSL_TYPE_FLOAT && !(flags & IMAGE_FUNCTION_SUPPORTS_FLOAT_DATA_TYPE))
+         continue;
+      if (types[i]->sampled_type == GLSL_TYPE_INT && !(flags & IMAGE_FUNCTION_SUPPORTS_SIGNED_DATA_TYPE))
+         continue;
+      if ((types[i]->sampler_dimensionality != GLSL_SAMPLER_DIM_MS) && (flags & IMAGE_FUNCTION_MS_ONLY))
+         continue;
+      f->add_signature(_image(prototype, types[i], intrinsic_name,
+                              num_arguments, flags, intrinsic_id));
    }
-
    shader->symbols->add_function(f);
 }
 
@@ -4634,6 +4654,7 @@ builtin_builder::add_image_functions(bool glsl)
                        &builtin_builder::_image_prototype, 0,
                        (flags | IMAGE_FUNCTION_HAS_VECTOR_DATA_TYPE |
                        IMAGE_FUNCTION_SUPPORTS_FLOAT_DATA_TYPE |
+                       IMAGE_FUNCTION_SUPPORTS_SIGNED_DATA_TYPE |
                        IMAGE_FUNCTION_READ_ONLY),
                       ir_intrinsic_image_load);
 
@@ -4643,6 +4664,7 @@ builtin_builder::add_image_functions(bool glsl)
                       (flags | IMAGE_FUNCTION_RETURNS_VOID |
                        IMAGE_FUNCTION_HAS_VECTOR_DATA_TYPE |
                        IMAGE_FUNCTION_SUPPORTS_FLOAT_DATA_TYPE |
+                       IMAGE_FUNCTION_SUPPORTS_SIGNED_DATA_TYPE |
                        IMAGE_FUNCTION_WRITE_ONLY),
                       ir_intrinsic_image_store);
 
@@ -4652,32 +4674,38 @@ builtin_builder::add_image_functions(bool glsl)
                       "__intrinsic_image_atomic_add",
                       &builtin_builder::_image_prototype, 1,
                       (flags | IMAGE_FUNCTION_AVAIL_ATOMIC_ADD |
-                       IMAGE_FUNCTION_SUPPORTS_FLOAT_DATA_TYPE),
+                       IMAGE_FUNCTION_SUPPORTS_FLOAT_DATA_TYPE |
+                       IMAGE_FUNCTION_SUPPORTS_SIGNED_DATA_TYPE),
                       ir_intrinsic_image_atomic_add);
 
    add_image_function(glsl ? "imageAtomicMin" : "__intrinsic_image_atomic_min",
                       "__intrinsic_image_atomic_min",
-                      &builtin_builder::_image_prototype, 1, atom_flags,
+                      &builtin_builder::_image_prototype, 1,
+                      atom_flags | IMAGE_FUNCTION_SUPPORTS_SIGNED_DATA_TYPE,
                       ir_intrinsic_image_atomic_min);
 
    add_image_function(glsl ? "imageAtomicMax" : "__intrinsic_image_atomic_max",
                       "__intrinsic_image_atomic_max",
-                      &builtin_builder::_image_prototype, 1, atom_flags,
+                      &builtin_builder::_image_prototype, 1,
+                      atom_flags | IMAGE_FUNCTION_SUPPORTS_SIGNED_DATA_TYPE,
                       ir_intrinsic_image_atomic_max);
 
    add_image_function(glsl ? "imageAtomicAnd" : "__intrinsic_image_atomic_and",
                       "__intrinsic_image_atomic_and",
-                      &builtin_builder::_image_prototype, 1, atom_flags,
+                      &builtin_builder::_image_prototype, 1,
+                      atom_flags | IMAGE_FUNCTION_SUPPORTS_SIGNED_DATA_TYPE,
                       ir_intrinsic_image_atomic_and);
 
    add_image_function(glsl ? "imageAtomicOr" : "__intrinsic_image_atomic_or",
                       "__intrinsic_image_atomic_or",
-                      &builtin_builder::_image_prototype, 1, atom_flags,
+                      &builtin_builder::_image_prototype, 1,
+                      atom_flags | IMAGE_FUNCTION_SUPPORTS_SIGNED_DATA_TYPE,
                       ir_intrinsic_image_atomic_or);
 
    add_image_function(glsl ? "imageAtomicXor" : "__intrinsic_image_atomic_xor",
                       "__intrinsic_image_atomic_xor",
-                      &builtin_builder::_image_prototype, 1, atom_flags,
+                      &builtin_builder::_image_prototype, 1,
+                      atom_flags | IMAGE_FUNCTION_SUPPORTS_SIGNED_DATA_TYPE,
                       ir_intrinsic_image_atomic_xor);
 
    add_image_function((glsl ? "imageAtomicExchange" :
@@ -4685,25 +4713,29 @@ builtin_builder::add_image_functions(bool glsl)
                       "__intrinsic_image_atomic_exchange",
                       &builtin_builder::_image_prototype, 1,
                       (flags | IMAGE_FUNCTION_AVAIL_ATOMIC_EXCHANGE |
+                       IMAGE_FUNCTION_SUPPORTS_SIGNED_DATA_TYPE |
                        IMAGE_FUNCTION_SUPPORTS_FLOAT_DATA_TYPE),
                       ir_intrinsic_image_atomic_exchange);
 
    add_image_function((glsl ? "imageAtomicCompSwap" :
                        "__intrinsic_image_atomic_comp_swap"),
                       "__intrinsic_image_atomic_comp_swap",
-                      &builtin_builder::_image_prototype, 2, atom_flags,
+                      &builtin_builder::_image_prototype, 2,
+                      atom_flags | IMAGE_FUNCTION_SUPPORTS_SIGNED_DATA_TYPE,
                       ir_intrinsic_image_atomic_comp_swap);
 
    add_image_function(glsl ? "imageSize" : "__intrinsic_image_size",
                       "__intrinsic_image_size",
                       &builtin_builder::_image_size_prototype, 1,
-                      flags | IMAGE_FUNCTION_SUPPORTS_FLOAT_DATA_TYPE,
+                      flags | IMAGE_FUNCTION_SUPPORTS_FLOAT_DATA_TYPE |
+                      IMAGE_FUNCTION_SUPPORTS_SIGNED_DATA_TYPE,
                       ir_intrinsic_image_size);
 
    add_image_function(glsl ? "imageSamples" : "__intrinsic_image_samples",
                       "__intrinsic_image_samples",
                       &builtin_builder::_image_samples_prototype, 1,
                       flags | IMAGE_FUNCTION_SUPPORTS_FLOAT_DATA_TYPE |
+                      IMAGE_FUNCTION_SUPPORTS_SIGNED_DATA_TYPE |
                       IMAGE_FUNCTION_MS_ONLY,
                       ir_intrinsic_image_samples);
 
@@ -6673,103 +6705,52 @@ builtin_builder::_fwidthFine(const glsl_type *type)
 ir_function_signature *
 builtin_builder::_noise1(const glsl_type *type)
 {
-   return unop(v110, ir_unop_noise, glsl_type::float_type, type);
+   /* From the GLSL 4.60 specification:
+    *
+    *    "The noise functions noise1, noise2, noise3, and noise4 have been
+    *    deprecated starting with version 4.4 of GLSL. When not generating
+    *    SPIR-V they are defined to return the value 0.0 or a vector whose
+    *    components are all 0.0. When generating SPIR-V the noise functions
+    *    are not declared and may not be used."
+    *
+    * In earlier versions of the GLSL specification attempt to define some
+    * sort of statistical noise function.  However, the function's
+    * characteristics have always been such that always returning 0 is
+    * valid and Mesa has always returned 0 for noise on most drivers.
+    */
+   ir_variable *p = in_var(type, "p");
+   MAKE_SIG(glsl_type::float_type, v110, 1, p);
+   body.emit(ret(imm(glsl_type::float_type, ir_constant_data())));
+   return sig;
 }
 
 ir_function_signature *
 builtin_builder::_noise2(const glsl_type *type)
 {
+   /* See builtin_builder::_noise1 */
    ir_variable *p = in_var(type, "p");
    MAKE_SIG(glsl_type::vec2_type, v110, 1, p);
-
-   ir_constant_data b_offset;
-   b_offset.f[0] = 601.0f;
-   b_offset.f[1] = 313.0f;
-   b_offset.f[2] = 29.0f;
-   b_offset.f[3] = 277.0f;
-
-   ir_variable *a = body.make_temp(glsl_type::float_type, "a");
-   ir_variable *b = body.make_temp(glsl_type::float_type, "b");
-   ir_variable *t = body.make_temp(glsl_type::vec2_type,  "t");
-   body.emit(assign(a, expr(ir_unop_noise, p)));
-   body.emit(assign(b, expr(ir_unop_noise, add(p, imm(type, b_offset)))));
-   body.emit(assign(t, a, WRITEMASK_X));
-   body.emit(assign(t, b, WRITEMASK_Y));
-   body.emit(ret(t));
-
+   body.emit(ret(imm(glsl_type::vec2_type, ir_constant_data())));
    return sig;
 }
 
 ir_function_signature *
 builtin_builder::_noise3(const glsl_type *type)
 {
+   /* See builtin_builder::_noise1 */
    ir_variable *p = in_var(type, "p");
    MAKE_SIG(glsl_type::vec3_type, v110, 1, p);
-
-   ir_constant_data b_offset;
-   b_offset.f[0] = 601.0f;
-   b_offset.f[1] = 313.0f;
-   b_offset.f[2] = 29.0f;
-   b_offset.f[3] = 277.0f;
-
-   ir_constant_data c_offset;
-   c_offset.f[0] = 1559.0f;
-   c_offset.f[1] = 113.0f;
-   c_offset.f[2] = 1861.0f;
-   c_offset.f[3] = 797.0f;
-
-   ir_variable *a = body.make_temp(glsl_type::float_type, "a");
-   ir_variable *b = body.make_temp(glsl_type::float_type, "b");
-   ir_variable *c = body.make_temp(glsl_type::float_type, "c");
-   ir_variable *t = body.make_temp(glsl_type::vec3_type,  "t");
-   body.emit(assign(a, expr(ir_unop_noise, p)));
-   body.emit(assign(b, expr(ir_unop_noise, add(p, imm(type, b_offset)))));
-   body.emit(assign(c, expr(ir_unop_noise, add(p, imm(type, c_offset)))));
-   body.emit(assign(t, a, WRITEMASK_X));
-   body.emit(assign(t, b, WRITEMASK_Y));
-   body.emit(assign(t, c, WRITEMASK_Z));
-   body.emit(ret(t));
-
+   body.emit(ret(imm(glsl_type::vec3_type, ir_constant_data())));
    return sig;
 }
 
 ir_function_signature *
 builtin_builder::_noise4(const glsl_type *type)
 {
+   /* See builtin_builder::_noise1 */
    ir_variable *p = in_var(type, "p");
    MAKE_SIG(glsl_type::vec4_type, v110, 1, p);
-
-   ir_variable *_p = body.make_temp(type, "_p");
-
-   ir_constant_data p_offset;
-   p_offset.f[0] = 1559.0f;
-   p_offset.f[1] = 113.0f;
-   p_offset.f[2] = 1861.0f;
-   p_offset.f[3] = 797.0f;
-
-   body.emit(assign(_p, add(p, imm(type, p_offset))));
-
-   ir_constant_data offset;
-   offset.f[0] = 601.0f;
-   offset.f[1] = 313.0f;
-   offset.f[2] = 29.0f;
-   offset.f[3] = 277.0f;
-
-   ir_variable *a = body.make_temp(glsl_type::float_type, "a");
-   ir_variable *b = body.make_temp(glsl_type::float_type, "b");
-   ir_variable *c = body.make_temp(glsl_type::float_type, "c");
-   ir_variable *d = body.make_temp(glsl_type::float_type, "d");
-   ir_variable *t = body.make_temp(glsl_type::vec4_type,  "t");
-   body.emit(assign(a, expr(ir_unop_noise, p)));
-   body.emit(assign(b, expr(ir_unop_noise, add(p, imm(type, offset)))));
-   body.emit(assign(c, expr(ir_unop_noise, _p)));
-   body.emit(assign(d, expr(ir_unop_noise, add(_p, imm(type, offset)))));
-   body.emit(assign(t, a, WRITEMASK_X));
-   body.emit(assign(t, b, WRITEMASK_Y));
-   body.emit(assign(t, c, WRITEMASK_Z));
-   body.emit(assign(t, d, WRITEMASK_W));
-   body.emit(ret(t));
-
+   body.emit(ret(imm(glsl_type::vec4_type, ir_constant_data())));
    return sig;
 }
 

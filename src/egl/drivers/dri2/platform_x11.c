@@ -45,7 +45,6 @@
 #include "util/bitscan.h"
 
 #include "egl_dri2.h"
-#include "egl_dri2_fallbacks.h"
 #include "loader.h"
 
 #ifdef HAVE_DRI3
@@ -245,7 +244,7 @@ dri2_x11_get_red_mask_for_depth(struct dri2_egl_display *dri2_dpy, int depth)
 }
 
 /**
- * Called via eglCreateWindowSurface(), drv->API.CreateWindowSurface().
+ * Called via eglCreateWindowSurface(), drv->CreateWindowSurface().
  */
 static _EGLSurface *
 dri2_x11_create_surface(_EGLDriver *drv, _EGLDisplay *disp, EGLint type,
@@ -361,7 +360,7 @@ dri2_x11_create_surface(_EGLDriver *drv, _EGLDisplay *disp, EGLint type,
 }
 
 /**
- * Called via eglCreateWindowSurface(), drv->API.CreateWindowSurface().
+ * Called via eglCreateWindowSurface(), drv->CreateWindowSurface().
  */
 static _EGLSurface *
 dri2_x11_create_window_surface(_EGLDriver *drv, _EGLDisplay *disp,
@@ -1181,14 +1180,8 @@ static const struct dri2_egl_display_vtbl dri2_x11_swrast_display_vtbl = {
    .destroy_surface = dri2_x11_destroy_surface,
    .create_image = dri2_create_image_khr,
    .swap_buffers = dri2_x11_swap_buffers,
-   .swap_buffers_region = dri2_fallback_swap_buffers_region,
-   .post_sub_buffer = dri2_fallback_post_sub_buffer,
    /* XXX: should really implement this since X11 has pixmaps */
-   .copy_buffers = dri2_fallback_copy_buffers,
-   .query_buffer_age = dri2_fallback_query_buffer_age,
    .query_surface = dri2_query_surface,
-   .create_wayland_buffer_from_image = dri2_fallback_create_wayland_buffer_from_image,
-   .get_sync_values = dri2_fallback_get_sync_values,
    .get_dri_drawable = dri2_surface_get_dri_drawable,
 };
 
@@ -1201,13 +1194,10 @@ static const struct dri2_egl_display_vtbl dri2_x11_display_vtbl = {
    .create_image = dri2_x11_create_image_khr,
    .swap_interval = dri2_x11_swap_interval,
    .swap_buffers = dri2_x11_swap_buffers,
-   .swap_buffers_with_damage = dri2_fallback_swap_buffers_with_damage,
    .swap_buffers_region = dri2_x11_swap_buffers_region,
    .post_sub_buffer = dri2_x11_post_sub_buffer,
    .copy_buffers = dri2_x11_copy_buffers,
-   .query_buffer_age = dri2_fallback_query_buffer_age,
    .query_surface = dri2_query_surface,
-   .create_wayland_buffer_from_image = dri2_fallback_create_wayland_buffer_from_image,
    .get_sync_values = dri2_x11_get_sync_values,
    .get_dri_drawable = dri2_surface_get_dri_drawable,
 };

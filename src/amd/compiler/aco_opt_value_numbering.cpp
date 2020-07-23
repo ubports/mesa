@@ -86,6 +86,9 @@ struct InstrHash {
       if (instr->isDPP())
          return hash_murmur_32<DPP_instruction>(instr);
 
+      if (instr->isSDWA())
+         return hash_murmur_32<SDWA_instruction>(instr);
+
       switch (instr->format) {
       case Format::SMEM:
          return hash_murmur_32<SMEM_instruction>(instr);
@@ -199,6 +202,20 @@ struct InstrPred {
                 aDPP->neg[0] == bDPP->neg[0] &&
                 aDPP->neg[1] == bDPP->neg[1];
       }
+      if (a->isSDWA()) {
+         SDWA_instruction* aSDWA = static_cast<SDWA_instruction*>(a);
+         SDWA_instruction* bSDWA = static_cast<SDWA_instruction*>(b);
+         return aSDWA->sel[0] == bSDWA->sel[0] &&
+                aSDWA->sel[1] == bSDWA->sel[1] &&
+                aSDWA->dst_sel == bSDWA->dst_sel &&
+                aSDWA->abs[0] == bSDWA->abs[0] &&
+                aSDWA->abs[1] == bSDWA->abs[1] &&
+                aSDWA->neg[0] == bSDWA->neg[0] &&
+                aSDWA->neg[1] == bSDWA->neg[1] &&
+                aSDWA->dst_preserve == bSDWA->dst_preserve &&
+                aSDWA->clamp == bSDWA->clamp &&
+                aSDWA->omod == bSDWA->omod;
+      }
 
       switch (a->format) {
          case Format::SOPK: {
@@ -209,8 +226,11 @@ struct InstrPred {
          case Format::SMEM: {
             SMEM_instruction* aS = static_cast<SMEM_instruction*>(a);
             SMEM_instruction* bS = static_cast<SMEM_instruction*>(b);
+            /* isel shouldn't be creating situations where this assertion fails */
+            assert(aS->prevent_overflow == bS->prevent_overflow);
             return aS->can_reorder && bS->can_reorder &&
-                   aS->glc == bS->glc && aS->nv == bS->nv;
+                   aS->glc == bS->glc && aS->nv == bS->nv &&
+                   aS->prevent_overflow == bS->prevent_overflow;
          }
          case Format::VINTRP: {
             Interp_instruction* aI = static_cast<Interp_instruction*>(a);
@@ -384,6 +404,14 @@ void process_block(vn_ctx& ctx, Block& block)
                assert(instr->definitions[i].regClass() == orig_instr->definitions[i].regClass());
                assert(instr->definitions[i].isTemp());
                ctx.renames[instr->definitions[i].tempId()] = orig_instr->definitions[i].getTemp();
+               if (instr->definitions[i].isPrecise())
+                  orig_instr->definitions[i].setPrecise(true);
+               /* SPIR_V spec says that an instruction marked with NUW wrapping
+                * around is undefined behaviour, so we can break additions in
+                * other contexts.
+                */
+               if (instr->definitions[i].isNUW())
+                  orig_instr->definitions[i].setNUW(true);
             }
          } else {
             ctx.expr_values.erase(res.first);

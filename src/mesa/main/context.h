@@ -50,7 +50,7 @@
 
 
 #include "errors.h"
-#include "util/imports.h"
+
 #include "extensions.h"
 #include "mtypes.h"
 #include "vbo/vbo.h"
@@ -66,7 +66,7 @@ struct _glapi_table;
 
 /** \name Visual-related functions */
 /*@{*/
- 
+
 extern struct gl_config *
 _mesa_create_visual( GLboolean dbFlag,
                      GLboolean stereoFlag,
@@ -107,6 +107,9 @@ _mesa_destroy_visual( struct gl_config *vis );
 /** \name Context-related functions */
 /*@{*/
 
+extern void
+_mesa_initialize(void);
+
 extern GLboolean
 _mesa_initialize_context( struct gl_context *ctx,
                           gl_api api,
@@ -115,7 +118,7 @@ _mesa_initialize_context( struct gl_context *ctx,
                           const struct dd_function_table *driverFunctions);
 
 extern void
-_mesa_free_context_data(struct gl_context *ctx);
+_mesa_free_context_data(struct gl_context *ctx, bool destroy_debug_output);
 
 extern void
 _mesa_destroy_context( struct gl_context *ctx );
@@ -257,7 +260,7 @@ do {                                                            \
 /**
  * Macro to assert that the API call was made outside the
  * glBegin()/glEnd() pair, with return value.
- * 
+ *
  * \param ctx GL context.
  * \param retval value to return in case the assertion fails.
  */
@@ -272,7 +275,7 @@ do {									\
 /**
  * Macro to assert that the API call was made outside the
  * glBegin()/glEnd() pair.
- * 
+ *
  * \param ctx GL context.
  */
 #define ASSERT_OUTSIDE_BEGIN_END(ctx)					\

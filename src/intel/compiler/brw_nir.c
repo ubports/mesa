@@ -597,7 +597,7 @@ brw_nir_optimize(nir_shader *nir, const struct brw_compiler *compiler,
    /* Workaround Gfxbench unused local sampler variable which will trigger an
     * assert in the opt_large_constants pass.
     */
-   OPT(nir_remove_dead_variables, nir_var_function_temp);
+   OPT(nir_remove_dead_variables, nir_var_function_temp, NULL);
 }
 
 static unsigned
@@ -785,8 +785,8 @@ brw_nir_link_shaders(const struct brw_compiler *compiler,
    if (nir_link_opt_varyings(producer, consumer))
       brw_nir_optimize(consumer, compiler, c_is_scalar, false);
 
-   NIR_PASS_V(producer, nir_remove_dead_variables, nir_var_shader_out);
-   NIR_PASS_V(consumer, nir_remove_dead_variables, nir_var_shader_in);
+   NIR_PASS_V(producer, nir_remove_dead_variables, nir_var_shader_out, NULL);
+   NIR_PASS_V(consumer, nir_remove_dead_variables, nir_var_shader_in, NULL);
 
    if (nir_remove_unused_varyings(producer, consumer)) {
       NIR_PASS_V(producer, nir_lower_global_vars_to_local);
@@ -881,7 +881,8 @@ brw_vectorize_lower_mem_access(nir_shader *nir,
       OPT(nir_opt_load_store_vectorize,
           nir_var_mem_ubo | nir_var_mem_ssbo |
           nir_var_mem_global | nir_var_mem_shared,
-          brw_nir_should_vectorize_mem);
+          brw_nir_should_vectorize_mem,
+          (nir_variable_mode)0);
    }
 
    OPT(brw_nir_lower_mem_access_bit_sizes, devinfo);
@@ -915,6 +916,7 @@ brw_postprocess_nir(nir_shader *nir, const struct brw_compiler *compiler,
 
    UNUSED bool progress; /* Written by OPT */
 
+   OPT(brw_nir_lower_scoped_barriers);
    OPT(nir_opt_combine_memory_barriers, combine_all_barriers, NULL);
 
    do {
@@ -982,7 +984,6 @@ brw_postprocess_nir(nir_shader *nir, const struct brw_compiler *compiler,
       OPT(nir_opt_cse);
    }
 
-   OPT(nir_lower_to_source_mods, nir_lower_all_source_mods);
    OPT(nir_copy_prop);
    OPT(nir_opt_dce);
    OPT(nir_opt_move, nir_move_comparisons);

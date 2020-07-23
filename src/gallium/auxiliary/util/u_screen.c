@@ -64,6 +64,7 @@ u_pipe_screen_get_param_defaults(struct pipe_screen *pscreen,
    case PIPE_CAP_VERTEX_SHADER_SATURATE:
    case PIPE_CAP_MAX_STREAM_OUTPUT_BUFFERS: /* enables EXT_transform_feedback */
    case PIPE_CAP_PRIMITIVE_RESTART:
+   case PIPE_CAP_PRIMITIVE_RESTART_FIXED_INDEX:
    case PIPE_CAP_INDEP_BLEND_ENABLE:
    case PIPE_CAP_INDEP_BLEND_FUNC:
    case PIPE_CAP_MAX_TEXTURE_ARRAY_LAYERS: /* Enables GL_EXT_texture_array */
@@ -111,7 +112,7 @@ u_pipe_screen_get_param_defaults(struct pipe_screen *pscreen,
       return 120;
 
    case PIPE_CAP_ESSL_FEATURE_LEVEL:
-      /* Tell state-tracker to fallback to PIPE_CAP_GLSL_FEATURE_LEVEL */
+      /* Tell gallium frontend to fallback to PIPE_CAP_GLSL_FEATURE_LEVEL */
       return 0;
 
    case PIPE_CAP_QUADS_FOLLOW_PROVOKING_VERTEX_CONVENTION:
@@ -213,6 +214,7 @@ u_pipe_screen_get_param_defaults(struct pipe_screen *pscreen,
    case PIPE_CAP_POLYGON_OFFSET_CLAMP:
    case PIPE_CAP_MULTISAMPLE_Z_RESOLVE:
    case PIPE_CAP_RESOURCE_FROM_USER_MEMORY:
+   case PIPE_CAP_RESOURCE_FROM_USER_MEMORY_COMPUTE_ONLY:
    case PIPE_CAP_DEVICE_RESET_STATUS_QUERY:
    case PIPE_CAP_MAX_SHADER_PATCH_VARYINGS:
    case PIPE_CAP_TEXTURE_FLOAT_LINEAR:
@@ -223,6 +225,7 @@ u_pipe_screen_get_param_defaults(struct pipe_screen *pscreen,
    case PIPE_CAP_SHAREABLE_SHADERS:
    case PIPE_CAP_COPY_BETWEEN_COMPRESSED_AND_PLAIN_FORMATS:
    case PIPE_CAP_CLEAR_TEXTURE:
+   case PIPE_CAP_CLEAR_SCISSORED:
    case PIPE_CAP_DRAW_PARAMETERS:
    case PIPE_CAP_TGSI_PACK_HALF_FLOAT:
    case PIPE_CAP_MULTI_DRAW_INDIRECT:
@@ -259,6 +262,7 @@ u_pipe_screen_get_param_defaults(struct pipe_screen *pscreen,
    case PIPE_CAP_POLYGON_OFFSET_UNITS_UNSCALED:
    case PIPE_CAP_VIEWPORT_SUBPIXEL_BITS:
    case PIPE_CAP_VIEWPORT_SWIZZLE:
+   case PIPE_CAP_VIEWPORT_MASK:
    case PIPE_CAP_MIXED_COLOR_DEPTH_BITS:
    case PIPE_CAP_TGSI_ARRAY_COMPONENTS:
    case PIPE_CAP_STREAM_OUTPUT_INTERLEAVE_BUFFERS:
@@ -277,6 +281,7 @@ u_pipe_screen_get_param_defaults(struct pipe_screen *pscreen,
 
    case PIPE_CAP_FBFETCH:
    case PIPE_CAP_FBFETCH_COHERENT:
+   case PIPE_CAP_BLEND_EQUATION_ADVANCED:
    case PIPE_CAP_TGSI_MUL_ZERO_WINS:
    case PIPE_CAP_DOUBLES:
    case PIPE_CAP_INT64:
@@ -343,6 +348,7 @@ u_pipe_screen_get_param_defaults(struct pipe_screen *pscreen,
    case PIPE_CAP_SHADER_SAMPLES_IDENTICAL:
    case PIPE_CAP_TGSI_ATOMINC_WRAP:
    case PIPE_CAP_TGSI_TG4_COMPONENT_IN_SWIZZLE:
+   case PIPE_CAP_GLSL_ZERO_INIT:
       return 0;
 
    case PIPE_CAP_MAX_GS_INVOCATIONS:
@@ -421,10 +427,15 @@ u_pipe_screen_get_param_defaults(struct pipe_screen *pscreen,
 
    case PIPE_CAP_VIEWPORT_TRANSFORM_LOWERED:
    case PIPE_CAP_PSIZ_CLAMPED:
+   case PIPE_CAP_MAP_UNSYNCHRONIZED_THREAD_SAFE:
       return 0;
 
    case PIPE_CAP_GL_BEGIN_END_BUFFER_SIZE:
       return 512 * 1024;
+
+   case PIPE_CAP_SYSTEM_SVM:
+   case PIPE_CAP_ALPHA_TO_COVERAGE_DITHER_CONTROL:
+      return 0;
 
    default:
       unreachable("bad PIPE_CAP_*");

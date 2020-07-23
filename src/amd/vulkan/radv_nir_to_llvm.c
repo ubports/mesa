@@ -1271,7 +1271,7 @@ handle_vs_input_decl(struct radv_shader_context *ctx,
 		 * access are detected. Only GFX6 and GFX10 are affected.
 		 */
 		bool unaligned_vertex_fetches = false;
-		if ((ctx->ac.chip_class == GFX6 || ctx->ac.chip_class == GFX10) &&
+		if ((ctx->ac.chip_class == GFX6 || ctx->ac.chip_class >= GFX10) &&
 		    vtx_info->chan_format != data_format &&
 		    ((attrib_offset % vtx_info->element_size) ||
 		     (attrib_stride % vtx_info->element_size)))
@@ -1282,7 +1282,7 @@ handle_vs_input_decl(struct radv_shader_context *ctx,
 			LLVMValueRef values[4];
 
 			assert(ctx->ac.chip_class == GFX6 ||
-			       ctx->ac.chip_class == GFX10);
+			       ctx->ac.chip_class >= GFX10);
 
 			for (unsigned chan  = 0; chan < num_channels; chan++) {
 				unsigned chan_offset = attrib_offset + chan * vtx_info->chan_byte_size;
@@ -1553,6 +1553,30 @@ si_llvm_init_export_args(struct radv_shader_context *ctx,
 			break;
 		}
 
+		/* Replace NaN by zero (only 32-bit) to fix game bugs if
+		 * requested.
+		 */
+		if (ctx->args->options->enable_mrt_output_nan_fixup &&
+		    !is_16bit &&
+		    (col_format == V_028714_SPI_SHADER_32_R ||
+		     col_format == V_028714_SPI_SHADER_32_GR ||
+		     col_format == V_028714_SPI_SHADER_32_AR ||
+		     col_format == V_028714_SPI_SHADER_32_ABGR ||
+		     col_format == V_028714_SPI_SHADER_FP16_ABGR)) {
+			for (unsigned i = 0; i < 4; i++) {
+				LLVMValueRef args[2] = {
+					values[i],
+					LLVMConstInt(ctx->ac.i32, S_NAN | Q_NAN, false)
+				};
+				LLVMValueRef isnan =
+					ac_build_intrinsic(&ctx->ac, "llvm.amdgcn.class.f32", ctx->ac.i1,
+		                                           args, 2, AC_FUNC_ATTR_READNONE);
+				values[i] = LLVMBuildSelect(ctx->ac.builder, isnan,
+							    ctx->ac.f32_0,
+							    values[i], "");
+			}
+		}
+
 		/* Pack f16 or norm_i16/u16. */
 		if (packf) {
 			for (chan = 0; chan < 2; chan++) {
@@ -1772,6 +1796,7 @@ radv_build_param_exports(struct radv_shader_context *ctx,
 
 		if (slot_name != VARYING_SLOT_LAYER &&
 		    slot_name != VARYING_SLOT_PRIMITIVE_ID &&
+		    slot_name != VARYING_SLOT_VIEWPORT &&
 		    slot_name != VARYING_SLOT_CLIP_DIST0 &&
 		    slot_name != VARYING_SLOT_CLIP_DIST1 &&
 		    slot_name < VARYING_SLOT_VAR0)
@@ -1891,12 +1916,10 @@ radv_llvm_export_vs(struct radv_shader_context *ctx,
 			outinfo->pos_exports++;
 	}
 
-	/* Navi10-14 skip POS0 exports if EXEC=0 and DONE=0, causing a hang.
+	/* GFX10 skip POS0 exports if EXEC=0 and DONE=0, causing a hang.
 	 * Setting valid_mask=1 prevents it and has no other effect.
 	 */
-	if (ctx->ac.family == CHIP_NAVI10 ||
-	    ctx->ac.family == CHIP_NAVI12 ||
-	    ctx->ac.family == CHIP_NAVI14)
+	if (ctx->ac.chip_class == GFX10)
 		pos_args[0].valid_mask = 1;
 
 	pos_idx = 0;
@@ -2293,8 +2316,7 @@ static void build_streamout_vertex(struct radv_shader_context *ctx,
 		for (unsigned i = 0; i < AC_LLVM_MAX_OUTPUTS; ++i) {
 			unsigned output_usage_mask =
 				ctx->args->shader_info->gs.output_usage_mask[i];
-			uint8_t output_stream =
-				output_stream = ctx->args->shader_info->gs.output_streams[i];
+			uint8_t output_stream = ctx->args->shader_info->gs.output_streams[i];
 
 			if (!(ctx->output_mask & (1ull << i)) ||
 			    output_stream != stream)
@@ -3704,7 +3726,7 @@ ac_nir_eliminate_const_vs_outputs(struct radv_shader_context *ctx)
 	ac_optimize_vs_outputs(&ctx->ac,
 			       ctx->main_function,
 			       outinfo->vs_output_param_offset,
-			       VARYING_SLOT_MAX,
+			       VARYING_SLOT_MAX, 0,
 			       &outinfo->param_exports);
 }
 
@@ -3713,7 +3735,7 @@ ac_setup_rings(struct radv_shader_context *ctx)
 {
 	if (ctx->args->options->chip_class <= GFX8 &&
 	    (ctx->stage == MESA_SHADER_GEOMETRY ||
-	     ctx->args->options->key.vs_common_out.as_es || ctx->args->options->key.vs_common_out.as_es)) {
+	     ctx->args->options->key.vs_common_out.as_es)) {
 		unsigned ring = ctx->stage == MESA_SHADER_GEOMETRY ? RING_ESGS_GS
 								   : RING_ESGS_VS;
 		LLVMValueRef offset = LLVMConstInt(ctx->ac.i32, ring, false);
@@ -4005,13 +4027,15 @@ LLVMModuleRef ac_translate_nir_to_llvm(struct ac_llvm_compiler *ac_llvm,
 				ctx.tcs_num_inputs = args->options->key.tcs.num_inputs;
 			else
 				ctx.tcs_num_inputs = util_last_bit64(args->shader_info->vs.ls_outputs_written);
+			unsigned tcs_num_outputs = util_last_bit64(ctx.args->shader_info->tcs.outputs_written);
+			unsigned tcs_num_patch_outputs = util_last_bit64(ctx.args->shader_info->tcs.patch_outputs_written);
 			ctx.tcs_num_patches =
 				get_tcs_num_patches(
 					ctx.args->options->key.tcs.input_vertices,
 					ctx.shader->info.tess.tcs_vertices_out,
 					ctx.tcs_num_inputs,
-					ctx.args->shader_info->tcs.outputs_written,
-					ctx.args->shader_info->tcs.patch_outputs_written,
+					tcs_num_outputs,
+					tcs_num_patch_outputs,
 					ctx.args->options->tess_offchip_block_dw_size,
 					ctx.args->options->chip_class,
 					ctx.args->options->family);
@@ -4115,6 +4139,8 @@ LLVMModuleRef ac_translate_nir_to_llvm(struct ac_llvm_compiler *ac_llvm,
 		}
 
 		if (shaders[i]->info.stage == MESA_SHADER_TESS_CTRL) {
+			unsigned tcs_num_outputs = util_last_bit64(ctx.args->shader_info->tcs.outputs_written);
+			unsigned tcs_num_patch_outputs = util_last_bit64(ctx.args->shader_info->tcs.patch_outputs_written);
 			args->shader_info->tcs.num_patches = ctx.tcs_num_patches;
 			args->shader_info->tcs.lds_size =
 				calculate_tess_lds_size(
@@ -4122,8 +4148,8 @@ LLVMModuleRef ac_translate_nir_to_llvm(struct ac_llvm_compiler *ac_llvm,
 					ctx.shader->info.tess.tcs_vertices_out,
 					ctx.tcs_num_inputs,
 					ctx.tcs_num_patches,
-					ctx.args->shader_info->tcs.outputs_written,
-					ctx.args->shader_info->tcs.patch_outputs_written);
+					tcs_num_outputs,
+					tcs_num_patch_outputs);
 		}
 	}
 
@@ -4414,8 +4440,6 @@ llvm_compile_shader(struct radv_device *device,
 	tm_options |= AC_TM_SUPPORTS_SPILL;
 	if (args->options->check_ir)
 		tm_options |= AC_TM_CHECK_IR;
-	if (device->instance->debug_flags & RADV_DEBUG_NO_LOAD_STORE_OPT)
-		tm_options |= AC_TM_NO_LOAD_STORE_OPT;
 
 	thread_compiler = !(device->instance->debug_flags & RADV_DEBUG_NOTHREADLLVM);
 

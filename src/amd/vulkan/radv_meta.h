@@ -58,6 +58,33 @@ struct radv_meta_saved_state {
 	struct radv_attachment_state *attachments;
 	struct radv_framebuffer *framebuffer;
 	VkRect2D render_area;
+
+	VkCullModeFlags cull_mode;
+	VkFrontFace front_face;
+
+	unsigned primitive_topology;
+
+	bool depth_test_enable;
+	bool depth_write_enable;
+	unsigned depth_compare_op;
+	bool depth_bounds_test_enable;
+	bool stencil_test_enable;
+
+	struct {
+		struct {
+			VkStencilOp fail_op;
+			VkStencilOp pass_op;
+			VkStencilOp depth_fail_op;
+			VkCompareOp compare_op;
+		} front;
+
+		struct {
+			VkStencilOp fail_op;
+			VkStencilOp pass_op;
+			VkStencilOp depth_fail_op;
+			VkCompareOp compare_op;
+		} back;
+	} stencil_op;
 };
 
 VkResult radv_device_init_meta_clear_state(struct radv_device *device, bool on_demand);
@@ -248,6 +275,25 @@ radv_is_dcc_decompress_pipeline(struct radv_cmd_buffer *cmd_buffer)
 
 	return radv_pipeline_to_handle(pipeline) ==
 	       meta_state->fast_clear_flush.dcc_decompress_pipeline;
+}
+
+/**
+ * Return whether the bound pipeline is the hardware resolve path.
+ */
+static inline bool
+radv_is_hw_resolve_pipeline(struct radv_cmd_buffer *cmd_buffer)
+{
+	struct radv_meta_state *meta_state = &cmd_buffer->device->meta_state;
+	struct radv_pipeline *pipeline = cmd_buffer->state.pipeline;
+
+	for (uint32_t i = 0; i < NUM_META_FS_KEYS; ++i) {
+		VkFormat format = radv_fs_key_format_exemplars[i];
+		unsigned fs_key = radv_format_meta_fs_key(format);
+
+		if (radv_pipeline_to_handle(pipeline) == meta_state->resolve.pipeline[fs_key])
+			return true;
+	}
+	return false;
 }
 
 /* common nir builder helpers */

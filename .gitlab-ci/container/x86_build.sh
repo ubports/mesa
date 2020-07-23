@@ -5,122 +5,36 @@ set -o xtrace
 
 export DEBIAN_FRONTEND=noninteractive
 
-CROSS_ARCHITECTURES="i386 ppc64el s390x"
-for arch in $CROSS_ARCHITECTURES; do
-    dpkg --add-architecture $arch
-done
-
-apt-get install -y \
-      ca-certificates \
-      gnupg \
-      unzip \
-      wget
-
-# Upstream LLVM package repository
-apt-key add .gitlab-ci/container/llvm-snapshot.gpg.key
-echo "deb https://apt.llvm.org/buster/ llvm-toolchain-buster-9 main" >/etc/apt/sources.list.d/llvm9.list
-
-sed -i -e 's/http:\/\/deb/https:\/\/deb/g' /etc/apt/sources.list
-echo 'deb https://deb.debian.org/debian buster-backports main' >/etc/apt/sources.list.d/backports.list
-
-apt-get update
-apt-get dist-upgrade -y
-
-apt-get install -y --no-remove \
+# Ephemeral packages (installed for this script and removed again at the end)
+STABLE_EPHEMERAL=" \
       autoconf \
       automake \
       autotools-dev \
-      bison \
-      ccache \
-      clang-9 \
+      bzip2 \
       cmake \
-      flex \
-      g++ \
-      gcc \
-      gettext \
-      git \
-      libclang-6.0-dev \
-      libclang-7-dev \
-      libclang-8-dev \
-      libclang-9-dev \
-      libclc-dev \
-      libelf-dev \
-      libepoxy-dev \
-      libexpat1-dev \
+      gnupg \
       libgbm-dev \
-      libgtk-3-dev \
-      libomxil-bellagio-dev \
-      libpciaccess-dev \
       libtool \
-      libunwind-dev \
-      libva-dev \
-      libvdpau-dev \
-      libvulkan-dev \
-      libvulkan-dev:ppc64el \
-      libx11-dev \
-      libx11-xcb-dev \
-      libxdamage-dev \
-      libxext-dev \
-      libxml2-utils \
-      libxrandr-dev \
-      libxrender-dev \
-      libxshmfence-dev \
-      libxvmc-dev \
-      libxxf86vm-dev \
-      llvm-6.0-dev \
-      llvm-7-dev \
-      llvm-9-dev \
-      meson \
-      pkg-config \
-      python-mako \
-      python3-mako \
-      python3-pil \
-      python3-requests \
-      qemu-user \
-      scons \
-      x11proto-dri2-dev \
-      x11proto-gl-dev \
-      x11proto-randr-dev \
-      xz-utils \
-      zlib1g-dev
+      make \
+      unzip \
+      wget \
+      "
+
+# We need multiarch for Wine
+dpkg --add-architecture i386
+apt-get update
+
+apt-get install -y --no-remove \
+      $STABLE_EPHEMERAL \
+      wine-development \
+      wine32-development
+
+apt-get install -y --no-remove -t buster-backports \
+      llvm-8-dev
+
 
 . .gitlab-ci/container/container_pre_build.sh
 
-# Cross-build Mesa deps
-for arch in $CROSS_ARCHITECTURES; do
-    apt-get install -y --no-remove \
-            crossbuild-essential-${arch} \
-            libdrm-dev:${arch} \
-            libelf-dev:${arch} \
-            libexpat1-dev:${arch} \
-            libffi-dev:${arch} \
-            libllvm8:${arch} \
-            libstdc++6:${arch} \
-            libtinfo-dev:${arch}
-
-    if [ "$arch" == "i386" ]; then
-        # libpciaccess-dev is only needed for Intel.
-        apt-get install -y --no-remove \
-            libpciaccess-dev:${arch}
-    fi
-
-    mkdir /var/cache/apt/archives/${arch}
-    # Download llvm-* packages, but don't install them yet, since they can
-    # only be installed for one architecture at a time
-    apt-get install -o Dir::Cache::archives=/var/cache/apt/archives/$arch --download-only -y --no-remove \
-       llvm-8-dev:${arch}
-done
-
-apt-get install -y --no-remove \
-      llvm-8-dev \
-
-# for 64bit windows cross-builds
-apt-get install -y --no-remove \
-      libz-mingw-w64-dev \
-      mingw-w64 \
-      wine \
-      wine32 \
-      wine64
 
 # Debian's pkg-config wrapers for mingw are broken, and there's no sign that
 # they're going to be fixed, so we'll just have to fix it ourselves
@@ -133,36 +47,13 @@ EOF
 chmod +x /usr/local/bin/x86_64-w64-mingw32-pkg-config
 
 
-# Generate cross build files for Meson
-for arch in $CROSS_ARCHITECTURES; do
-  cross_file="/cross_file-$arch.txt"
-  /usr/share/meson/debcrossgen --arch "$arch" -o "$cross_file"
-  # Explicitly set ccache path for cross compilers
-  sed -i "s|/usr/bin/\([^-]*\)-linux-gnu\([^-]*\)-g|/usr/lib/ccache/\\1-linux-gnu\\2-g|g" "$cross_file"
-  if [ "$arch" = "i386" ]; then
-    # Work around a bug in debcrossgen that should be fixed in the next release
-    sed -i "s|cpu_family = 'i686'|cpu_family = 'x86'|g" "$cross_file"
-  fi
-
-  # Rely on qemu-user being configured in binfmt_misc on the host
-  sed -i -e '/\[properties\]/a\' -e "needs_exe_wrapper = False" "$cross_file"
-done
-
-
-# for the vulkan overlay layer
-wget https://github.com/KhronosGroup/glslang/releases/download/master-tot/glslang-master-linux-Release.zip
-unzip glslang-master-linux-Release.zip bin/glslangValidator
-install -m755 bin/glslangValidator /usr/local/bin/
-rm bin/glslangValidator glslang-master-linux-Release.zip
-
-
 # dependencies where we want a specific version
 export              XORG_RELEASES=https://xorg.freedesktop.org/releases/individual
 export               XCB_RELEASES=https://xcb.freedesktop.org/dist
 export           WAYLAND_RELEASES=https://wayland.freedesktop.org/releases
 
 export         XORGMACROS_VERSION=util-macros-1.19.0
-export             LIBDRM_VERSION=libdrm-2.4.100
+export             LIBDRM_VERSION=libdrm-2.4.102
 export           XCBPROTO_VERSION=xcb-proto-1.13
 export             LIBXCB_VERSION=libxcb-1.13
 export         LIBWAYLAND_VERSION=wayland-1.15.0
@@ -183,12 +74,10 @@ tar -xvf $LIBXCB_VERSION.tar.bz2 && rm $LIBXCB_VERSION.tar.bz2
 cd $LIBXCB_VERSION; ./configure; make install; cd ..
 rm -rf $LIBXCB_VERSION
 
-wget https://dri.freedesktop.org/libdrm/$LIBDRM_VERSION.tar.bz2
-tar -xvf $LIBDRM_VERSION.tar.bz2 && rm $LIBDRM_VERSION.tar.bz2
+wget https://dri.freedesktop.org/libdrm/$LIBDRM_VERSION.tar.xz
+tar -xvf $LIBDRM_VERSION.tar.xz && rm $LIBDRM_VERSION.tar.xz
 cd $LIBDRM_VERSION
 meson build -D vc4=true -D freedreno=true -D etnaviv=true -D libdir=lib/x86_64-linux-gnu; ninja -C build install
-rm -rf build; meson --cross-file=/cross_file-ppc64el.txt build -D libdir=lib/powerpc64le-linux-gnu; ninja -C build install
-rm -rf build; meson --cross-file=/cross_file-i386.txt build -D libdir=lib/i386-linux-gnu; ninja -C build install
 cd ..
 rm -rf $LIBDRM_VERSION
 
@@ -224,15 +113,6 @@ popd
 ############### Uninstall the build software
 
 apt-get purge -y \
-      autoconf \
-      automake \
-      autotools-dev \
-      cmake \
-      git \
-      gnupg \
-      libgbm-dev \
-      libtool \
-      unzip \
-      wget
+      $STABLE_EPHEMERAL
 
 . .gitlab-ci/container/container_post_build.sh

@@ -253,8 +253,8 @@ brw_populate_sampler_prog_key_data(struct gl_context *ctx,
                      key->swizzles[i] |= SWIZZLE_ONE << (3 * i);
                   }
                }
-               /* fallthrough */
             }
+            /* fallthrough */
             case GL_RG32F:
                /* The channel select for green doesn't work - we have to
                 * request blue.  Haswell can use SCS for this, but Ivybridge
@@ -489,6 +489,8 @@ brw_wm_populate_key(struct brw_context *brw, struct brw_wm_prog_key *key)
 
       key->multisample_fbo = _mesa_geometric_samples(ctx->DrawBuffer) > 1;
    }
+
+   key->ignore_sample_mask_out = !key->multisample_fbo;
 
    /* BRW_NEW_VUE_MAP_GEOM_OUT */
    if (devinfo->gen < 6 || util_bitcount64(prog->info.inputs_read &

@@ -96,72 +96,91 @@ struct zwp_linux_dmabuf_v1;
 struct wl_buffer;
 
 struct dri2_egl_display_vtbl {
+   /* mandatory on Wayland, unused otherwise */
    int (*authenticate)(_EGLDisplay *disp, uint32_t id);
 
+   /* mandatory */
    _EGLSurface* (*create_window_surface)(_EGLDriver *drv, _EGLDisplay *disp,
                                          _EGLConfig *config,
                                          void *native_window,
                                          const EGLint *attrib_list);
 
+   /* optional */
    _EGLSurface* (*create_pixmap_surface)(_EGLDriver *drv, _EGLDisplay *disp,
                                          _EGLConfig *config,
                                          void *native_pixmap,
                                          const EGLint *attrib_list);
 
+   /* optional */
    _EGLSurface* (*create_pbuffer_surface)(_EGLDriver *drv, _EGLDisplay *disp,
                                           _EGLConfig *config,
                                           const EGLint *attrib_list);
 
+   /* mandatory */
    EGLBoolean (*destroy_surface)(_EGLDriver *drv, _EGLDisplay *disp,
                                  _EGLSurface *surface);
 
+   /* optional */
    EGLBoolean (*swap_interval)(_EGLDriver *drv, _EGLDisplay *disp,
                                _EGLSurface *surf, EGLint interval);
 
+   /* mandatory */
    _EGLImage* (*create_image)(_EGLDriver *drv, _EGLDisplay *disp,
                               _EGLContext *ctx, EGLenum target,
                               EGLClientBuffer buffer,
                               const EGLint *attr_list);
 
+   /* mandatory */
    EGLBoolean (*swap_buffers)(_EGLDriver *drv, _EGLDisplay *disp,
                               _EGLSurface *surf);
 
+   /* optional - falls back to .swap_buffers */
    EGLBoolean (*swap_buffers_with_damage)(_EGLDriver *drv, _EGLDisplay *disp,
                                           _EGLSurface *surface,
                                           const EGLint *rects, EGLint n_rects);
 
+   /* optional */
    EGLBoolean (*swap_buffers_region)(_EGLDriver *drv, _EGLDisplay *disp,
                                      _EGLSurface *surf, EGLint numRects,
                                      const EGLint *rects);
 
+   /* optional */
    EGLBoolean (*post_sub_buffer)(_EGLDriver *drv, _EGLDisplay *disp,
                                  _EGLSurface *surf,
                                  EGLint x, EGLint y,
                                  EGLint width, EGLint height);
 
+   /* optional */
    EGLBoolean (*copy_buffers)(_EGLDriver *drv, _EGLDisplay *disp,
                               _EGLSurface *surf, void *native_pixmap_target);
 
+   /* optional */
    EGLint (*query_buffer_age)(_EGLDriver *drv, _EGLDisplay *disp,
                               _EGLSurface *surf);
 
+   /* optional */
    EGLBoolean (*query_surface)(_EGLDriver *drv, _EGLDisplay *disp,
                                _EGLSurface *surf, EGLint attribute,
                                EGLint *value);
 
+   /* optional */
    struct wl_buffer* (*create_wayland_buffer_from_image)(
                         _EGLDriver *drv, _EGLDisplay *disp, _EGLImage *img);
 
+   /* optional */
    EGLBoolean (*get_sync_values)(_EGLDisplay *display, _EGLSurface *surface,
                                  EGLuint64KHR *ust, EGLuint64KHR *msc,
                                  EGLuint64KHR *sbc);
 
+   /* mandatory */
    __DRIdrawable *(*get_dri_drawable)(_EGLSurface *surf);
 
+   /* optional */
    void (*close_screen_notify)(_EGLDisplay *disp);
 
    /* Used in EGL_KHR_mutable_render_buffer to update the native window's
     * shared buffer mode.
+    * optional
     */
    bool (*set_shared_buffer_mode)(_EGLDisplay *disp, _EGLSurface *surf,
                                   bool mode);
@@ -391,7 +410,7 @@ struct dri2_egl_sync {
    void *fence;
 };
 
-/* From xmlpool/options.h, user exposed so should be stable */
+/* From driconf.h, user exposed so should be stable */
 #define DRI_CONF_VBLANK_NEVER 0
 #define DRI_CONF_VBLANK_DEF_INTERVAL_0 1
 #define DRI_CONF_VBLANK_DEF_INTERVAL_1 2
@@ -531,16 +550,8 @@ dri2_initialize_android(_EGLDriver *drv, _EGLDisplay *disp)
 }
 #endif
 
-#ifdef HAVE_SURFACELESS_PLATFORM
 EGLBoolean
 dri2_initialize_surfaceless(_EGLDriver *drv, _EGLDisplay *disp);
-#else
-static inline EGLBoolean
-dri2_initialize_surfaceless(_EGLDriver *drv, _EGLDisplay *disp)
-{
-   return _eglError(EGL_NOT_INITIALIZED, "Surfaceless platform not built");
-}
-#endif
 
 #ifdef HAVE_MIR_PLATFORM
 EGLBoolean

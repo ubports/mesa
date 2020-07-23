@@ -45,6 +45,18 @@ void ac_add_attr_dereferenceable(LLVMValueRef val, uint64_t bytes)
    A->addAttr(llvm::Attribute::getWithDereferenceableBytes(A->getContext(), bytes));
 }
 
+void ac_add_attr_alignment(LLVMValueRef val, uint64_t bytes)
+{
+#if LLVM_VERSION_MAJOR >= 10
+	llvm::Argument *A = llvm::unwrap<llvm::Argument>(val);
+	A->addAttr(llvm::Attribute::getWithAlignment(A->getContext(), llvm::Align(bytes)));
+#else
+	/* Avoid unused parameter warnings. */
+	(void)val;
+	(void)bytes;
+#endif
+}
+
 bool ac_is_sgpr_param(LLVMValueRef arg)
 {
 	llvm::Argument *A = llvm::unwrap<llvm::Argument>(arg);
@@ -84,13 +96,54 @@ LLVMBuilderRef ac_create_builder(LLVMContextRef ctx,
 	case AC_FLOAT_MODE_DEFAULT:
 	case AC_FLOAT_MODE_DENORM_FLUSH_TO_ZERO:
 		break;
-	case AC_FLOAT_MODE_NO_SIGNED_ZEROS_FP_MATH:
-		flags.setNoSignedZeros();
+
+	case AC_FLOAT_MODE_DEFAULT_OPENGL:
+		/* Allow optimizations to treat the sign of a zero argument or
+		 * result as insignificant.
+		 */
+		flags.setNoSignedZeros(); /* nsz */
+
+		/* Allow optimizations to use the reciprocal of an argument
+		 * rather than perform division.
+		 */
+		flags.setAllowReciprocal(); /* arcp */
+
+		/* Allow floating-point contraction (e.g. fusing a multiply
+		 * followed by an addition into a fused multiply-and-add).
+		 */
+		flags.setAllowContract(); /* contract */
+
 		llvm::unwrap(builder)->setFastMathFlags(flags);
 		break;
 	}
 
 	return builder;
+}
+
+/* Return the original state of inexact math. */
+bool ac_disable_inexact_math(LLVMBuilderRef builder)
+{
+	auto *b = llvm::unwrap(builder);
+	llvm::FastMathFlags flags = b->getFastMathFlags();
+
+	if (!flags.allowContract())
+		return false;
+
+	flags.setAllowContract(false);
+	b->setFastMathFlags(flags);
+	return true;
+}
+
+void ac_restore_inexact_math(LLVMBuilderRef builder, bool value)
+{
+	auto *b = llvm::unwrap(builder);
+	llvm::FastMathFlags flags = b->getFastMathFlags();
+
+	if (flags.allowContract() == value)
+		return;
+
+	flags.setAllowContract(value);
+	b->setFastMathFlags(flags);
 }
 
 LLVMTargetLibraryInfoRef

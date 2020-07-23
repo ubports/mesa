@@ -82,8 +82,10 @@ panfrost_astc_stretch(unsigned dim)
         return MIN2(dim, 11) - 4;
 }
 
-/* Texture addresses are tagged with information about AFBC (colour AFBC?) xor
- * ASTC (stretch factor) if in use. */
+/* Texture addresses are tagged with information about compressed formats.
+ * AFBC uses a bit for whether the colorspace transform is enabled (RGB and
+ * RGBA only).
+ * For ASTC, this is a "stretch factor" encoding the block size. */
 
 static unsigned
 panfrost_compression_tag(
@@ -91,8 +93,8 @@ panfrost_compression_tag(
                 enum mali_format format, enum mali_texture_layout layout)
 {
         if (layout == MALI_TEXTURE_AFBC)
-                return util_format_has_depth(desc) ? 0x0 : 0x1;
-        else if (format == MALI_ASTC_HDR_SUPP || format == MALI_ASTC_SRGB_SUPP)
+                return desc->nr_channels >= 3;
+        else if (format == MALI_ASTC_2D_LDR || format == MALI_ASTC_2D_HDR)
                 return (panfrost_astc_stretch(desc->block.height) << 3) |
                         panfrost_astc_stretch(desc->block.width);
         else
@@ -123,6 +125,7 @@ static unsigned
 panfrost_texture_num_elements(
                 unsigned first_level, unsigned last_level,
                 unsigned first_layer, unsigned last_layer,
+                unsigned nr_samples,
                 bool is_cube, bool manual_stride)
 {
         unsigned first_face  = 0, last_face = 0;
@@ -135,7 +138,7 @@ panfrost_texture_num_elements(
         unsigned levels = 1 + last_level - first_level;
         unsigned layers = 1 + last_layer - first_layer;
         unsigned faces  = 1 + last_face  - first_face;
-        unsigned num_elements = levels * layers * faces;
+        unsigned num_elements = levels * layers * faces * MAX2(nr_samples, 1);
 
         if (manual_stride)
                 num_elements *= 2;
@@ -143,16 +146,17 @@ panfrost_texture_num_elements(
         return num_elements;
 }
 
-/* Conservative estimate of the size of the texture descriptor a priori.
+/* Conservative estimate of the size of the texture payload a priori.
  * Average case, size equal to the actual size. Worst case, off by 2x (if
  * a manual stride is not needed on a linear texture). Returned value
  * must be greater than or equal to the actual size, so it's safe to use
  * as an allocation amount */
 
 unsigned
-panfrost_estimate_texture_size(
+panfrost_estimate_texture_payload_size(
                 unsigned first_level, unsigned last_level,
                 unsigned first_layer, unsigned last_layer,
+                unsigned nr_samples,
                 enum mali_texture_type type, enum mali_texture_layout layout)
 {
         /* Assume worst case */
@@ -161,11 +165,97 @@ panfrost_estimate_texture_size(
         unsigned elements = panfrost_texture_num_elements(
                         first_level, last_level,
                         first_layer, last_layer,
+                        nr_samples,
                         type == MALI_TEX_CUBE, manual_stride);
 
-        return sizeof(struct mali_texture_descriptor) +
-                sizeof(mali_ptr) * elements;
+        return sizeof(mali_ptr) * elements;
 }
+
+/* Bifrost requires a tile stride for tiled textures. This stride is computed
+ * as (16 * bpp * width) assuming there is at least one tile (width >= 16).
+ * Otherwise if height <= 16, the blob puts zero. Interactions with AFBC are
+ * currently unknown.
+ */
+
+static unsigned
+panfrost_nonlinear_stride(enum mali_texture_layout layout,
+                unsigned bytes_per_pixel,
+                unsigned width,
+                unsigned height)
+{
+        if (layout == MALI_TEXTURE_TILED) {
+                return (height <= 16) ? 0 : (16 * bytes_per_pixel * ALIGN_POT(width, 16));
+        } else {
+                unreachable("TODO: AFBC on Bifrost");
+        }
+}
+
+static void
+panfrost_emit_texture_payload(
+        mali_ptr *payload,
+        const struct util_format_description *desc,
+        enum mali_format mali_format,
+        enum mali_texture_type type,
+        enum mali_texture_layout layout,
+        unsigned width, unsigned height,
+        unsigned first_level, unsigned last_level,
+        unsigned first_layer, unsigned last_layer,
+        unsigned nr_samples,
+        unsigned cube_stride,
+        bool manual_stride,
+        mali_ptr base,
+        struct panfrost_slice *slices)
+{
+        base |= panfrost_compression_tag(desc, mali_format, layout);
+
+        /* Inject the addresses in, interleaving array indices, mip levels,
+         * cube faces, and strides in that order */
+
+        unsigned first_face  = 0, last_face = 0, face_mult = 1;
+
+        if (type == MALI_TEX_CUBE) {
+                face_mult = 6;
+                panfrost_adjust_cube_dimensions(&first_face, &last_face, &first_layer, &last_layer);
+        }
+
+        nr_samples = MAX2(nr_samples, 1);
+
+        unsigned idx = 0;
+
+        for (unsigned w = first_layer; w <= last_layer; ++w) {
+                for (unsigned l = first_level; l <= last_level; ++l) {
+                        for (unsigned f = first_face; f <= last_face; ++f) {
+                                for (unsigned s = 0; s < nr_samples; ++s) {
+                                        payload[idx++] = base + panfrost_texture_offset(
+                                                        slices, type == MALI_TEX_3D,
+                                                        cube_stride, l, w * face_mult + f, s);
+
+                                        if (manual_stride) {
+                                                payload[idx++] = (layout == MALI_TEXTURE_LINEAR) ?
+                                                        slices[l].stride :
+                                                        panfrost_nonlinear_stride(layout,
+                                                                        MAX2(desc->block.bits / 8, 1),
+                                                                        u_minify(width, l),
+                                                                        u_minify(height, l));
+                                        }
+                                }
+                        }
+                }
+        }
+}
+
+#define MALI_SWIZZLE_R001 \
+        (MALI_CHANNEL_RED << 0) | \
+        (MALI_CHANNEL_ZERO << 3) | \
+        (MALI_CHANNEL_ZERO << 6) | \
+        (MALI_CHANNEL_ONE << 9)
+
+#define MALI_SWIZZLE_A001 \
+        (MALI_CHANNEL_ALPHA << 0) | \
+        (MALI_CHANNEL_ZERO << 3) | \
+        (MALI_CHANNEL_ZERO << 6) | \
+        (MALI_CHANNEL_ONE << 9)
+
 
 void
 panfrost_new_texture(
@@ -177,6 +267,7 @@ panfrost_new_texture(
         enum mali_texture_layout layout,
         unsigned first_level, unsigned last_level,
         unsigned first_layer, unsigned last_layer,
+        unsigned nr_samples,
         unsigned cube_stride,
         unsigned swizzle,
         mali_ptr base,
@@ -187,7 +278,8 @@ panfrost_new_texture(
 
         unsigned bytes_per_pixel = util_format_get_blocksize(format);
 
-        enum mali_format mali_format = panfrost_find_format(desc);
+        enum mali_format mali_format = panfrost_pipe_format_table[desc->format].hw;
+        assert(mali_format);
 
         bool manual_stride = (layout == MALI_TEXTURE_LINEAR)
                 && panfrost_needs_explicit_stride(slices, width,
@@ -199,7 +291,11 @@ panfrost_new_texture(
                 .depth = MALI_POSITIVE(u_minify(depth, first_level)),
                 .array_size = MALI_POSITIVE(array_size),
                 .format = {
-                        .swizzle = panfrost_translate_swizzle_4(desc->swizzle),
+                        .swizzle = (format == PIPE_FORMAT_X24S8_UINT) ?
+                                MALI_SWIZZLE_A001 :
+                                (format == PIPE_FORMAT_S8_UINT) ?
+                                MALI_SWIZZLE_R001 :
+                                panfrost_translate_swizzle_4(desc->swizzle),
                         .format = mali_format,
                         .srgb = (desc->colorspace == UTIL_FORMAT_COLORSPACE_SRGB),
                         .type = type,
@@ -213,33 +309,79 @@ panfrost_new_texture(
 
         memcpy(out, &descriptor, sizeof(descriptor));
 
-        base |= panfrost_compression_tag(desc, mali_format, layout);
-
-        /* Inject the addresses in, interleaving array indices, mip levels,
-         * cube faces, and strides in that order */
-
-        unsigned first_face  = 0, last_face = 0, face_mult = 1;
-
-        if (type == MALI_TEX_CUBE) {
-                face_mult = 6;
-                panfrost_adjust_cube_dimensions(&first_face, &last_face, &first_layer, &last_layer);
-        }
-
         mali_ptr *payload = (mali_ptr *) (out + sizeof(struct mali_texture_descriptor));
-        unsigned idx = 0;
+        panfrost_emit_texture_payload(
+                payload,
+                desc,
+                mali_format,
+                type,
+                layout,
+                width, height,
+                first_level, last_level,
+                first_layer, last_layer,
+                nr_samples,
+                cube_stride,
+                manual_stride,
+                base,
+                slices);
+}
 
-        for (unsigned w = first_layer; w <= last_layer; ++w) {
-                for (unsigned l = first_level; l <= last_level; ++l) {
-                        for (unsigned f = first_face; f <= last_face; ++f) {
-                                payload[idx++] = base + panfrost_texture_offset(
-                                                slices, type == MALI_TEX_3D,
-                                                cube_stride, l, w * face_mult + f);
+void
+panfrost_new_texture_bifrost(
+        struct bifrost_texture_descriptor *descriptor,
+        uint16_t width, uint16_t height,
+        uint16_t depth, uint16_t array_size,
+        enum pipe_format format,
+        enum mali_texture_type type,
+        enum mali_texture_layout layout,
+        unsigned first_level, unsigned last_level,
+        unsigned first_layer, unsigned last_layer,
+        unsigned nr_samples,
+        unsigned cube_stride,
+        unsigned swizzle,
+        mali_ptr base,
+        struct panfrost_slice *slices,
+        struct panfrost_bo *payload)
+{
+        const struct util_format_description *desc =
+                util_format_description(format);
 
-                                if (manual_stride)
-                                        payload[idx++] = slices[l].stride;
-                        }
-                }
-        }
+        enum mali_format mali_format = panfrost_pipe_format_table[desc->format].hw;
+        assert(mali_format);
+
+        panfrost_emit_texture_payload(
+                (mali_ptr *) payload->cpu,
+                desc,
+                mali_format,
+                type,
+                layout,
+                width, height,
+                first_level, last_level,
+                first_layer, last_layer,
+                nr_samples,
+                cube_stride,
+                true, /* Stride explicit on Bifrost */
+                base,
+                slices);
+
+        descriptor->format_unk = 0x2;
+        descriptor->type = type;
+        descriptor->format = mali_format;
+        descriptor->srgb = (desc->colorspace == UTIL_FORMAT_COLORSPACE_SRGB);
+        descriptor->format_unk3 = 0x0;
+        descriptor->width = MALI_POSITIVE(u_minify(width, first_level));
+        descriptor->height = MALI_POSITIVE(u_minify(height, first_level));
+        descriptor->swizzle = swizzle;
+        descriptor->layout = layout;
+        descriptor->levels = last_level - first_level;
+        descriptor->unk1 = 0x0;
+        descriptor->levels_unk = 0;
+        descriptor->level_2 = last_level - first_level;
+        descriptor->payload = payload->gpu;
+        descriptor->array_size = MALI_POSITIVE(array_size);
+        descriptor->unk4 = 0x0;
+        descriptor->depth = MALI_POSITIVE(u_minify(depth, first_level));
+        descriptor->unk5 = 0x0;
 }
 
 /* Computes sizes for checksumming, which is 8 bytes per 16x16 tile.
@@ -277,8 +419,8 @@ panfrost_get_layer_stride(struct panfrost_slice *slices, bool is_3d, unsigned cu
  * the base address of a texture to get the address to that level/face */
 
 unsigned
-panfrost_texture_offset(struct panfrost_slice *slices, bool is_3d, unsigned cube_stride, unsigned level, unsigned face)
+panfrost_texture_offset(struct panfrost_slice *slices, bool is_3d, unsigned cube_stride, unsigned level, unsigned face, unsigned sample)
 {
         unsigned layer_stride = panfrost_get_layer_stride(slices, is_3d, cube_stride, level);
-        return slices[level].offset + (face * layer_stride);
+        return slices[level].offset + (face * layer_stride) + (sample * slices[level].size0);
 }

@@ -37,7 +37,9 @@ files_etnaviv = files(
   'etnaviv_clear_blit.h',
   'etnaviv_compiler.h',
   'etnaviv_compiler_nir.c',
-  'etnaviv_compiler_nir_emit.h',
+  'etnaviv_compiler_nir_emit.c',
+  'etnaviv_compiler_nir_liveness.c',
+  'etnaviv_compiler_nir_ra.c',
   'etnaviv_compiler_tgsi.c',
   'etnaviv_context.c',
   'etnaviv_context.h',
@@ -53,6 +55,8 @@ files_etnaviv = files(
   'etnaviv_format.c',
   'etnaviv_format.h',
   'etnaviv_internal.h',
+  'etnaviv_nir.c',
+  'etnaviv_nir.h',
   'etnaviv_perfmon.c',
   'etnaviv_perfmon.h',
   'etnaviv_query.c',
@@ -98,7 +102,7 @@ files_etnaviv = files(
 libetnaviv = static_library(
   'etnaviv',
   files_etnaviv,
-  c_args : [c_vis_args],
+  gnu_symbol_visibility : 'hidden',
   include_directories : [
     inc_include, inc_src, inc_gallium, inc_gallium_aux, inc_etnaviv,
   ],

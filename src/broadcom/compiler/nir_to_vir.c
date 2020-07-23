@@ -23,6 +23,7 @@
 
 #include <inttypes.h>
 #include "util/format/u_format.h"
+#include "util/u_helpers.h"
 #include "util/u_math.h"
 #include "util/u_memory.h"
 #include "util/ralloc.h"
@@ -1459,6 +1460,9 @@ driver_location_compare(const void *in_a, const void *in_b)
         const nir_variable *const *a = in_a;
         const nir_variable *const *b = in_b;
 
+        if ((*a)->data.driver_location == (*b)->data.driver_location)
+                return (*a)->data.location_frac - (*b)->data.location_frac;
+
         return (*a)->data.driver_location - (*b)->data.driver_location;
 }
 
@@ -1563,20 +1567,13 @@ ntq_setup_vs_inputs(struct v3d_compile *c)
 }
 
 static bool
-var_needs_point_coord(struct v3d_compile *c, nir_variable *var)
-{
-        return (var->data.location == VARYING_SLOT_PNTC ||
-                (var->data.location >= VARYING_SLOT_VAR0 &&
-                 (c->fs_key->point_sprite_mask &
-                  (1 << (var->data.location - VARYING_SLOT_VAR0)))));
-}
-
-static bool
 program_reads_point_coord(struct v3d_compile *c)
 {
         nir_foreach_variable(var, &c->s->inputs) {
-                if (var_needs_point_coord(c, var))
+                if (util_varying_is_point_coord(var->data.location,
+                                                c->fs_key->point_sprite_mask)) {
                         return true;
+                }
         }
 
         return false;
@@ -1657,7 +1654,8 @@ ntq_setup_fs_inputs(struct v3d_compile *c)
 
                 if (var->data.location == VARYING_SLOT_POS) {
                         emit_fragcoord_input(c, loc);
-                } else if (var_needs_point_coord(c, var)) {
+                } else if (util_varying_is_point_coord(var->data.location,
+                                                       c->fs_key->point_sprite_mask)) {
                         c->inputs[loc * 4 + 0] = c->point_x;
                         c->inputs[loc * 4 + 1] = c->point_y;
                 } else {
@@ -1767,7 +1765,10 @@ ntq_emit_image_size(struct v3d_compile *c, nir_intrinsic_instr *instr)
                        vir_uniform(c, QUNIFORM_IMAGE_WIDTH, image_index));
         if (instr->num_components > 1) {
                 ntq_store_dest(c, &instr->dest, 1,
-                               vir_uniform(c, QUNIFORM_IMAGE_HEIGHT,
+                               vir_uniform(c,
+                                           instr->num_components == 2 && is_array ?
+                                                   QUNIFORM_IMAGE_ARRAY_SIZE :
+                                                   QUNIFORM_IMAGE_HEIGHT,
                                            image_index));
         }
         if (instr->num_components > 2) {
@@ -2013,10 +2014,12 @@ emit_store_output_gs(struct v3d_compile *c, nir_intrinsic_instr *instr)
 {
         assert(instr->num_components == 1);
 
+        struct qreg offset = ntq_get_src(c, instr->src[1], 0);
+
         uint32_t base_offset = nir_intrinsic_base(instr);
-        struct qreg src_offset = ntq_get_src(c, instr->src[1], 0);
-        struct qreg offset =
-                vir_ADD(c, vir_uniform_ui(c, base_offset), src_offset);
+
+        if (base_offset)
+                offset = vir_ADD(c, vir_uniform_ui(c, base_offset), offset);
 
         /* Usually, for VS or FS, we only emit outputs once at program end so
          * our VPM writes are never in non-uniform control flow, but this
@@ -2027,7 +2030,18 @@ emit_store_output_gs(struct v3d_compile *c, nir_intrinsic_instr *instr)
                            V3D_QPU_PF_PUSHZ);
         }
 
-        vir_VPM_WRITE_indirect(c, ntq_get_src(c, instr->src[0], 0), offset);
+        struct qreg val = ntq_get_src(c, instr->src[0], 0);
+
+        /* The offset isn’t necessarily dynamically uniform for a geometry
+         * shader. This can happen if the shader sometimes doesn’t emit one of
+         * the vertices. In that case subsequent vertices will be written to
+         * different offsets in the VPM and we need to use the scatter write
+         * instruction to have a different offset for each lane.
+         */
+        if (nir_src_is_dynamically_uniform(instr->src[1]))
+                vir_VPM_WRITE_indirect(c, val, offset);
+        else
+                vir_STVPMD(c, offset, val);
 
         if (vir_in_nonuniform_control_flow(c)) {
                 struct qinst *last_inst =
@@ -2123,7 +2137,7 @@ ntq_emit_intrinsic(struct v3d_compile *c, nir_intrinsic_instr *instr)
                 break;
 
         case nir_intrinsic_load_user_clip_plane:
-                for (int i = 0; i < instr->num_components; i++) {
+                for (int i = 0; i < nir_intrinsic_dest_components(instr); i++) {
                         ntq_store_dest(c, &instr->dest, i,
                                        vir_uniform(c, QUNIFORM_USER_CLIP_PLANE,
                                                    nir_intrinsic_ucp_id(instr) *
@@ -2154,6 +2168,20 @@ ntq_emit_intrinsic(struct v3d_compile *c, nir_intrinsic_instr *instr)
         case nir_intrinsic_load_alpha_ref_float:
                 ntq_store_dest(c, &instr->dest, 0,
                                vir_uniform(c, QUNIFORM_ALPHA_REF, 0));
+                break;
+
+        case nir_intrinsic_load_line_coord:
+                ntq_store_dest(c, &instr->dest, 0, vir_MOV(c, c->line_x));
+                break;
+
+        case nir_intrinsic_load_line_width:
+                ntq_store_dest(c, &instr->dest, 0,
+                               vir_uniform(c, QUNIFORM_LINE_WIDTH, 0));
+                break;
+
+        case nir_intrinsic_load_aa_line_width:
+                ntq_store_dest(c, &instr->dest, 0,
+                               vir_uniform(c, QUNIFORM_AA_LINE_WIDTH, 0));
                 break;
 
         case nir_intrinsic_load_sample_mask_in:
@@ -2711,7 +2739,10 @@ nir_to_vir(struct v3d_compile *c)
                         c->point_x = emit_fragment_varying(c, NULL, 0, 0);
                         c->point_y = emit_fragment_varying(c, NULL, 0, 0);
                         c->uses_implicit_point_line_varyings = true;
-                } else if (c->fs_key->is_lines && c->devinfo->ver < 40) {
+                } else if (c->fs_key->is_lines &&
+                           (c->devinfo->ver < 40 ||
+                            (c->s->info.system_values_read &
+                             BITFIELD64_BIT(SYSTEM_VALUE_LINE_COORD)))) {
                         c->line_x = emit_fragment_varying(c, NULL, 0, 0);
                         c->uses_implicit_point_line_varyings = true;
                 }

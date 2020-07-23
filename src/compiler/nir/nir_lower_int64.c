@@ -675,6 +675,7 @@ nir_lower_int64_op_to_options_mask(nir_op opcode)
 {
    switch (opcode) {
    case nir_op_imul:
+   case nir_op_amul:
       return nir_lower_imul64;
    case nir_op_imul_2x32_64:
    case nir_op_umul_2x32_64:
@@ -716,6 +717,12 @@ nir_lower_int64_op_to_options_mask(nir_op opcode)
    case nir_op_imax:
    case nir_op_umin:
    case nir_op_umax:
+   case nir_op_imin3:
+   case nir_op_imax3:
+   case nir_op_umin3:
+   case nir_op_umax3:
+   case nir_op_imed3:
+   case nir_op_umed3:
       return nir_lower_minmax64;
    case nir_op_iabs:
       return nir_lower_iabs64;
@@ -753,6 +760,7 @@ lower_int64_alu_instr(nir_builder *b, nir_instr *instr, void *_state)
 
    switch (alu->op) {
    case nir_op_imul:
+   case nir_op_amul:
       return lower_imul64(b, src[0], src[1]);
    case nir_op_imul_2x32_64:
       return lower_mul_2x32_64(b, src[0], src[1], true);
@@ -815,6 +823,18 @@ lower_int64_alu_instr(nir_builder *b, nir_instr *instr, void *_state)
       return lower_umin64(b, src[0], src[1]);
    case nir_op_umax:
       return lower_umax64(b, src[0], src[1]);
+   case nir_op_imin3:
+      return lower_imin64(b, src[0], lower_imin64(b, src[1], src[2]));
+   case nir_op_imax3:
+      return lower_imax64(b, src[0], lower_imax64(b, src[1], src[2]));
+   case nir_op_umin3:
+      return lower_umin64(b, src[0], lower_umin64(b, src[1], src[2]));
+   case nir_op_umax3:
+      return lower_umax64(b, src[0], lower_umax64(b, src[1], src[2]));
+   case nir_op_imed3:
+      return lower_imax64(b, lower_imin64(b, lower_imax64(b, src[0], src[1]), src[2]), lower_imin64(b, src[0], src[1]));
+   case nir_op_umed3:
+      return lower_umax64(b, lower_umin64(b, lower_umax64(b, src[0], src[1]), src[2]), lower_umin64(b, src[0], src[1]));
    case nir_op_iabs:
       return lower_iabs64(b, src[0]);
    case nir_op_ineg:
@@ -846,11 +866,16 @@ lower_int64_alu_instr(nir_builder *b, nir_instr *instr, void *_state)
    }
 }
 
+typedef struct {
+   const nir_shader_compiler_options *shader_options;
+   nir_lower_int64_options options;
+} should_lower_cb_data;
+
 static bool
-should_lower_int64_alu_instr(const nir_instr *instr, const void *_options)
+should_lower_int64_alu_instr(const nir_instr *instr, const void *_data)
 {
-   const nir_lower_int64_options options =
-      *(const nir_lower_int64_options *)_options;
+   const should_lower_cb_data *cb_data = (const should_lower_cb_data *)_data;
+   const nir_lower_int64_options options = cb_data->options;
 
    if (instr->type != nir_instr_type_alu)
       return false;
@@ -895,6 +920,13 @@ should_lower_int64_alu_instr(const nir_instr *instr, const void *_options)
       if (alu->src[0].src.ssa->bit_size != 64)
          return false;
       break;
+   case nir_op_amul:
+      assert(alu->dest.dest.is_ssa);
+      if (cb_data->shader_options->has_imul24)
+         return false;
+      if (alu->dest.dest.ssa.bit_size != 64)
+         return false;
+      break;
    default:
       assert(alu->dest.dest.is_ssa);
       if (alu->dest.dest.ssa.bit_size != 64)
@@ -908,8 +940,12 @@ should_lower_int64_alu_instr(const nir_instr *instr, const void *_options)
 bool
 nir_lower_int64(nir_shader *shader, nir_lower_int64_options options)
 {
+   should_lower_cb_data cb_data;
+   cb_data.shader_options = shader->options;
+   cb_data.options = options;
+
    return nir_shader_lower_instructions(shader,
                                         should_lower_int64_alu_instr,
                                         lower_int64_alu_instr,
-                                        &options);
+                                        &cb_data);
 }

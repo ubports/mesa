@@ -3290,6 +3290,11 @@
   },
   {
    "chips": ["gfx9"],
+   "map": {"at": 47252, "to": "mm"},
+   "name": "COMPUTE_SHADER_CHKSUM"
+  },
+  {
+   "chips": ["gfx9"],
    "map": {"at": 213048, "to": "mm"},
    "name": "CPC_LATENCY_STATS_DATA"
   },
@@ -6259,6 +6264,11 @@
    "type_ref": "PA_SC_SCREEN_EXTENT_MIN_0"
   },
   {
+   "chips": ["gfx9"],
+   "map": {"at": 199380, "to": "mm"},
+   "name": "PA_STATE_STEREO_X"
+  },
+  {
    "chips": ["gfx7", "fiji", "gfx9", "stoney", "gfx8"],
    "map": {"at": 199872, "to": "mm"},
    "name": "SQ_THREAD_TRACE_BASE",
@@ -6972,6 +6982,12 @@
    "chips": ["gfx7", "fiji", "gfx6", "stoney", "gfx8"],
    "map": {"at": 217608, "to": "mm"},
    "name": "RLC_PERFCOUNTER1_LO"
+  },
+  {
+   "chips": ["gfx7", "fiji", "gfx6", "stoney", "gfx8", "gfx9"],
+   "map": {"at": 226044, "to": "mm"},
+   "name": "RLC_PERFMON_CLK_CNTL",
+   "type_ref": "RLC_PERFMON_CLK_CNTL"
   },
   {
    "chips": ["gfx7", "fiji", "gfx6", "stoney", "gfx8"],

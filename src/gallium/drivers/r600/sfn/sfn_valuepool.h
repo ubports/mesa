@@ -89,6 +89,9 @@ public:
 
    GPRVector vec_from_nir(const nir_dest& dst, int num_components);
 
+   std::vector<PValue> varvec_from_nir(const nir_dest& src, int num_components);
+   std::vector<PValue> varvec_from_nir(const nir_src& src, int num_components);
+
    PValue from_nir(const nir_src& v, unsigned component, unsigned swizzled);
 
    PValue from_nir(const nir_src& v, unsigned component);
@@ -181,7 +184,7 @@ public:
 
    PValue literal(uint32_t value);
 
-   PValue get_temp_register();
+   PValue get_temp_register(int channel = -1);
 
    GPRVector get_temp_vec4();
 

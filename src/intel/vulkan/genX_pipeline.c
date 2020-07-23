@@ -219,6 +219,12 @@ emit_vertex_input(struct anv_graphics_pipeline *pipeline,
 #endif
       };
       GENX(VERTEX_ELEMENT_STATE_pack)(NULL, &p[1 + id_slot * 2], &element);
+
+#if GEN_GEN >= 8
+      anv_batch_emit(&pipeline->base.batch, GENX(3DSTATE_VF_INSTANCING), vfi) {
+         vfi.VertexElementIndex = id_slot;
+      }
+#endif
    }
 
 #if GEN_GEN >= 8
@@ -284,7 +290,7 @@ genX(emit_urb_setup)(struct anv_device *device, struct anv_batch *batch,
    anv_batch_emit(batch, GEN7_PIPE_CONTROL, pc) {
       pc.DepthStallEnable  = true;
       pc.PostSyncOperation = WriteImmediateData;
-      pc.Address           = (struct anv_address) { device->workaround_bo, 0 };
+      pc.Address           = device->workaround_address;
    }
 #endif
 
@@ -1624,7 +1630,12 @@ emit_3dstate_hs_te_ds(struct anv_graphics_pipeline *pipeline,
       hs.VertexURBEntryReadLength = 0;
       hs.VertexURBEntryReadOffset = 0;
       hs.DispatchGRFStartRegisterForURBData =
-         tcs_prog_data->base.base.dispatch_grf_start_reg;
+         tcs_prog_data->base.base.dispatch_grf_start_reg & 0x1f;
+#if GEN_GEN >= 12
+      hs.DispatchGRFStartRegisterForURBData5 =
+         tcs_prog_data->base.base.dispatch_grf_start_reg >> 5;
+#endif
+
 
       hs.PerThreadScratchSpace = get_scratch_space(tcs_bin);
       hs.ScratchSpaceBasePointer =
@@ -2152,15 +2163,17 @@ genX(graphics_pipeline_create)(
    if (cache == NULL && device->physical->instance->pipeline_cache_enabled)
       cache = &device->default_pipeline_cache;
 
-   pipeline = vk_alloc2(&device->alloc, pAllocator, sizeof(*pipeline), 8,
+   pipeline = vk_alloc2(&device->vk.alloc, pAllocator, sizeof(*pipeline), 8,
                          VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
    if (pipeline == NULL)
       return vk_error(VK_ERROR_OUT_OF_HOST_MEMORY);
 
-   result = anv_pipeline_init(pipeline, device, cache,
-                              pCreateInfo, pAllocator);
+   result = anv_graphics_pipeline_init(pipeline, device, cache,
+                                       pCreateInfo, pAllocator);
    if (result != VK_SUCCESS) {
-      vk_free2(&device->alloc, pAllocator, pipeline);
+      vk_free2(&device->vk.alloc, pAllocator, pipeline);
+      if (result == VK_PIPELINE_COMPILE_REQUIRED_EXT)
+         *pPipeline = VK_NULL_HANDLE;
       return result;
    }
 
@@ -2250,86 +2263,26 @@ genX(graphics_pipeline_create)(
    return pipeline->base.batch.status;
 }
 
-static VkResult
-compute_pipeline_create(
-    VkDevice                                    _device,
-    struct anv_pipeline_cache *                 cache,
-    const VkComputePipelineCreateInfo*          pCreateInfo,
-    const VkAllocationCallbacks*                pAllocator,
-    VkPipeline*                                 pPipeline)
+static void
+emit_media_cs_state(struct anv_compute_pipeline *pipeline,
+                    const struct anv_device *device)
 {
-   ANV_FROM_HANDLE(anv_device, device, _device);
-   const struct gen_device_info *devinfo = &device->info;
-   struct anv_compute_pipeline *pipeline;
-   VkResult result;
-
-   assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO);
-
-   /* Use the default pipeline cache if none is specified */
-   if (cache == NULL && device->physical->instance->pipeline_cache_enabled)
-      cache = &device->default_pipeline_cache;
-
-   pipeline = vk_alloc2(&device->alloc, pAllocator, sizeof(*pipeline), 8,
-                         VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
-   if (pipeline == NULL)
-      return vk_error(VK_ERROR_OUT_OF_HOST_MEMORY);
-
-   pipeline->base.device = device;
-   pipeline->base.type = ANV_PIPELINE_COMPUTE;
-
-   const VkAllocationCallbacks *alloc =
-      pAllocator ? pAllocator : &device->alloc;
-
-   result = anv_reloc_list_init(&pipeline->base.batch_relocs, alloc);
-   if (result != VK_SUCCESS) {
-      vk_free2(&device->alloc, pAllocator, pipeline);
-      return result;
-   }
-   pipeline->base.batch.alloc = alloc;
-   pipeline->base.batch.next = pipeline->base.batch.start = pipeline->batch_data;
-   pipeline->base.batch.end = pipeline->base.batch.start + sizeof(pipeline->batch_data);
-   pipeline->base.batch.relocs = &pipeline->base.batch_relocs;
-   pipeline->base.batch.status = VK_SUCCESS;
-
-   pipeline->base.mem_ctx = ralloc_context(NULL);
-   pipeline->base.flags = pCreateInfo->flags;
-   pipeline->cs = NULL;
-
-   util_dynarray_init(&pipeline->base.executables, pipeline->base.mem_ctx);
-
-   assert(pCreateInfo->stage.stage == VK_SHADER_STAGE_COMPUTE_BIT);
-   ANV_FROM_HANDLE(anv_shader_module, module,  pCreateInfo->stage.module);
-   result = anv_pipeline_compile_cs(pipeline, cache, pCreateInfo, module,
-                                    pCreateInfo->stage.pName,
-                                    pCreateInfo->stage.pSpecializationInfo);
-   if (result != VK_SUCCESS) {
-      ralloc_free(pipeline->base.mem_ctx);
-      vk_free2(&device->alloc, pAllocator, pipeline);
-      return result;
-   }
-
    const struct brw_cs_prog_data *cs_prog_data = get_cs_prog_data(pipeline);
 
    anv_pipeline_setup_l3_config(&pipeline->base, cs_prog_data->base.total_shared > 0);
 
-   uint32_t group_size = cs_prog_data->local_size[0] *
-      cs_prog_data->local_size[1] * cs_prog_data->local_size[2];
-   uint32_t remainder = group_size & (cs_prog_data->simd_size - 1);
+   const struct anv_cs_parameters cs_params = anv_cs_parameters(pipeline);
 
-   if (remainder > 0)
-      pipeline->cs_right_mask = ~0u >> (32 - remainder);
-   else
-      pipeline->cs_right_mask = ~0u >> (32 - cs_prog_data->simd_size);
-
-   const uint32_t threads = anv_cs_threads(pipeline);
+   pipeline->cs_right_mask = brw_cs_right_mask(cs_params.group_size, cs_params.simd_size);
 
    const uint32_t vfe_curbe_allocation =
-      ALIGN(cs_prog_data->push.per_thread.regs * threads +
+      ALIGN(cs_prog_data->push.per_thread.regs * cs_params.threads +
             cs_prog_data->push.cross_thread.regs, 2);
 
    const uint32_t subslices = MAX2(device->physical->subslice_total, 1);
 
    const struct anv_shader_bin *cs_bin = pipeline->cs;
+   const struct gen_device_info *devinfo = &device->info;
 
    anv_batch_emit(&pipeline->base.batch, GENX(MEDIA_VFE_STATE), vfe) {
 #if GEN_GEN > 7
@@ -2375,7 +2328,10 @@ compute_pipeline_create(
    }
 
    struct GENX(INTERFACE_DESCRIPTOR_DATA) desc = {
-      .KernelStartPointer     = cs_bin->kernel.offset,
+      .KernelStartPointer     =
+         cs_bin->kernel.offset +
+         brw_cs_prog_data_prog_offset(cs_prog_data, cs_params.simd_size),
+
       /* WA_1606682166 */
       .SamplerCount           = GEN_GEN == 11 ? 0 : get_sampler_count(cs_bin),
       /* We add 1 because the CS indirect parameters buffer isn't accounted
@@ -2407,11 +2363,63 @@ compute_pipeline_create(
       .ThreadPreemptionDisable = true,
 #endif
 
-      .NumberofThreadsinGPGPUThreadGroup = threads,
+      .NumberofThreadsinGPGPUThreadGroup = cs_params.threads,
    };
    GENX(INTERFACE_DESCRIPTOR_DATA_pack)(NULL,
                                         pipeline->interface_descriptor_data,
                                         &desc);
+}
+
+static VkResult
+compute_pipeline_create(
+    VkDevice                                    _device,
+    struct anv_pipeline_cache *                 cache,
+    const VkComputePipelineCreateInfo*          pCreateInfo,
+    const VkAllocationCallbacks*                pAllocator,
+    VkPipeline*                                 pPipeline)
+{
+   ANV_FROM_HANDLE(anv_device, device, _device);
+   struct anv_compute_pipeline *pipeline;
+   VkResult result;
+
+   assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO);
+
+   /* Use the default pipeline cache if none is specified */
+   if (cache == NULL && device->physical->instance->pipeline_cache_enabled)
+      cache = &device->default_pipeline_cache;
+
+   pipeline = vk_alloc2(&device->vk.alloc, pAllocator, sizeof(*pipeline), 8,
+                         VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+   if (pipeline == NULL)
+      return vk_error(VK_ERROR_OUT_OF_HOST_MEMORY);
+
+   result = anv_pipeline_init(&pipeline->base, device,
+                              ANV_PIPELINE_COMPUTE, pCreateInfo->flags,
+                              pAllocator);
+   if (result != VK_SUCCESS) {
+      vk_free2(&device->vk.alloc, pAllocator, pipeline);
+      return result;
+   }
+
+   anv_batch_set_storage(&pipeline->base.batch, ANV_NULL_ADDRESS,
+                         pipeline->batch_data, sizeof(pipeline->batch_data));
+
+   pipeline->cs = NULL;
+
+   assert(pCreateInfo->stage.stage == VK_SHADER_STAGE_COMPUTE_BIT);
+   ANV_FROM_HANDLE(anv_shader_module, module,  pCreateInfo->stage.module);
+   result = anv_pipeline_compile_cs(pipeline, cache, pCreateInfo, module,
+                                    pCreateInfo->stage.pName,
+                                    pCreateInfo->stage.pSpecializationInfo);
+   if (result != VK_SUCCESS) {
+      anv_pipeline_finish(&pipeline->base, device, pAllocator);
+      vk_free2(&device->vk.alloc, pAllocator, pipeline);
+      if (result == VK_PIPELINE_COMPILE_REQUIRED_EXT)
+         *pPipeline = VK_NULL_HANDLE;
+      return result;
+   }
+
+   emit_media_cs_state(pipeline, device);
 
    *pPipeline = anv_pipeline_to_handle(&pipeline->base);
 
@@ -2432,14 +2440,22 @@ VkResult genX(CreateGraphicsPipelines)(
 
    unsigned i;
    for (i = 0; i < count; i++) {
-      result = genX(graphics_pipeline_create)(_device,
-                                              pipeline_cache,
-                                              &pCreateInfos[i],
-                                              pAllocator, &pPipelines[i]);
+      VkResult res = genX(graphics_pipeline_create)(_device,
+                                                    pipeline_cache,
+                                                    &pCreateInfos[i],
+                                                    pAllocator, &pPipelines[i]);
 
-      /* Bail out on the first error as it is not obvious what error should be
-       * report upon 2 different failures. */
-      if (result != VK_SUCCESS)
+      if (res == VK_SUCCESS)
+         continue;
+
+      /* Bail out on the first error != VK_PIPELINE_COMPILE_REQUIRED_EX as it
+       * is not obvious what error should be report upon 2 different failures.
+       * */
+      result = res;
+      if (res != VK_PIPELINE_COMPILE_REQUIRED_EXT)
+         break;
+
+      if (pCreateInfos[i].flags & VK_PIPELINE_CREATE_EARLY_RETURN_ON_FAILURE_BIT_EXT)
          break;
    }
 
@@ -2463,13 +2479,21 @@ VkResult genX(CreateComputePipelines)(
 
    unsigned i;
    for (i = 0; i < count; i++) {
-      result = compute_pipeline_create(_device, pipeline_cache,
-                                       &pCreateInfos[i],
-                                       pAllocator, &pPipelines[i]);
+      VkResult res = compute_pipeline_create(_device, pipeline_cache,
+                                             &pCreateInfos[i],
+                                             pAllocator, &pPipelines[i]);
 
-      /* Bail out on the first error as it is not obvious what error should be
-       * report upon 2 different failures. */
-      if (result != VK_SUCCESS)
+      if (res == VK_SUCCESS)
+         continue;
+
+      /* Bail out on the first error != VK_PIPELINE_COMPILE_REQUIRED_EX as it
+       * is not obvious what error should be report upon 2 different failures.
+       * */
+      result = res;
+      if (res != VK_PIPELINE_COMPILE_REQUIRED_EXT)
+         break;
+
+      if (pCreateInfos[i].flags & VK_PIPELINE_CREATE_EARLY_RETURN_ON_FAILURE_BIT_EXT)
          break;
    }
 

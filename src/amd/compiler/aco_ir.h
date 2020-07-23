@@ -90,17 +90,17 @@ enum class Format : std::uint16_t {
    PSEUDO_REDUCTION = 18,
 
    /* Vector ALU Formats */
+   VOP3P = 19,
    VOP1 = 1 << 8,
    VOP2 = 1 << 9,
    VOPC = 1 << 10,
    VOP3 = 1 << 11,
    VOP3A = 1 << 11,
    VOP3B = 1 << 11,
-   VOP3P = 1 << 12,
    /* Vector Parameter Interpolation Format */
-   VINTRP = 1 << 13,
-   DPP = 1 << 14,
-   SDWA = 1 << 15,
+   VINTRP = 1 << 12,
+   DPP = 1 << 13,
+   SDWA = 1 << 14,
 };
 
 enum barrier_interaction : uint8_t {
@@ -116,7 +116,7 @@ enum barrier_interaction : uint8_t {
    barrier_gs_sendmsg = 0x20,
    /* used by barriers. created by s_barrier */
    barrier_barrier = 0x40,
-   barrier_count = 6,
+   barrier_count = 7,
 };
 
 enum fp_round {
@@ -141,6 +141,10 @@ struct float_mode {
           fp_round round16_64:2;
           unsigned denorm32:2;
           unsigned denorm16_64:2;
+      };
+      struct {
+         uint8_t round:4;
+         uint8_t denorm:4;
       };
       uint8_t val = 0;
    };
@@ -230,6 +234,15 @@ struct RegClass {
    constexpr RegClass as_linear() const { return RegClass((RC) (rc | (1 << 6))); }
    constexpr RegClass as_subdword() const { return RegClass((RC) (rc | 1 << 7)); }
 
+   static constexpr RegClass get(RegType type, unsigned bytes) {
+      if (type == RegType::sgpr) {
+         return RegClass(type, DIV_ROUND_UP(bytes, 4u));
+      } else {
+         return bytes % 4u ? RegClass(type, bytes).as_subdword() :
+                             RegClass(type, bytes / 4u);
+      }
+   }
+
 private:
    RC rc;
 };
@@ -298,6 +311,7 @@ struct PhysReg {
    constexpr bool operator==(PhysReg other) const { return reg_b == other.reg_b; }
    constexpr bool operator!=(PhysReg other) const { return reg_b != other.reg_b; }
    constexpr bool operator <(PhysReg other) const { return reg_b < other.reg_b; }
+   constexpr PhysReg advance(int bytes) const { PhysReg res = *this; res.reg_b += bytes; return res; }
 
    uint16_t reg_b = 0;
 };
@@ -327,7 +341,7 @@ class Operand final
 public:
    constexpr Operand()
       : reg_(PhysReg{128}), isTemp_(false), isFixed_(true), isConstant_(false),
-        isKill_(false), isUndef_(true), isFirstKill_(false), is64BitConst_(false),
+        isKill_(false), isUndef_(true), isFirstKill_(false), constSize(0),
         isLateKill_(false) {}
 
    explicit Operand(Temp r) noexcept
@@ -340,11 +354,51 @@ public:
          setFixed(PhysReg{128});
       }
    };
+   explicit Operand(uint8_t v) noexcept
+   {
+      /* 8-bit constants are only used for copies and copies from any 8-bit
+       * constant can be implemented with a SDWA v_mul_u32_u24. So consider all
+       * to be inline constants. */
+      data_.i = v;
+      isConstant_ = true;
+      constSize = 0;
+      setFixed(PhysReg{0u});
+   };
+   explicit Operand(uint16_t v) noexcept
+   {
+      data_.i = v;
+      isConstant_ = true;
+      constSize = 1;
+      if (v <= 64)
+         setFixed(PhysReg{128u + v});
+      else if (v >= 0xFFF0) /* [-16 .. -1] */
+         setFixed(PhysReg{192u + (0xFFFF - v)});
+      else if (v == 0x3800) /* 0.5 */
+         setFixed(PhysReg{240});
+      else if (v == 0xB800) /* -0.5 */
+         setFixed(PhysReg{241});
+      else if (v == 0x3C00) /* 1.0 */
+         setFixed(PhysReg{242});
+      else if (v == 0xBC00) /* -1.0 */
+         setFixed(PhysReg{243});
+      else if (v == 0x4000) /* 2.0 */
+         setFixed(PhysReg{244});
+      else if (v == 0xC000) /* -2.0 */
+         setFixed(PhysReg{245});
+      else if (v == 0x4400) /* 4.0 */
+         setFixed(PhysReg{246});
+      else if (v == 0xC400) /* -4.0 */
+         setFixed(PhysReg{247});
+      else if (v == 0x3118) /* 1/2 PI */
+         setFixed(PhysReg{248});
+      else /* Literal Constant */
+         setFixed(PhysReg{255});
+   };
    explicit Operand(uint32_t v, bool is64bit = false) noexcept
    {
       data_.i = v;
       isConstant_ = true;
-      is64BitConst_ = is64bit;
+      constSize = is64bit ? 3 : 2;
       if (v <= 64)
          setFixed(PhysReg{128 + v});
       else if (v >= 0xFFFFFFF0) /* [-16 .. -1] */
@@ -373,7 +427,7 @@ public:
    explicit Operand(uint64_t v) noexcept
    {
       isConstant_ = true;
-      is64BitConst_ = true;
+      constSize = 3;
       if (v <= 64) {
          data_.i = (uint32_t) v;
          setFixed(PhysReg{128 + (uint32_t) v});
@@ -455,7 +509,7 @@ public:
    constexpr unsigned bytes() const noexcept
    {
       if (isConstant())
-         return is64BitConst_ ? 8 : 4; //TODO: sub-dword constants
+         return 1 << constSize;
       else
          return data_.temp.bytes();
    }
@@ -463,7 +517,7 @@ public:
    constexpr unsigned size() const noexcept
    {
       if (isConstant())
-         return is64BitConst_ ? 2 : 1;
+         return constSize > 2 ? 2 : 1;
       else
          return data_.temp.size();
    }
@@ -511,7 +565,7 @@ public:
 
    constexpr uint64_t constantValue64(bool signext=false) const noexcept
    {
-      if (is64BitConst_) {
+      if (constSize == 3) {
          if (reg_ <= 192)
             return reg_ - 128;
          else if (reg_ <= 208)
@@ -535,8 +589,17 @@ public:
          case 247:
             return 0xC010000000000000;
          }
+      } else if (constSize == 1) {
+         return (signext && (data_.i & 0x8000u) ? 0xffffffffffff0000ull : 0ull) | data_.i;
+      } else if (constSize == 0) {
+         return (signext && (data_.i & 0x80u) ? 0xffffffffffffff00ull : 0ull) | data_.i;
       }
       return (signext && (data_.i & 0x80000000u) ? 0xffffffff00000000ull : 0ull) | data_.i;
+   }
+
+   constexpr bool isOfType(RegType type) const noexcept
+   {
+      return hasRegClass() && regClass().type() == type;
    }
 
    /* Indicates that the killed operand's live range intersects with the
@@ -620,11 +683,11 @@ private:
          uint8_t isKill_:1;
          uint8_t isUndef_:1;
          uint8_t isFirstKill_:1;
-         uint8_t is64BitConst_:1;
+         uint8_t constSize:2;
          uint8_t isLateKill_:1;
       };
       /* can't initialize bit-fields in c++11, so work around using a union */
-      uint8_t control_ = 0;
+      uint16_t control_ = 0;
    };
 };
 
@@ -637,7 +700,8 @@ private:
 class Definition final
 {
 public:
-   constexpr Definition() : temp(Temp(0, s1)), reg_(0), isFixed_(0), hasHint_(0), isKill_(0) {}
+   constexpr Definition() : temp(Temp(0, s1)), reg_(0), isFixed_(0), hasHint_(0),
+                            isKill_(0), isPrecise_(0), isNUW_(0) {}
    Definition(uint32_t index, RegClass type) noexcept
       : temp(index, type) {}
    explicit Definition(Temp tmp) noexcept
@@ -724,6 +788,27 @@ public:
       return isKill_;
    }
 
+   constexpr void setPrecise(bool precise) noexcept
+   {
+      isPrecise_ = precise;
+   }
+
+   constexpr bool isPrecise() const noexcept
+   {
+      return isPrecise_;
+   }
+
+   /* No Unsigned Wrap */
+   constexpr void setNUW(bool nuw) noexcept
+   {
+      isNUW_ = nuw;
+   }
+
+   constexpr bool isNUW() const noexcept
+   {
+      return isNUW_;
+   }
+
 private:
    Temp temp = Temp(0, s1);
    PhysReg reg_;
@@ -732,13 +817,15 @@ private:
          uint8_t isFixed_:1;
          uint8_t hasHint_:1;
          uint8_t isKill_:1;
+         uint8_t isPrecise_:1;
+         uint8_t isNUW_:1;
       };
       /* can't initialize bit-fields in c++11, so work around using a union */
       uint8_t control_ = 0;
    };
 };
 
-class Block;
+struct Block;
 
 struct Instruction {
    aco_opcode opcode;
@@ -755,7 +842,7 @@ struct Instruction {
           || ((uint16_t) format & (uint16_t) Format::VOPC) == (uint16_t) Format::VOPC
           || ((uint16_t) format & (uint16_t) Format::VOP3A) == (uint16_t) Format::VOP3A
           || ((uint16_t) format & (uint16_t) Format::VOP3B) == (uint16_t) Format::VOP3B
-          || ((uint16_t) format & (uint16_t) Format::VOP3P) == (uint16_t) Format::VOP3P;
+          || format == Format::VOP3P;
    }
 
    constexpr bool isSALU() const noexcept
@@ -782,8 +869,7 @@ struct Instruction {
    constexpr bool isVOP3() const noexcept
    {
       return ((uint16_t) format & (uint16_t) Format::VOP3A) ||
-             ((uint16_t) format & (uint16_t) Format::VOP3B) ||
-             format == Format::VOP3P;
+             ((uint16_t) format & (uint16_t) Format::VOP3B);
    }
 
    constexpr bool isSDWA() const noexcept
@@ -807,31 +893,31 @@ struct Instruction {
       return false;
    }
 };
-static_assert(sizeof(Instruction) == 16);
+static_assert(sizeof(Instruction) == 16, "Unexpected padding");
 
 struct SOPK_instruction : public Instruction {
    uint16_t imm;
    uint16_t padding;
 };
-static_assert(sizeof(SOPK_instruction) == sizeof(Instruction) + 4);
+static_assert(sizeof(SOPK_instruction) == sizeof(Instruction) + 4, "Unexpected padding");
 
 struct SOPP_instruction : public Instruction {
    uint32_t imm;
    int block;
 };
-static_assert(sizeof(SOPP_instruction) == sizeof(Instruction) + 8);
+static_assert(sizeof(SOPP_instruction) == sizeof(Instruction) + 8, "Unexpected padding");
 
 struct SOPC_instruction : public Instruction {
 };
-static_assert(sizeof(SOPC_instruction) == sizeof(Instruction) + 0);
+static_assert(sizeof(SOPC_instruction) == sizeof(Instruction) + 0, "Unexpected padding");
 
 struct SOP1_instruction : public Instruction {
 };
-static_assert(sizeof(SOP1_instruction) == sizeof(Instruction) + 0);
+static_assert(sizeof(SOP1_instruction) == sizeof(Instruction) + 0, "Unexpected padding");
 
 struct SOP2_instruction : public Instruction {
 };
-static_assert(sizeof(SOP2_instruction) == sizeof(Instruction) + 0);
+static_assert(sizeof(SOP2_instruction) == sizeof(Instruction) + 0, "Unexpected padding");
 
 /**
  * Scalar Memory Format:
@@ -851,21 +937,22 @@ struct SMEM_instruction : public Instruction {
    bool nv : 1; /* VEGA only: Non-volatile */
    bool can_reorder : 1;
    bool disable_wqm : 1;
-   uint32_t padding: 19;
+   bool prevent_overflow : 1; /* avoid overflow when combining additions */
+   uint32_t padding: 18;
 };
-static_assert(sizeof(SMEM_instruction) == sizeof(Instruction) + 4);
+static_assert(sizeof(SMEM_instruction) == sizeof(Instruction) + 4, "Unexpected padding");
 
 struct VOP1_instruction : public Instruction {
 };
-static_assert(sizeof(VOP1_instruction) == sizeof(Instruction) + 0);
+static_assert(sizeof(VOP1_instruction) == sizeof(Instruction) + 0, "Unexpected padding");
 
 struct VOP2_instruction : public Instruction {
 };
-static_assert(sizeof(VOP2_instruction) == sizeof(Instruction) + 0);
+static_assert(sizeof(VOP2_instruction) == sizeof(Instruction) + 0, "Unexpected padding");
 
 struct VOPC_instruction : public Instruction {
 };
-static_assert(sizeof(VOPC_instruction) == sizeof(Instruction) + 0);
+static_assert(sizeof(VOPC_instruction) == sizeof(Instruction) + 0, "Unexpected padding");
 
 struct VOP3A_instruction : public Instruction {
    bool abs[3];
@@ -875,7 +962,17 @@ struct VOP3A_instruction : public Instruction {
    bool clamp : 1;
    uint32_t padding : 9;
 };
-static_assert(sizeof(VOP3A_instruction) == sizeof(Instruction) + 8);
+static_assert(sizeof(VOP3A_instruction) == sizeof(Instruction) + 8, "Unexpected padding");
+
+struct VOP3P_instruction : public Instruction {
+   bool neg_lo[3];
+   bool neg_hi[3];
+   uint8_t opsel_lo : 3;
+   uint8_t opsel_hi : 3;
+   bool clamp : 1;
+   uint32_t padding : 9;
+};
+static_assert(sizeof(VOP3P_instruction) == sizeof(Instruction) + 8, "Unexpected padding");
 
 /**
  * Data Parallel Primitives Format:
@@ -892,7 +989,7 @@ struct DPP_instruction : public Instruction {
    bool bound_ctrl : 1;
    uint32_t padding : 7;
 };
-static_assert(sizeof(DPP_instruction) == sizeof(Instruction) + 8);
+static_assert(sizeof(DPP_instruction) == sizeof(Instruction) + 8, "Unexpected padding");
 
 enum sdwa_sel : uint8_t {
     /* masks */
@@ -950,14 +1047,14 @@ struct SDWA_instruction : public Instruction {
    uint8_t omod : 2; /* GFX9+ */
    uint32_t padding : 4;
 };
-static_assert(sizeof(SDWA_instruction) == sizeof(Instruction) + 8);
+static_assert(sizeof(SDWA_instruction) == sizeof(Instruction) + 8, "Unexpected padding");
 
 struct Interp_instruction : public Instruction {
    uint8_t attribute;
    uint8_t component;
    uint16_t padding;
 };
-static_assert(sizeof(Interp_instruction) == sizeof(Instruction) + 4);
+static_assert(sizeof(Interp_instruction) == sizeof(Instruction) + 4, "Unexpected padding");
 
 /**
  * Local and Global Data Sharing instructions
@@ -973,7 +1070,7 @@ struct DS_instruction : public Instruction {
    int8_t offset1;
    bool gds;
 };
-static_assert(sizeof(DS_instruction) == sizeof(Instruction) + 4);
+static_assert(sizeof(DS_instruction) == sizeof(Instruction) + 4, "Unexpected padding");
 
 /**
  * Vector Memory Untyped-buffer Instructions
@@ -995,10 +1092,11 @@ struct MUBUF_instruction : public Instruction {
    bool lds : 1; /* Return read-data to LDS instead of VGPRs */
    bool disable_wqm : 1; /* Require an exec mask without helper invocations */
    bool can_reorder : 1;
-   uint8_t padding : 2;
+   bool swizzled:1;
+   uint8_t padding : 1;
    barrier_interaction barrier;
 };
-static_assert(sizeof(MUBUF_instruction) == sizeof(Instruction) + 4);
+static_assert(sizeof(MUBUF_instruction) == sizeof(Instruction) + 4, "Unexpected padding");
 
 /**
  * Vector Memory Typed-buffer Instructions
@@ -1023,7 +1121,7 @@ struct MTBUF_instruction : public Instruction {
    bool can_reorder : 1;
    uint32_t padding : 25;
 };
-static_assert(sizeof(MTBUF_instruction) == sizeof(Instruction) + 8);
+static_assert(sizeof(MTBUF_instruction) == sizeof(Instruction) + 8, "Unexpected padding");
 
 /**
  * Vector Memory Image Instructions
@@ -1052,7 +1150,7 @@ struct MIMG_instruction : public Instruction {
    uint8_t padding : 1;
    barrier_interaction barrier;
 };
-static_assert(sizeof(MIMG_instruction) == sizeof(Instruction) + 4);
+static_assert(sizeof(MIMG_instruction) == sizeof(Instruction) + 4, "Unexpected padding");
 
 /**
  * Flat/Scratch/Global Instructions
@@ -1073,7 +1171,7 @@ struct FLAT_instruction : public Instruction {
    uint8_t padding : 1;
    barrier_interaction barrier;
 };
-static_assert(sizeof(FLAT_instruction) == sizeof(Instruction) + 4);
+static_assert(sizeof(FLAT_instruction) == sizeof(Instruction) + 4, "Unexpected padding");
 
 struct Export_instruction : public Instruction {
    uint8_t enabled_mask;
@@ -1083,14 +1181,14 @@ struct Export_instruction : public Instruction {
    bool valid_mask : 1;
    uint32_t padding : 13;
 };
-static_assert(sizeof(Export_instruction) == sizeof(Instruction) + 4);
+static_assert(sizeof(Export_instruction) == sizeof(Instruction) + 4, "Unexpected padding");
 
 struct Pseudo_instruction : public Instruction {
    PhysReg scratch_sgpr; /* might not be valid if it's not needed */
    bool tmp_in_scc;
    uint8_t padding;
 };
-static_assert(sizeof(Pseudo_instruction) == sizeof(Instruction) + 4);
+static_assert(sizeof(Pseudo_instruction) == sizeof(Instruction) + 4, "Unexpected padding");
 
 struct Pseudo_branch_instruction : public Instruction {
    /* target[0] is the block index of the branch target.
@@ -1099,27 +1197,26 @@ struct Pseudo_branch_instruction : public Instruction {
     */
    uint32_t target[2];
 };
-static_assert(sizeof(Pseudo_branch_instruction) == sizeof(Instruction) + 8);
+static_assert(sizeof(Pseudo_branch_instruction) == sizeof(Instruction) + 8, "Unexpected padding");
 
 struct Pseudo_barrier_instruction : public Instruction {
 };
-static_assert(sizeof(Pseudo_barrier_instruction) == sizeof(Instruction) + 0);
+static_assert(sizeof(Pseudo_barrier_instruction) == sizeof(Instruction) + 0, "Unexpected padding");
 
 enum ReduceOp : uint16_t {
-   iadd32, iadd64,
-   imul32, imul64,
-   fadd32, fadd64,
-   fmul32, fmul64,
-   imin32, imin64,
-   imax32, imax64,
-   umin32, umin64,
-   umax32, umax64,
-   fmin32, fmin64,
-   fmax32, fmax64,
-   iand32, iand64,
-   ior32, ior64,
-   ixor32, ixor64,
-   gfx10_wave64_bpermute
+   iadd8, iadd16, iadd32, iadd64,
+   imul8, imul16, imul32, imul64,
+          fadd16, fadd32, fadd64,
+          fmul16, fmul32, fmul64,
+   imin8, imin16, imin32, imin64,
+   imax8, imax16, imax32, imax64,
+   umin8, umin16, umin32, umin64,
+   umax8, umax16, umax32, umax64,
+          fmin16, fmin32, fmin64,
+          fmax16, fmax32, fmax64,
+   iand8, iand16, iand32, iand64,
+   ior8, ior16, ior32, ior64,
+   ixor8, ixor16, ixor32, ixor64,
 };
 
 /**
@@ -1139,7 +1236,7 @@ struct Pseudo_reduction_instruction : public Instruction {
    ReduceOp reduce_op;
    uint16_t cluster_size; // must be 0 for scans
 };
-static_assert(sizeof(Pseudo_reduction_instruction) == sizeof(Instruction) + 4);
+static_assert(sizeof(Pseudo_reduction_instruction) == sizeof(Instruction) + 4, "Unexpected padding");
 
 struct instr_deleter_functor {
    void operator()(void* p) {
@@ -1172,14 +1269,23 @@ constexpr bool Instruction::usesModifiers() const noexcept
 {
    if (isDPP() || isSDWA())
       return true;
-   if (!isVOP3())
-      return false;
-   const VOP3A_instruction *vop3 = static_cast<const VOP3A_instruction*>(this);
-   for (unsigned i = 0; i < operands.size(); i++) {
-      if (vop3->abs[i] || vop3->neg[i])
-         return true;
+
+   if (format == Format::VOP3P) {
+      const VOP3P_instruction *vop3p = static_cast<const VOP3P_instruction*>(this);
+      for (unsigned i = 0; i < operands.size(); i++) {
+         if (vop3p->neg_lo[i] || vop3p->neg_hi[i])
+            return true;
+      }
+      return vop3p->opsel_lo || vop3p->opsel_hi || vop3p->clamp;
+   } else if (isVOP3()) {
+      const VOP3A_instruction *vop3 = static_cast<const VOP3A_instruction*>(this);
+      for (unsigned i = 0; i < operands.size(); i++) {
+         if (vop3->abs[i] || vop3->neg[i])
+            return true;
+      }
+      return vop3->opsel || vop3->clamp || vop3->omod;
    }
-   return vop3->opsel || vop3->clamp || vop3->omod;
+   return false;
 }
 
 constexpr bool is_phi(Instruction* instr)
@@ -1192,9 +1298,13 @@ static inline bool is_phi(aco_ptr<Instruction>& instr)
    return is_phi(instr.get());
 }
 
-barrier_interaction get_barrier_interaction(Instruction* instr);
-
+barrier_interaction get_barrier_interaction(const Instruction* instr);
 bool is_dead(const std::vector<uint16_t>& uses, Instruction *instr);
+
+bool can_use_opsel(chip_class chip, aco_opcode op, int idx, bool high);
+bool can_use_SDWA(chip_class chip, const aco_ptr<Instruction>& instr);
+/* updates "instr" and returns the old instruction (or NULL if no update was needed) */
+aco_ptr<Instruction> convert_to_SDWA(chip_class chip, aco_ptr<Instruction>& instr);
 
 enum block_kind {
    /* uniform indicates that leaving this block,
@@ -1403,6 +1513,8 @@ public:
    unsigned workgroup_size; /* if known; otherwise UINT_MAX */
 
    bool xnack_enabled = false;
+   bool sram_ecc_enabled = false;
+   bool has_fast_fma32 = false;
 
    bool needs_vcc = false;
    bool needs_flat_scr = false;
@@ -1457,6 +1569,12 @@ struct live {
    std::vector<std::vector<RegisterDemand>> register_demand;
 };
 
+void init();
+
+void init_program(Program *program, Stage stage, struct radv_shader_info *info,
+                  enum chip_class chip_class, enum radeon_family family,
+                  ac_shader_config *config);
+
 void select_program(Program *program,
                     unsigned shader_count,
                     struct nir_shader *const *shaders,
@@ -1489,7 +1607,7 @@ void insert_NOPs(Program* program);
 unsigned emit_program(Program* program, std::vector<uint32_t>& code);
 void print_asm(Program *program, std::vector<uint32_t>& binary,
                unsigned exec_size, std::ostream& out);
-void validate(Program* program, FILE *output);
+bool validate(Program* program, FILE *output);
 bool validate_ra(Program* program, const struct radv_nir_compiler_options *options, FILE *output);
 #ifndef NDEBUG
 void perfwarn(bool cond, const char *msg, Instruction *instr=NULL);
@@ -1501,8 +1619,8 @@ void collect_presched_stats(Program *program);
 void collect_preasm_stats(Program *program);
 void collect_postasm_stats(Program *program, const std::vector<uint32_t>& code);
 
-void aco_print_instr(Instruction *instr, FILE *output);
-void aco_print_program(Program *program, FILE *output);
+void aco_print_instr(const Instruction *instr, FILE *output);
+void aco_print_program(const Program *program, FILE *output);
 
 /* utilities for dealing with register demand */
 RegisterDemand get_live_changes(aco_ptr<Instruction>& instr);
@@ -1529,6 +1647,9 @@ typedef struct {
    const std::bitset<static_cast<int>(aco_opcode::num_opcodes)> is_atomic;
    const char *name[static_cast<int>(aco_opcode::num_opcodes)];
    const aco::Format format[static_cast<int>(aco_opcode::num_opcodes)];
+   /* sizes used for input/output modifiers and constants */
+   const unsigned operand_size[static_cast<int>(aco_opcode::num_opcodes)];
+   const unsigned definition_size[static_cast<int>(aco_opcode::num_opcodes)];
 } Info;
 
 extern const Info instr_info;

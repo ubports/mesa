@@ -27,6 +27,7 @@
 #include "nvc0/nvc0_3d.xml.h"
 #include "nv50/nv50_2d.xml.h"
 #include "nvc0/nvc0_m2mf.xml.h"
+#include "nvc0/nve4_copy.xml.h"
 #include "nvc0/nve4_p2mf.xml.h"
 #include "nvc0/nvc0_compute.xml.h"
 #include "nvc0/nvc0_macros.h"
@@ -356,6 +357,7 @@ bool nvc0_state_validate_3d(struct nvc0_context *, uint32_t);
 
 /* nvc0_surface.c */
 extern void nvc0_clear(struct pipe_context *, unsigned buffers,
+                       const struct pipe_scissor_state *scissor_state,
                        const union pipe_color_union *color,
                        double depth, unsigned stencil);
 extern void nvc0_init_surface_functions(struct nvc0_context *);

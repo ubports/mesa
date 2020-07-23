@@ -261,6 +261,13 @@ enum quniform_contents {
 
         QUNIFORM_ALPHA_REF,
 
+        QUNIFORM_LINE_WIDTH,
+
+        /* The line width sent to hardware. This includes the expanded width
+         * when anti-aliasing is enabled.
+         */
+        QUNIFORM_AA_LINE_WIDTH,
+
         /* Number of workgroups passed to glDispatchCompute in the dimension
          * selected by the data value.
          */
@@ -345,6 +352,7 @@ struct v3d_fs_key {
         bool depth_enabled;
         bool is_points;
         bool is_lines;
+        bool line_smoothing;
         bool alpha_test;
         bool point_coord_upper_left;
         bool light_twoside;
@@ -571,7 +579,6 @@ struct v3d_compile {
         int local_invocation_index_bits;
 
         uint8_t vattr_sizes[V3D_MAX_VS_INPUTS / 4];
-        uint8_t gs_input_sizes[V3D_MAX_GS_INPUTS];
         uint32_t vpm_output_size;
 
         /* Size in bytes of registers that have been spilled. This is how much
@@ -861,6 +868,7 @@ bool vir_opt_small_immediates(struct v3d_compile *c);
 bool vir_opt_vpm(struct v3d_compile *c);
 void v3d_nir_lower_blend(nir_shader *s, struct v3d_compile *c);
 void v3d_nir_lower_io(nir_shader *s, struct v3d_compile *c);
+void v3d_nir_lower_line_smooth(nir_shader *shader);
 void v3d_nir_lower_logic_ops(nir_shader *s, struct v3d_compile *c);
 void v3d_nir_lower_scratch(nir_shader *s);
 void v3d_nir_lower_txf_ms(nir_shader *s, struct v3d_compile *c);
@@ -1038,6 +1046,7 @@ VIR_A_ALU2(XOR)
 VIR_A_ALU2(VADD)
 VIR_A_ALU2(VSUB)
 VIR_A_NODST_2(STVPMV)
+VIR_A_NODST_2(STVPMD)
 VIR_A_ALU1(NOT)
 VIR_A_ALU1(NEG)
 VIR_A_ALU1(FLAPUSH)

@@ -723,8 +723,19 @@ struct brw_context
 
    uint32_t hw_ctx;
 
-   /** BO for post-sync nonzero writes for gen6 workaround. */
+   /**
+    * BO for post-sync nonzero writes for gen6 workaround.
+    *
+    * This buffer also contains a marker + description of the driver. This
+    * buffer is added to all execbufs syscalls so that we can identify the
+    * driver that generated a hang by looking at the content of the buffer in
+    * the error state.
+    *
+    * Read/write should go at workaround_bo_offset in that buffer to avoid
+    * overriding the debug data.
+    */
    struct brw_bo *workaround_bo;
+   uint32_t workaround_bo_offset;
    uint8_t pipe_controls_since_last_cs_stall;
 
    /**
@@ -1513,8 +1524,6 @@ gen6_get_sample_position(struct gl_context *ctx,
                          struct gl_framebuffer *fb,
                          GLuint index,
                          GLfloat *result);
-void
-gen6_set_sample_maps(struct gl_context *ctx);
 
 /* gen8_multisample_state.c */
 void gen8_emit_3dstate_sample_pattern(struct brw_context *brw);

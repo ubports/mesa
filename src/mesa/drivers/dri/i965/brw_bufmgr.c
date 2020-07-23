@@ -31,10 +31,6 @@
  *          Dave Airlie <airlied@linux.ie>
  */
 
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
-
 #include <xf86drm.h>
 #include <util/u_atomic.h>
 #include <fcntl.h>
@@ -58,6 +54,7 @@
 #include "util/macros.h"
 #include "util/hash_table.h"
 #include "util/list.h"
+#include "util/os_file.h"
 #include "util/u_dynarray.h"
 #include "util/vma.h"
 #include "brw_bufmgr.h"
@@ -73,6 +70,20 @@
 #else
 #define VG(x)
 #endif
+
+/* Bufmgr is not aware of brw_context. */
+#undef WARN_ONCE
+#define WARN_ONCE(cond, fmt...) do {                            \
+   if (unlikely(cond)) {                                        \
+      static bool _warned = false;                              \
+      if (!_warned) {                                           \
+         fprintf(stderr, "WARNING: ");                          \
+         fprintf(stderr, fmt);                                  \
+         _warned = true;                                        \
+      }                                                         \
+   }                                                            \
+} while (0)
+
 
 /* VALGRIND_FREELIKE_BLOCK unfortunately does not actually undo the earlier
  * VALGRIND_MALLOCLIKE_BLOCK but instead leaves vg convinced the memory is
@@ -135,6 +146,16 @@ struct bo_cache_bucket {
    struct util_dynarray vma_list[BRW_MEMZONE_COUNT];
 };
 
+struct bo_export {
+   /** File descriptor associated with a handle export. */
+   int drm_fd;
+
+   /** GEM handle in drm_fd */
+   uint32_t gem_handle;
+
+   struct list_head link;
+};
+
 struct brw_bufmgr {
    uint32_t refcount;
 
@@ -156,6 +177,7 @@ struct brw_bufmgr {
 
    bool has_llc:1;
    bool has_mmap_wc:1;
+   bool has_mmap_offset:1;
    bool bo_reuse:1;
 
    uint64_t initial_kflags;
@@ -484,6 +506,18 @@ brw_bo_cache_purge_bucket(struct brw_bufmgr *bufmgr,
 }
 
 static struct brw_bo *
+bo_calloc(void)
+{
+   struct brw_bo *bo = calloc(1, sizeof(*bo));
+   if (!bo)
+      return NULL;
+
+   list_inithead(&bo->exports);
+
+   return bo;
+}
+
+static struct brw_bo *
 bo_alloc_internal(struct brw_bufmgr *bufmgr,
                   const char *name,
                   uint64_t size,
@@ -556,6 +590,7 @@ retry:
       }
 
       if (alloc_from_cache) {
+         assert(list_is_empty(&bo->exports));
          if (!brw_bo_madvise(bo, I915_MADV_WILLNEED)) {
             bo_free(bo);
             brw_bo_cache_purge_bucket(bufmgr, bucket);
@@ -588,7 +623,7 @@ retry:
          bo->gtt_offset = 0ull;
       }
    } else {
-      bo = calloc(1, sizeof(*bo));
+      bo = bo_calloc();
       if (!bo)
          goto err;
 
@@ -759,11 +794,12 @@ brw_bo_gem_create_from_name(struct brw_bufmgr *bufmgr,
     */
    bo = hash_find_bo(bufmgr->handle_table, open_arg.handle);
    if (bo) {
+      assert(list_is_empty(&bo->exports));
       brw_bo_reference(bo);
       goto out;
    }
 
-   bo = calloc(1, sizeof(*bo));
+   bo = bo_calloc();
    if (!bo)
       goto out;
 
@@ -833,6 +869,8 @@ bo_free(struct brw_bo *bo)
 
       entry = _mesa_hash_table_search(bufmgr->handle_table, &bo->gem_handle);
       _mesa_hash_table_remove(bufmgr->handle_table, entry);
+   } else {
+      assert(list_is_empty(&bo->exports));
    }
 
    /* Close this object */
@@ -881,6 +919,14 @@ bo_unreference_final(struct brw_bo *bo, time_t time)
    struct bo_cache_bucket *bucket;
 
    DBG("bo_unreference final: %d (%s)\n", bo->gem_handle, bo->name);
+
+   list_for_each_entry_safe(struct bo_export, export, &bo->exports, link) {
+      struct drm_gem_close close = { .handle = export->gem_handle };
+      gen_ioctl(export->drm_fd, DRM_IOCTL_GEM_CLOSE, &close);
+
+      list_del(&export->link);
+      free(export);
+   }
 
    bucket = bucket_for_size(bufmgr, bo->size);
    /* Put the buffer into our internal cache for reuse if we can. */
@@ -958,10 +1004,71 @@ print_flags(unsigned flags)
 }
 
 static void *
-brw_bo_map_cpu(struct brw_context *brw, struct brw_bo *bo, unsigned flags)
+brw_bo_gem_mmap_legacy(struct brw_context *brw, struct brw_bo *bo, bool wc)
 {
    struct brw_bufmgr *bufmgr = bo->bufmgr;
 
+   struct drm_i915_gem_mmap mmap_arg = {
+      .handle = bo->gem_handle,
+      .size = bo->size,
+      .flags = wc ? I915_MMAP_WC : 0,
+   };
+
+   int ret = drmIoctl(bufmgr->fd, DRM_IOCTL_I915_GEM_MMAP, &mmap_arg);
+   if (ret != 0) {
+      DBG("%s:%d: Error mapping buffer %d (%s): %s .\n",
+          __FILE__, __LINE__, bo->gem_handle, bo->name, strerror(errno));
+      return NULL;
+   }
+   void *map = (void *) (uintptr_t) mmap_arg.addr_ptr;
+
+   return map;
+}
+
+static void *
+brw_bo_gem_mmap_offset(struct brw_context *brw, struct brw_bo *bo, bool wc)
+{
+   struct brw_bufmgr *bufmgr = bo->bufmgr;
+
+   struct drm_i915_gem_mmap_offset mmap_arg = {
+      .handle = bo->gem_handle,
+      .flags = wc ? I915_MMAP_OFFSET_WC : I915_MMAP_OFFSET_WB,
+   };
+
+   /* Get the fake offset back */
+   int ret = drmIoctl(bufmgr->fd, DRM_IOCTL_I915_GEM_MMAP_OFFSET, &mmap_arg);
+   if (ret != 0) {
+      DBG("%s:%d: Error preparing buffer %d (%s): %s .\n",
+          __FILE__, __LINE__, bo->gem_handle, bo->name, strerror(errno));
+      return NULL;
+   }
+
+   /* And map it */
+   void *map = drm_mmap(0, bo->size, PROT_READ | PROT_WRITE, MAP_SHARED,
+                        bufmgr->fd, mmap_arg.offset);
+   if (map == MAP_FAILED) {
+      DBG("%s:%d: Error mapping buffer %d (%s): %s .\n",
+          __FILE__, __LINE__, bo->gem_handle, bo->name, strerror(errno));
+      return NULL;
+   }
+
+   return map;
+}
+
+static void *
+brw_bo_gem_mmap(struct brw_context *brw, struct brw_bo *bo, bool wc)
+{
+   struct brw_bufmgr *bufmgr = bo->bufmgr;
+
+   if (bufmgr->has_mmap_offset)
+      return brw_bo_gem_mmap_offset(brw, bo, wc);
+   else
+      return brw_bo_gem_mmap_legacy(brw, bo, wc);
+}
+
+static void *
+brw_bo_map_cpu(struct brw_context *brw, struct brw_bo *bo, unsigned flags)
+{
    /* We disallow CPU maps for writing to non-coherent buffers, as the
     * CPU map can become invalidated when a batch is flushed out, which
     * can happen at unpredictable times.  You should use WC maps instead.
@@ -971,17 +1078,7 @@ brw_bo_map_cpu(struct brw_context *brw, struct brw_bo *bo, unsigned flags)
    if (!bo->map_cpu) {
       DBG("brw_bo_map_cpu: %d (%s)\n", bo->gem_handle, bo->name);
 
-      struct drm_i915_gem_mmap mmap_arg = {
-         .handle = bo->gem_handle,
-         .size = bo->size,
-      };
-      int ret = drmIoctl(bufmgr->fd, DRM_IOCTL_I915_GEM_MMAP, &mmap_arg);
-      if (ret != 0) {
-         DBG("%s:%d: Error mapping buffer %d (%s): %s .\n",
-             __FILE__, __LINE__, bo->gem_handle, bo->name, strerror(errno));
-         return NULL;
-      }
-      void *map = (void *) (uintptr_t) mmap_arg.addr_ptr;
+      void *map = brw_bo_gem_mmap(brw, bo, false);
       VG_DEFINED(map, bo->size);
 
       if (p_atomic_cmpxchg(&bo->map_cpu, NULL, map)) {
@@ -1032,20 +1129,7 @@ brw_bo_map_wc(struct brw_context *brw, struct brw_bo *bo, unsigned flags)
 
    if (!bo->map_wc) {
       DBG("brw_bo_map_wc: %d (%s)\n", bo->gem_handle, bo->name);
-
-      struct drm_i915_gem_mmap mmap_arg = {
-         .handle = bo->gem_handle,
-         .size = bo->size,
-         .flags = I915_MMAP_WC,
-      };
-      int ret = drmIoctl(bufmgr->fd, DRM_IOCTL_I915_GEM_MMAP, &mmap_arg);
-      if (ret != 0) {
-         DBG("%s:%d: Error mapping buffer %d (%s): %s .\n",
-             __FILE__, __LINE__, bo->gem_handle, bo->name, strerror(errno));
-         return NULL;
-      }
-
-      void *map = (void *) (uintptr_t) mmap_arg.addr_ptr;
+      void *map = brw_bo_gem_mmap(brw, bo, true);
       VG_DEFINED(map, bo->size);
 
       if (p_atomic_cmpxchg(&bo->map_wc, NULL, map)) {
@@ -1401,11 +1485,12 @@ brw_bo_gem_create_from_prime_internal(struct brw_bufmgr *bufmgr, int prime_fd,
     */
    bo = hash_find_bo(bufmgr->handle_table, handle);
    if (bo) {
+      assert(list_is_empty(&bo->exports));
       brw_bo_reference(bo);
       goto out;
    }
 
-   bo = calloc(1, sizeof(*bo));
+   bo = bo_calloc();
    if (!bo)
       goto out;
 
@@ -1537,6 +1622,70 @@ brw_bo_flink(struct brw_bo *bo, uint32_t *name)
    }
 
    *name = bo->global_name;
+   return 0;
+}
+
+int
+brw_bo_export_gem_handle_for_device(struct brw_bo *bo, int drm_fd,
+                                    uint32_t *out_handle)
+{
+   struct brw_bufmgr *bufmgr = bo->bufmgr;
+
+   /* Only add the new GEM handle to the list of export if it belongs to a
+    * different GEM device. Otherwise we might close the same buffer multiple
+    * times.
+    */
+   int ret = os_same_file_description(drm_fd, bufmgr->fd);
+   WARN_ONCE(ret < 0,
+             "Kernel has no file descriptor comparison support: %s\n",
+             strerror(errno));
+   if (ret == 0) {
+      *out_handle = brw_bo_export_gem_handle(bo);
+      return 0;
+   }
+
+   struct bo_export *export = calloc(1, sizeof(*export));
+   if (!export)
+      return -ENOMEM;
+
+   export->drm_fd = drm_fd;
+
+   int dmabuf_fd = -1;
+   int err = brw_bo_gem_export_to_prime(bo, &dmabuf_fd);
+   if (err) {
+      free(export);
+      return err;
+   }
+
+   mtx_lock(&bufmgr->lock);
+   err = drmPrimeFDToHandle(drm_fd, dmabuf_fd, &export->gem_handle);
+   close(dmabuf_fd);
+   if (err) {
+      mtx_unlock(&bufmgr->lock);
+      free(export);
+      return err;
+   }
+
+   bool found = false;
+   list_for_each_entry(struct bo_export, iter, &bo->exports, link) {
+      if (iter->drm_fd != drm_fd)
+         continue;
+      /* Here we assume that for a given DRM fd, we'll always get back the
+       * same GEM handle for a given buffer.
+       */
+      assert(iter->gem_handle == export->gem_handle);
+      free(export);
+      export = iter;
+      found = true;
+      break;
+   }
+   if (!found)
+      list_addtail(&export->link, &bo->exports);
+
+   mtx_unlock(&bufmgr->lock);
+
+   *out_handle = export->gem_handle;
+
    return 0;
 }
 
@@ -1706,7 +1855,7 @@ brw_bufmgr_create(struct gen_device_info *devinfo, int fd, bool bo_reuse)
     * Don't do this! Ensure that each library/bufmgr has its own device
     * fd so that its namespace does not clash with another.
     */
-   bufmgr->fd = dup(fd);
+   bufmgr->fd = os_dupfd_cloexec(fd);
    if (bufmgr->fd < 0) {
       free(bufmgr);
       return NULL;
@@ -1727,6 +1876,7 @@ brw_bufmgr_create(struct gen_device_info *devinfo, int fd, bool bo_reuse)
    bufmgr->has_llc = devinfo->has_llc;
    bufmgr->has_mmap_wc = gem_param(fd, I915_PARAM_MMAP_VERSION) > 0;
    bufmgr->bo_reuse = bo_reuse;
+   bufmgr->has_mmap_offset = gem_param(fd, I915_PARAM_MMAP_GTT_VERSION) >= 4;
 
    const uint64_t _4GB = 4ull << 30;
 
