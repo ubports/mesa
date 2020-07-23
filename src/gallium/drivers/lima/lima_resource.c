@@ -330,10 +330,7 @@ lima_resource_from_handle(struct pipe_screen *pscreen,
       res->tiled = true;
       break;
    case DRM_FORMAT_MOD_INVALID:
-      /* Modifier wasn't specified and it's shared buffer. We create these
-       * as linear, so disable tiling.
-       */
-      res->tiled = false;
+      res->tiled = screen->ro == NULL;
       break;
    default:
       fprintf(stderr, "Attempted to import unsupported modifier 0x%llx\n",
