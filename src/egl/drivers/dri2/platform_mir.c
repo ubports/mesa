@@ -35,7 +35,6 @@
 #include <xf86drm.h>
 
 #include "egl_dri2.h"
-#include "egl_dri2_fallbacks.h"
 #include "loader.h"
 
 static __DRIbuffer *
@@ -534,18 +533,11 @@ static struct dri2_egl_display_vtbl dri2_mir_display_vtbl = {
    .authenticate = dri2_mir_authenticate,
    .create_window_surface = dri2_create_mir_window_surface,
    .create_pixmap_surface = dri2_mir_create_pixmap_surface,
-   .create_pbuffer_surface = dri2_fallback_create_pbuffer_surface,
    .destroy_surface = dri2_destroy_mir_surface,
    .create_image = dri2_mir_create_image_khr,
    .swap_interval = dri2_set_swap_interval,
    .swap_buffers = dri2_swap_buffers,
-   .swap_buffers_with_damage = dri2_fallback_swap_buffers_with_damage,
-   .swap_buffers_region = dri2_fallback_swap_buffers_region,
-   .post_sub_buffer = dri2_fallback_post_sub_buffer,
-   .copy_buffers = dri2_fallback_copy_buffers,
    .query_buffer_age = dri2_mir_query_buffer_age,
-   .create_wayland_buffer_from_image = dri2_fallback_create_wayland_buffer_from_image,
-   .get_sync_values = dri2_fallback_get_sync_values,
    .get_dri_drawable = dri2_surface_get_dri_drawable,
 };
 

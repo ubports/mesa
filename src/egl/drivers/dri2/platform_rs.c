@@ -36,7 +36,6 @@
 #include <xf86drm.h>
 
 #include "egl_dri2.h"
-#include "egl_dri2_fallbacks.h"
 #include "loader.h"
 
 #define MAX_BUFFERS (4)
@@ -801,18 +800,11 @@ static struct dri2_egl_display_vtbl dri2_rs_display_vtbl = {
    .authenticate = dri2_rs_authenticate,
    .create_window_surface = dri2_rs_create_window_surface,
    .create_pixmap_surface = dri2_rs_create_pixmap_surface,
-   .create_pbuffer_surface = dri2_fallback_create_pbuffer_surface,
    .destroy_surface = dri2_rs_destroy_surface,
    .create_image = dri2_rs_create_image_khr,
    .swap_interval = dri2_rs_swap_interval,
    .swap_buffers = dri2_rs_swap_buffers,
-   .swap_buffers_with_damage = dri2_fallback_swap_buffers_with_damage,
-   .swap_buffers_region = dri2_fallback_swap_buffers_region,
-   .post_sub_buffer = dri2_fallback_post_sub_buffer,
-   .copy_buffers = dri2_fallback_copy_buffers,
    .query_buffer_age = dri2_rs_query_buffer_age,
-   .create_wayland_buffer_from_image = dri2_fallback_create_wayland_buffer_from_image,
-   .get_sync_values = dri2_fallback_get_sync_values,
    .get_dri_drawable = dri2_surface_get_dri_drawable,
 };
 
