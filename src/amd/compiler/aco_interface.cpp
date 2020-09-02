@@ -45,10 +45,10 @@ static radv_compiler_statistic_info statistic_infos[] = {
 
 static void validate(aco::Program *program)
 {
-   if (!(aco::debug_flags & aco::DEBUG_VALIDATE))
+   if (!(aco::debug_flags & aco::DEBUG_VALIDATE_IR))
       return;
 
-   bool is_valid = aco::validate(program, stderr);
+   ASSERTED bool is_valid = aco::validate_ir(program);
    assert(is_valid);
 }
 
@@ -66,9 +66,14 @@ void aco_compile_shader(unsigned shader_count,
    if (program->collect_statistics)
       memset(program->statistics, 0, sizeof(program->statistics));
 
+   program->debug.func = args->options->debug.func;
+   program->debug.private_data = args->options->debug.private_data;
+
    /* Instruction Selection */
    if (args->is_gs_copy_shader)
       aco::select_gs_copy_shader(program.get(), shaders[0], &config, args);
+   else if (args->is_trap_handler_shader)
+      aco::select_trap_handler_shader(program.get(), shaders[0], &config, args);
    else
       aco::select_program(program.get(), shader_count, shaders, &config, args);
    if (args->options->dump_preoptir) {
@@ -76,23 +81,28 @@ void aco_compile_shader(unsigned shader_count,
       aco_print_program(program.get(), stderr);
    }
 
-   /* Phi lowering */
-   aco::lower_phis(program.get());
-   aco::dominator_tree(program.get());
-   validate(program.get());
+   aco::live live_vars;
+   if (!args->is_trap_handler_shader) {
+      /* Phi lowering */
+      aco::lower_phis(program.get());
+      aco::dominator_tree(program.get());
+      validate(program.get());
 
-   /* Optimization */
-   aco::value_numbering(program.get());
-   aco::optimize(program.get());
+      /* Optimization */
+      if (!(aco::debug_flags & aco::DEBUG_NO_VN))
+         aco::value_numbering(program.get());
+      if (!(aco::debug_flags & aco::DEBUG_NO_OPT))
+         aco::optimize(program.get());
 
-   /* cleanup and exec mask handling */
-   aco::setup_reduce_temp(program.get());
-   aco::insert_exec_mask(program.get());
-   validate(program.get());
+      /* cleanup and exec mask handling */
+      aco::setup_reduce_temp(program.get());
+      aco::insert_exec_mask(program.get());
+      validate(program.get());
 
-   /* spilling and scheduling */
-   aco::live live_vars = aco::live_var_analysis(program.get(), args->options);
-   aco::spill(program.get(), live_vars, args->options);
+      /* spilling and scheduling */
+      live_vars = aco::live_var_analysis(program.get(), args->options);
+      aco::spill(program.get(), live_vars, args->options);
+   }
 
    std::string llvm_ir;
    if (args->options->record_ir) {
@@ -111,26 +121,31 @@ void aco_compile_shader(unsigned shader_count,
 
    if (program->collect_statistics)
       aco::collect_presched_stats(program.get());
-   aco::schedule_program(program.get(), live_vars);
-   validate(program.get());
 
-   /* Register Allocation */
-   aco::register_allocation(program.get(), live_vars.live_out);
-   if (args->options->dump_shader) {
-      std::cerr << "After RA:\n";
-      aco_print_program(program.get(), stderr);
+   if (!args->is_trap_handler_shader) {
+      if (!(aco::debug_flags & aco::DEBUG_NO_SCHED))
+         aco::schedule_program(program.get(), live_vars);
+      validate(program.get());
+
+      /* Register Allocation */
+      aco::register_allocation(program.get(), live_vars.live_out);
+      if (args->options->dump_shader) {
+         std::cerr << "After RA:\n";
+         aco_print_program(program.get(), stderr);
+      }
+
+      if (aco::validate_ra(program.get(), args->options)) {
+         std::cerr << "Program after RA validation failure:\n";
+         aco_print_program(program.get(), stderr);
+         abort();
+      }
+
+      validate(program.get());
+
+      aco::ssa_elimination(program.get());
    }
-
-   if (aco::validate_ra(program.get(), args->options, stderr)) {
-      std::cerr << "Program after RA validation failure:\n";
-      aco_print_program(program.get(), stderr);
-      abort();
-   }
-
-   validate(program.get());
 
    /* Lower to HW Instructions */
-   aco::ssa_elimination(program.get());
    aco::lower_to_hw_instr(program.get());
 
    /* Insert Waitcnt */

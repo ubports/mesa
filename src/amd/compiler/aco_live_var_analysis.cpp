@@ -214,7 +214,7 @@ void process_live_temps_per_block(Program *program, live& lives, Block* block,
 
 #ifndef NDEBUG
       if (preds.empty())
-         fprintf(stderr, "Temporary never defined or are defined after use: %%%d in BB%d\n", t.id(), block->index);
+         aco_err(program, "Temporary never defined or are defined after use: %%%d in BB%d", t.id(), block->index);
 #endif
 
       for (unsigned pred_idx : preds) {
@@ -337,6 +337,8 @@ void update_vgpr_sgpr_demand(Program* program, const RegisterDemand new_demand)
 {
    /* TODO: max_waves_per_simd, simd_per_cu and the number of physical vgprs for Navi */
    unsigned max_waves_per_simd = 10;
+   if ((program->family >= CHIP_POLARIS10 && program->family <= CHIP_VEGAM) || program->chip_class >= GFX10_3)
+      max_waves_per_simd = 8;
    unsigned simd_per_cu = 4;
 
    bool wgp = program->chip_class >= GFX10; /* assume WGP is used on Navi */

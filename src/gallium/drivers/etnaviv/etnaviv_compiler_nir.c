@@ -1068,7 +1068,7 @@ etna_compile_shader_nir(struct etna_shader_variant *v)
    /* setup input linking */
    struct etna_shader_io_file *sf = &v->infile;
    if (s->info.stage == MESA_SHADER_VERTEX) {
-      nir_foreach_variable(var, &s->inputs) {
+      nir_foreach_shader_in_variable(var, s) {
          unsigned idx = var->data.driver_location;
          sf->reg[idx].reg = idx;
          sf->reg[idx].slot = var->data.location;
@@ -1077,7 +1077,7 @@ etna_compile_shader_nir(struct etna_shader_variant *v)
       }
    } else {
       unsigned count = 0;
-      nir_foreach_variable(var, &s->inputs) {
+      nir_foreach_shader_in_variable(var, s) {
          unsigned idx = var->data.driver_location;
          sf->reg[idx].reg = idx + 1;
          sf->reg[idx].slot = var->data.location;
@@ -1088,7 +1088,7 @@ etna_compile_shader_nir(struct etna_shader_variant *v)
       assert(sf->num_reg == count);
    }
 
-   NIR_PASS_V(s, nir_lower_io, ~nir_var_shader_out, etna_glsl_type_size,
+   NIR_PASS_V(s, nir_lower_io, nir_var_shader_in | nir_var_uniform, etna_glsl_type_size,
             (nir_lower_io_options)0);
 
    NIR_PASS_V(s, nir_lower_regs_to_ssa);
@@ -1138,6 +1138,7 @@ etna_compile_shader_nir(struct etna_shader_variant *v)
 
    NIR_PASS_V(s, nir_opt_dce);
 
+   NIR_PASS_V(s, nir_lower_bool_to_bitsize);
    NIR_PASS_V(s, etna_lower_alu, c->specs->has_new_transcendentals);
 
    if (DBG_ENABLED(ETNA_DBG_DUMP_SHADERS))

@@ -59,12 +59,15 @@ tu_spirv_to_nir(struct ir3_compiler *compiler,
       /* Accessed via stg/ldg (not used with Vulkan?) */
       .global_addr_format = nir_address_format_64bit_global,
 
+      /* ViewID is a sysval in geometry stages and an input in the FS */
+      .view_index_is_input = stage == MESA_SHADER_FRAGMENT,
       .caps = {
          .transform_feedback = true,
          .tessellation = true,
          .draw_parameters = true,
          .variable_pointers = true,
          .stencil_export = true,
+         .multiview = true,
       },
    };
    const nir_shader_compiler_options *nir_options =
@@ -354,13 +357,6 @@ lower_intrinsic(nir_builder *b, nir_intrinsic_instr *instr,
                 const struct tu_pipeline_layout *layout)
 {
    switch (instr->intrinsic) {
-   case nir_intrinsic_load_layer_id:
-      /* TODO: remove this when layered rendering is implemented */
-      nir_ssa_def_rewrite_uses(&instr->dest.ssa,
-                               nir_src_for_ssa(nir_imm_int(b, 0)));
-      nir_instr_remove(&instr->instr);
-      return true;
-
    case nir_intrinsic_load_push_constant:
       lower_load_push_constant(b, instr, shader);
       return true;
@@ -668,6 +664,7 @@ struct tu_shader *
 tu_shader_create(struct tu_device *dev,
                  gl_shader_stage stage,
                  const VkPipelineShaderStageCreateInfo *stage_info,
+                 unsigned multiview_mask,
                  struct tu_pipeline_layout *layout,
                  const VkAllocationCallbacks *alloc)
 {
@@ -713,6 +710,7 @@ tu_shader_create(struct tu_device *dev,
    NIR_PASS_V(nir, nir_lower_variable_initializers, nir_var_function_temp);
    NIR_PASS_V(nir, nir_lower_returns);
    NIR_PASS_V(nir, nir_inline_functions);
+   NIR_PASS_V(nir, nir_copy_prop);
    NIR_PASS_V(nir, nir_opt_deref);
    foreach_list_typed_safe(nir_function, func, node, &nir->functions) {
       if (!func->is_entrypoint)
@@ -763,14 +761,31 @@ tu_shader_create(struct tu_device *dev,
 
    NIR_PASS_V(nir, nir_lower_io_arrays_to_elements_no_indirects, false);
 
-   nir_assign_io_var_locations(&nir->inputs, &nir->num_inputs, stage);
-   nir_assign_io_var_locations(&nir->outputs, &nir->num_outputs, stage);
+   nir_assign_io_var_locations(nir, nir_var_shader_in, &nir->num_inputs, stage);
+   nir_assign_io_var_locations(nir, nir_var_shader_out, &nir->num_outputs, stage);
 
    NIR_PASS_V(nir, nir_lower_system_values);
+   NIR_PASS_V(nir, nir_lower_compute_system_values, NULL);
+
    NIR_PASS_V(nir, nir_lower_frexp);
 
-   if (stage == MESA_SHADER_FRAGMENT)
-      NIR_PASS_V(nir, nir_lower_input_attachments, true);
+   if (stage == MESA_SHADER_FRAGMENT) {
+      NIR_PASS_V(nir, nir_lower_input_attachments,
+                 &(nir_input_attachment_options) {
+                     .use_fragcoord_sysval = true,
+                     .use_layer_id_sysval = false,
+                     /* When using multiview rendering, we must use
+                      * gl_ViewIndex as the layer id to pass to the texture
+                      * sampling function. gl_Layer doesn't work when
+                      * multiview is enabled.
+                      */
+                     .use_view_id_for_layer = multiview_mask != 0,
+                 });
+   }
+
+   if (stage == MESA_SHADER_VERTEX && multiview_mask) {
+      NIR_PASS_V(nir, tu_nir_lower_multiview, multiview_mask, dev);
+   }
 
    NIR_PASS_V(nir, nir_lower_explicit_io,
               nir_var_mem_ubo | nir_var_mem_ssbo,

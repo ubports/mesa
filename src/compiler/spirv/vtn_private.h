@@ -118,7 +118,6 @@ enum vtn_value_type {
    vtn_value_type_ssa,
    vtn_value_type_extension,
    vtn_value_type_image_pointer,
-   vtn_value_type_sampled_image,
 };
 
 enum vtn_branch_type {
@@ -185,6 +184,8 @@ struct vtn_if {
 struct vtn_case {
    struct vtn_cf_node node;
 
+   struct vtn_block *block;
+
    enum vtn_branch_type type;
    struct list_head body;
 
@@ -241,6 +242,9 @@ struct vtn_block {
 
    /** Every block ends in a nop intrinsic so that we can find it again */
    nir_intrinsic_instr *end_nop;
+
+   /** attached nir_block */
+   struct nir_block *block;
 };
 
 struct vtn_function {
@@ -306,9 +310,6 @@ struct vtn_ssa_value {
    struct vtn_ssa_value *transposed;
 
    const struct glsl_type *type;
-
-   /* Access qualifiers */
-   enum gl_access_qualifier access;
 };
 
 enum vtn_base_type {
@@ -404,8 +405,11 @@ struct vtn_type {
 
       /* Members for image types */
       struct {
-         /* For images, indicates whether it's sampled or storage */
-         bool sampled;
+         /* GLSL image type for this type.  This is not to be confused with
+          * vtn_type::type which is actually going to be the GLSL type for a
+          * pointer to an image, likely a uint32_t.
+          */
+         const struct glsl_type *glsl_image;
 
          /* Image format for image_load_store type images */
          unsigned image_format;
@@ -473,12 +477,14 @@ enum vtn_variable_mode {
    vtn_variable_mode_function,
    vtn_variable_mode_private,
    vtn_variable_mode_uniform,
+   vtn_variable_mode_atomic_counter,
    vtn_variable_mode_ubo,
    vtn_variable_mode_ssbo,
    vtn_variable_mode_phys_ssbo,
    vtn_variable_mode_push_constant,
    vtn_variable_mode_workgroup,
    vtn_variable_mode_cross_workgroup,
+   vtn_variable_mode_constant,
    vtn_variable_mode_input,
    vtn_variable_mode_output,
    vtn_variable_mode_image,
@@ -547,8 +553,6 @@ struct vtn_variable {
     */
    int base_location;
 
-   int shared_location;
-
    /**
     * In some early released versions of GLSLang, it implemented all function
     * calls by making copies of all parameters into temporary variables and
@@ -567,16 +571,15 @@ struct vtn_variable {
    enum gl_access_qualifier access;
 };
 
+const struct glsl_type *
+vtn_type_get_nir_type(struct vtn_builder *b, struct vtn_type *type,
+                      enum vtn_variable_mode mode);
+
 struct vtn_image_pointer {
-   struct vtn_pointer *image;
+   nir_deref_instr *image;
    nir_ssa_def *coord;
    nir_ssa_def *sample;
    nir_ssa_def *lod;
-};
-
-struct vtn_sampled_image {
-   struct vtn_pointer *image; /* Image or array of images */
-   struct vtn_pointer *sampler; /* Sampler */
 };
 
 struct vtn_value {
@@ -585,12 +588,10 @@ struct vtn_value {
    struct vtn_decoration *decoration;
    struct vtn_type *type;
    union {
-      void *ptr;
-      char *str;
+      const char *str;
       nir_constant *constant;
       struct vtn_pointer *pointer;
       struct vtn_image_pointer *image;
-      struct vtn_sampled_image *sampled_image;
       struct vtn_function *func;
       struct vtn_block *block;
       struct vtn_ssa_value *ssa;
@@ -637,7 +638,7 @@ struct vtn_builder {
     * automatically by vtn_foreach_instruction.
     */
    size_t spirv_offset;
-   char *file;
+   const char *file;
    int line, col;
 
    /*
@@ -659,9 +660,6 @@ struct vtn_builder {
 
    unsigned value_id_bound;
    struct vtn_value *values;
-
-   /* True if we should watch out for GLSLang issue #179 */
-   bool wa_glslang_179;
 
    /* True if we need to fix up CS OpControlBarrier */
    bool wa_glslang_cs_barrier;
@@ -705,7 +703,7 @@ vtn_untyped_value(struct vtn_builder *b, uint32_t value_id)
 }
 
 /* Consider not using this function directly and instead use
- * vtn_push_ssa/vtn_push_value_pointer so that appropriate applying of
+ * vtn_push_ssa/vtn_push_pointer so that appropriate applying of
  * decorations is handled by common code.
  */
 static inline struct vtn_value *
@@ -713,6 +711,10 @@ vtn_push_value(struct vtn_builder *b, uint32_t value_id,
                enum vtn_value_type value_type)
 {
    struct vtn_value *val = vtn_untyped_value(b, value_id);
+
+   vtn_fail_if(value_type == vtn_value_type_ssa,
+               "Do not call vtn_push_value for value_type_ssa.  Use "
+               "vtn_push_ssa_value instead.");
 
    vtn_fail_if(val->value_type != vtn_value_type_invalid,
                "SPIR-V id %u has already been written by another instruction",
@@ -773,42 +775,39 @@ vtn_constant_int(struct vtn_builder *b, uint32_t value_id)
    }
 }
 
-static inline enum gl_access_qualifier vtn_value_access(struct vtn_value *value)
+static inline struct vtn_type *
+vtn_get_value_type(struct vtn_builder *b, uint32_t value_id)
 {
-   switch (value->value_type) {
-   case vtn_value_type_invalid:
-   case vtn_value_type_undef:
-   case vtn_value_type_string:
-   case vtn_value_type_decoration_group:
-   case vtn_value_type_constant:
-   case vtn_value_type_function:
-   case vtn_value_type_block:
-   case vtn_value_type_extension:
-      return 0;
-   case vtn_value_type_type:
-      return value->type->access;
-   case vtn_value_type_pointer:
-      return value->pointer->access;
-   case vtn_value_type_ssa:
-      return value->ssa->access;
-   case vtn_value_type_image_pointer:
-      return value->image->image->access;
-   case vtn_value_type_sampled_image:
-      return value->sampled_image->image->access |
-         value->sampled_image->sampler->access;
-   }
+   struct vtn_value *val = vtn_untyped_value(b, value_id);
+   vtn_fail_if(val->type == NULL, "Value %u does not have a type", value_id);
+   return val->type;
+}
 
-   unreachable("invalid type");
+static inline struct vtn_type *
+vtn_get_type(struct vtn_builder *b, uint32_t value_id)
+{
+   return vtn_value(b, value_id, vtn_value_type_type)->type;
 }
 
 struct vtn_ssa_value *vtn_ssa_value(struct vtn_builder *b, uint32_t value_id);
+struct vtn_value *vtn_push_ssa_value(struct vtn_builder *b, uint32_t value_id,
+                                     struct vtn_ssa_value *ssa);
 
-struct vtn_value *vtn_push_value_pointer(struct vtn_builder *b,
-                                         uint32_t value_id,
-                                         struct vtn_pointer *ptr);
+nir_ssa_def *vtn_get_nir_ssa(struct vtn_builder *b, uint32_t value_id);
+struct vtn_value *vtn_push_nir_ssa(struct vtn_builder *b, uint32_t value_id,
+                                   nir_ssa_def *def);
 
-struct vtn_value *vtn_push_ssa(struct vtn_builder *b, uint32_t value_id,
-                               struct vtn_type *type, struct vtn_ssa_value *ssa);
+struct vtn_value *vtn_push_pointer(struct vtn_builder *b,
+                                   uint32_t value_id,
+                                   struct vtn_pointer *ptr);
+
+struct vtn_sampled_image {
+   nir_deref_instr *image;
+   nir_deref_instr *sampler;
+};
+
+nir_ssa_def *vtn_sampled_image_to_nir_ssa(struct vtn_builder *b,
+                                          struct vtn_sampled_image si);
 
 void
 vtn_copy_value(struct vtn_builder *b, uint32_t src_value_id,
@@ -837,10 +836,11 @@ void vtn_local_store(struct vtn_builder *b, struct vtn_ssa_value *src,
                      enum gl_access_qualifier access);
 
 struct vtn_ssa_value *
-vtn_variable_load(struct vtn_builder *b, struct vtn_pointer *src);
+vtn_variable_load(struct vtn_builder *b, struct vtn_pointer *src,
+                  enum gl_access_qualifier access);
 
 void vtn_variable_store(struct vtn_builder *b, struct vtn_ssa_value *src,
-                        struct vtn_pointer *dest);
+                        struct vtn_pointer *dest, enum gl_access_qualifier access);
 
 void vtn_handle_variables(struct vtn_builder *b, SpvOp opcode,
                           const uint32_t *w, unsigned count);
@@ -927,7 +927,7 @@ bool vtn_handle_amd_shader_explicit_vertex_parameter_instruction(struct vtn_buil
                                                                  const uint32_t *words,
                                                                  unsigned count);
 
-SpvMemorySemanticsMask vtn_storage_class_to_memory_semantics(SpvStorageClass sc);
+SpvMemorySemanticsMask vtn_mode_to_memory_semantics(enum vtn_variable_mode mode);
 
 void vtn_emit_memory_barrier(struct vtn_builder *b, SpvScope scope,
                              SpvMemorySemanticsMask semantics);

@@ -238,7 +238,7 @@ check_vk_device_name() {
     $DEQP $DEQP_OPTIONS --deqp-case=dEQP-VK.info.device --deqp-log-filename=$RESULTS/deqp-info.qpa
     DEVICENAME=`grep deviceName $RESULTS/deqp-info.qpa | sed 's|deviceName: ||g'`
     echo "deviceName: $DEVICENAME"
-    if [ -n "$DEQP_EXPECTED_RENDERER" -a $DEVICENAME != "$DEQP_EXPECTED_RENDERER" ]; then
+    if [ -n "$DEQP_EXPECTED_RENDERER" -a "x$DEVICENAME" != "x$DEQP_EXPECTED_RENDERER" ]; then
         echo "Expected deviceName $DEQP_EXPECTED_RENDERER"
         exit 1
     fi
@@ -280,6 +280,9 @@ FLAKESFILE=$RESULTS/cts-runner-flakes$DEQP_RUN_SUFFIX.txt
 run_cts $DEQP /tmp/case-list.txt $RESULTSFILE
 DEQP_EXITCODE=$?
 
+echo "System load: $(cut -d' ' -f1-3 < /proc/loadavg)"
+echo "# of CPU cores: $(cat /proc/cpuinfo | grep processor | wc -l)"
+
 # junit is disabled, because it overloads gitlab.freedesktop.org to parse it.
 #quiet generate_junit $RESULTSFILE > $RESULTS/results.xml
 
@@ -287,6 +290,27 @@ if [ $DEQP_EXITCODE -ne 0 ]; then
     # preserve caselist files in case of failures:
     cp /tmp/deqp_runner.*.txt $RESULTS/
     egrep -v ",Pass|,Skip|,ExpectedFail" $RESULTSFILE > $UNEXPECTED_RESULTSFILE
+
+    # deqp-runner's flake detection won't perfectly detect all flakes, so
+    # allow the driver to list some known flakes that won't intermittently
+    # fail people's pipelines (while still allowing them to run and be
+    # reported to IRC in the usual flake detection path).  If we had some
+    # fails listed (so this wasn't a total runner failure), then filter out
+    # the known flakes and see if there are any issues left.
+    if [ -n "$DEQP_FLAKES" -a -s $UNEXPECTED_RESULTSFILE ]; then
+        set +x
+        while read line; do
+            line=`echo $line | sed 's|#.*||g'`
+            if [ -n "$line" ]; then
+                sed -i "/$line/d" $UNEXPECTED_RESULTSFILE
+            fi
+        done < $INSTALL/$DEQP_FLAKES
+        set -x
+
+        if [ ! -s $UNEXPECTED_RESULTSFILE ]; then
+            exit 0
+        fi
+    fi
 
     if [ -z "$DEQP_NO_SAVE_RESULTS" ]; then
         echo "Some unexpected results found (see cts-runner-results.txt in artifacts for full results):"
@@ -298,12 +322,6 @@ if [ $DEQP_EXITCODE -ne 0 ]; then
         echo "Unexpected results found:"
         cat $UNEXPECTED_RESULTSFILE
     fi
-
-    count=`cat $UNEXPECTED_RESULTSFILE | wc -l`
-
-    # Re-run fails to detect flakes.  But use a small threshold, if
-    # something was fundamentally broken, we don't want to re-run
-    # the entire caselist
 else
     grep ",Flake" $RESULTSFILE > $FLAKESFILE
 

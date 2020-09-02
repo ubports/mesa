@@ -353,6 +353,16 @@ enum pipe_transfer_usage
    PIPE_TRANSFER_THREAD_SAFE = 1 << 15,
 
    /**
+    * Map only the depth aspect of a resource
+    */
+   PIPE_TRANSFER_DEPTH_ONLY = 1 << 16,
+
+   /**
+    * Map only the stencil aspect of a resource
+    */
+   PIPE_TRANSFER_STENCIL_ONLY = 1 << 17,
+
+   /**
     * This and higher bits are reserved for private use by drivers. Drivers
     * should use this as (PIPE_TRANSFER_DRV_PRV << i).
     */
@@ -502,6 +512,7 @@ enum pipe_flush_flags
 #define PIPE_RESOURCE_FLAG_SPARSE                (1 << 3)
 #define PIPE_RESOURCE_FLAG_SINGLE_THREAD_USE     (1 << 4)
 #define PIPE_RESOURCE_FLAG_ENCRYPTED             (1 << 5)
+#define PIPE_RESOURCE_FLAG_DONT_OVER_ALLOCATE    (1 << 6)
 #define PIPE_RESOURCE_FLAG_DRV_PRIV    (1 << 8) /* driver/winsys private */
 #define PIPE_RESOURCE_FLAG_FRONTEND_PRIV         (1 << 24) /* gallium frontend private */
 
@@ -954,6 +965,8 @@ enum pipe_cap
    PIPE_CAP_MAP_UNSYNCHRONIZED_THREAD_SAFE,
    PIPE_CAP_GLSL_ZERO_INIT,
    PIPE_CAP_BLEND_EQUATION_ADVANCED,
+   PIPE_CAP_NIR_ATOMICS_AS_DEREF,
+   PIPE_CAP_NO_CLIP_ON_COPY_TEX,
 };
 
 /**
@@ -1023,7 +1036,7 @@ enum pipe_shader_cap
    PIPE_SHADER_CAP_FP16,
    PIPE_SHADER_CAP_FP16_DERIVATIVES,
    PIPE_SHADER_CAP_INT16,
-   PIPE_SHADER_CAP_GLSL_16BIT_TEMPS,
+   PIPE_SHADER_CAP_GLSL_16BIT_CONSTS,
    PIPE_SHADER_CAP_MAX_TEXTURE_SAMPLERS,
    PIPE_SHADER_CAP_PREFERRED_IR,
    PIPE_SHADER_CAP_TGSI_SQRT_SUPPORTED,

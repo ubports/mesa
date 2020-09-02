@@ -30,6 +30,7 @@ stages:
   - radv
   - lima
   - virgl
+  - radeonsi
   - success
 
 # Generic rule to not run the job during scheduled pipelines
@@ -69,12 +70,14 @@ test-docs:
   stage: container+docs
   rules:
     - *ignore_scheduled_pipelines
-    - if: '$CI_PROJECT_NAMESPACE == "mesa"'
-      when: never
     - if: '$GITLAB_USER_LOGIN == "marge-bot" && $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME == $CI_COMMIT_REF_NAME'
       changes: *docs-or-ci
       when: on_success
-    - changes: *docs-or-ci
+    - if: '$GITLAB_USER_LOGIN != "marge-bot" && $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME != $CI_COMMIT_REF_NAME && $CI_PROJECT_PATH == "mesa/mesa"'
+      changes: *docs-or-ci
+      when: on_success
+    - if: '$CI_PROJECT_PATH != "mesa/mesa" || $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME == $CI_COMMIT_REF_NAME'
+      changes: *docs-or-ci
       when: manual
     # Other cases default to never
 
@@ -117,14 +120,15 @@ success:
   image: debian:stable-slim
   rules:
     - *ignore_scheduled_pipelines
-    - if: '$CI_PROJECT_NAMESPACE == "mesa"'
+    - if: '$CI_PROJECT_NAMESPACE == "mesa" && $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME != $CI_COMMIT_REF_NAME'
       when: never
     - if: '$GITLAB_USER_LOGIN == "marge-bot"'
       changes: *docs-or-ci
       when: never
     - changes: *all_paths
       when: never
-    - when: on_success
+    - if: '$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME == $CI_COMMIT_REF_NAME'
+      when: on_success
   variables:
     GIT_STRATEGY: none
   script:
@@ -166,7 +170,7 @@ success:
     - *ignore_scheduled_pipelines
     # Run pipeline by default in the main project if any CI pipeline
     # configuration files were changed, to ensure docker images are up to date
-    - if: '$CI_PROJECT_PATH == "mesa/mesa"'
+    - if: '$CI_PROJECT_PATH == "mesa/mesa" && $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME != $CI_COMMIT_REF_NAME'
       changes:
       - .gitlab-ci.yml
       - .gitlab-ci/**/*
@@ -179,7 +183,7 @@ success:
       when: on_success
     # Run pipeline by default in the main project if it was not triggered by
     # Marge Bot, and any files affecting the pipeline were changed
-    - if: '$GITLAB_USER_LOGIN != "marge-bot" && $CI_PROJECT_PATH == "mesa/mesa"'
+    - if: '$GITLAB_USER_LOGIN != "marge-bot" && $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME != $CI_COMMIT_REF_NAME && $CI_PROJECT_PATH == "mesa/mesa"'
       changes:
         *all_paths
       when: on_success
@@ -203,7 +207,7 @@ x86_build-base:
     - .fdo.container-build@debian
     - .container
   variables:
-    FDO_DISTRIBUTION_TAG: &x86_build-base "2020-07-21-tracie"
+    FDO_DISTRIBUTION_TAG: &x86_build-base "2020-08-13-gold"
 
 .use-x86_build-base:
   extends:
@@ -221,7 +225,7 @@ x86_build:
   extends:
     - .use-x86_build-base
   variables:
-    FDO_DISTRIBUTION_TAG: &x86_build "2020-07-21-tracie"
+    FDO_DISTRIBUTION_TAG: &x86_build "2020-08-13-gold"
 
 .use-x86_build:
   variables:
@@ -235,7 +239,7 @@ i386_build:
   extends:
     - .use-x86_build-base
   variables:
-    FDO_DISTRIBUTION_TAG: &i386_build "2020-07-21-tracie"
+    FDO_DISTRIBUTION_TAG: &i386_build "2020-08-13-gold"
 
 .use-i386_build:
   variables:
@@ -249,7 +253,7 @@ ppc64el_build:
   extends:
     - .use-x86_build-base
   variables:
-    FDO_DISTRIBUTION_TAG: &ppc64el_build "2020-07-21-tracie"
+    FDO_DISTRIBUTION_TAG: &ppc64el_build "2020-08-13-gold"
 
 .use-ppc64el_build:
   variables:
@@ -263,7 +267,7 @@ s390x_build:
   extends:
     - .use-x86_build-base
   variables:
-    FDO_DISTRIBUTION_TAG: &s390x_build "2020-07-21-tracie"
+    FDO_DISTRIBUTION_TAG: &s390x_build "2020-08-13-gold"
 
 .use-s390x_build:
   variables:
@@ -276,7 +280,7 @@ s390x_build:
 x86_test-base:
   extends: x86_build-base
   variables:
-    FDO_DISTRIBUTION_TAG: &x86_test-base "2020-07-21-tracie"
+    FDO_DISTRIBUTION_TAG: &x86_test-base "2020-08-13-gold"
 
 .use-x86_test-base:
   extends:
@@ -293,19 +297,19 @@ x86_test-base:
 x86_test-gl:
   extends: .use-x86_test-base
   variables:
-    FDO_DISTRIBUTION_TAG: &x86_test-gl "2020-07-21-tracie"
+    FDO_DISTRIBUTION_TAG: &x86_test-gl "2020-08-31-deqp-version"
 
 # Debian 10 based x86 test image for VK
 x86_test-vk:
   extends: .use-x86_test-base
   variables:
-    FDO_DISTRIBUTION_TAG: &x86_test-vk "2020-07-21-gfxreconstruct-dev"
+    FDO_DISTRIBUTION_TAG: &x86_test-vk "2020-08-31-deqp-version"
 
 # Debian 9 based x86 build image (old LLVM)
 x86_build_old:
   extends: x86_build-base
   variables:
-    FDO_DISTRIBUTION_TAG: &x86_build_old "2020-07-21-tracie"
+    FDO_DISTRIBUTION_TAG: &x86_build_old "2020-08-13-gold"
     FDO_DISTRIBUTION_VERSION: stretch-slim
 
 .use-x86_build_old:
@@ -321,7 +325,7 @@ arm_build:
     - .fdo.container-build@debian@arm64v8
     - .container
   variables:
-    FDO_DISTRIBUTION_TAG: &arm_build "2020-07-21-tracie"
+    FDO_DISTRIBUTION_TAG: &arm_build "2020-08-31-deqp-version"
 
 .use-arm_build:
   variables:
@@ -336,7 +340,7 @@ arm_test-base:
     - .fdo.container-build@debian
     - .container
   variables:
-    FDO_DISTRIBUTION_TAG: &arm_test-base "2020-07-18-nginx"
+    FDO_DISTRIBUTION_TAG: &arm_test-base "2020-08-13-gold"
 
 .use-arm_test-base:
   extends:
@@ -354,7 +358,7 @@ arm64_test:
   extends:
     - .use-arm_test-base
   variables:
-    FDO_DISTRIBUTION_TAG: &arm64_test "2020-07-18-nginx"
+    FDO_DISTRIBUTION_TAG: &arm64_test "2020-08-31-deqp-version"
 
 .use-arm64_test:
   variables:
@@ -518,11 +522,13 @@ meson-testing:
       -D platforms=x11
     GALLIUM_ST: >
       -D dri3=enabled
-    GALLIUM_DRIVERS: "swrast,virgl"
+    GALLIUM_DRIVERS: "swrast,virgl,radeonsi"
     VULKAN_DRIVERS: amd
     BUILDTYPE: "debugoptimized"
     EXTRA_OPTION: >
       -D werror=true
+    UPLOAD_FOR_LAVA: 1
+    DEBIAN_ARCH: amd64
   script:
     - .gitlab-ci/meson-build.sh
     - .gitlab-ci/prepare-artifacts.sh
@@ -547,6 +553,7 @@ meson-gallium:
       -D gallium-nine=true
       -D gallium-opencl=disabled
     GALLIUM_DRIVERS: "iris,nouveau,kmsro,r300,r600,freedreno,swr,swrast,svga,v3d,vc4,virgl,etnaviv,panfrost,lima,zink"
+    VULKAN_DRIVERS: swrast
     EXTRA_OPTION: >
       -D osmesa=gallium
       -D tools=all
@@ -554,6 +561,37 @@ meson-gallium:
   script:
     - .gitlab-ci/meson-build.sh
     - .gitlab-ci/run-shader-db.sh
+    - src/freedreno/.gitlab-ci/run-fdtools.sh
+
+# Test a release build with -Werror so new warnings don't sneak in.
+meson-release:
+  extends: .meson-build
+  variables:
+    UNWIND: "enabled"
+    DRI_LOADERS: >
+      -D glx=dri
+      -D gbm=enabled
+      -D egl=enabled
+      -D platforms=x11,wayland
+    GALLIUM_ST: >
+      -D dri3=enabled
+      -D gallium-extra-hud=true
+      -D gallium-vdpau=enabled
+      -D gallium-xvmc=disabled
+      -D gallium-omx=disabled
+      -D gallium-va=enabled
+      -D gallium-xa=enabled
+      -D gallium-nine=false
+      -D gallium-opencl=disabled
+      -D llvm=false
+    GALLIUM_DRIVERS: "nouveau,kmsro,r300,svga,v3d,vc4,virgl,etnaviv,panfrost,lima,zink"
+    BUILDTYPE: "release"
+    EXTRA_OPTION: >
+      -D osmesa=none
+      -D tools=all
+      -D werror=true
+  script:
+    - .gitlab-ci/meson-build.sh
 
 meson-classic:
   extends: .meson-build
@@ -569,6 +607,30 @@ meson-classic:
       -D osmesa=classic
       -D tools=all
       -D werror=true
+
+meson-android:
+  extends: .meson-build
+  variables:
+    UNWIND: "disabled"
+    DRI_LOADERS: >
+      -D glx=disabled
+      -D gbm=disabled
+      -D egl=enabled
+      -D platforms=android
+    GALLIUM_DRIVERS: freedreno
+    VULKAN_DRIVERS: freedreno,intel,amd
+    EXTRA_OPTION: >
+      -D android-stub=true
+      -D werror=true
+    GALLIUM_ST: >
+      -D dri3=disabled
+      -D gallium-vdpau=disabled
+      -D gallium-xvmc=disabled
+      -D gallium-omx=disabled
+      -D gallium-va=disabled
+      -D gallium-xa=disabled
+      -D gallium-nine=false
+      -D gallium-opencl=disabled
 
 .meson-cross:
   extends:
@@ -638,6 +700,8 @@ meson-arm64-build-test:
     - .ci-deqp-artifacts
   variables:
     VULKAN_DRIVERS: "amd"
+    EXTRA_OPTION: >
+      -Dtools=panfrost
   script:
     - .gitlab-ci/meson-build.sh
 
@@ -735,6 +799,7 @@ meson-vulkan:
     VULKAN_DRIVERS: intel,amd,freedreno
     EXTRA_OPTION: >
       -D vulkan-overlay-layer=true
+      -D build-aco-tests=true
       -D werror=true
 
 meson-i386:
@@ -929,11 +994,21 @@ softpipe-gles31:
     DEQP_VER: gles31
   extends: softpipe-gles2
 
+# Note that KHR-GL3* test sets include all tests from the previous
+# version, so we only need to run one test list (unlike dEQP-GLES,
+# where the test sets are separate).
+softpipe-gl:
+  variables:
+    DEQP_VER: gl33
+  extends:
+    - softpipe-gles2
+
 virgl-gles2-on-gl:
   variables:
     DEQP_VER: gles2
     NIR_VALIDATE: 0
     DEQP_NO_SAVE_RESULTS: 1
+    DEQP_SKIPS: deqp-virgl-gl-skips.txt
     # Don't use threads inside llvmpipe, we've already got all cores
     # busy at the deqp-runner level.
     LP_NUM_THREADS: 0
@@ -1021,7 +1096,7 @@ arm64_a630_gles2:
     BM_KERNEL: /lava-files/cheza-kernel
     BM_CMDLINE: "ip=dhcp console=ttyMSM0,115200n8 root=/dev/nfs rw nfsrootdebug nfsroot=,tcp,nfsvers=4.2 init=/init"
     DEQP_EXPECTED_FAILS: deqp-freedreno-a630-fails.txt
-    DEQP_SKIPS: deqp-freedreno-a630-skips.txt
+    DEQP_FLAKES: deqp-freedreno-a630-flakes.txt
     GIT_STRATEGY: none
     DEQP_EXPECTED_RENDERER: FD630
     DEQP_NO_SAVE_RESULTS: ""
@@ -1070,7 +1145,9 @@ arm64_a630_traces:
   variables:
     BARE_METAL_TEST_SCRIPT: "/install/tracie-runner-gl.sh"
     DEVICE_NAME: "freedreno-a630"
+    DRIVER_NAME: "freedreno"
     TRACIE_NO_UNIT_TESTS: 1
+    TRACIE_UPLOAD_TO_MINIO: 1
     # This lets us run several more traces which don't use any features we're
     # missing.
     MESA_GLSL_VERSION_OVERRIDE: "460"
@@ -1086,6 +1163,11 @@ arm64_a630_gmem:
     CI_NODE_TOTAL: 5
     FD_MESA_DEBUG: nobypass
     NIR_VALIDATE: 1
+
+arm64_a630_gl:
+  extends: arm64_a630_gles2
+  variables:
+    DEQP_VER: gl30
 
 arm64_a630_vk:
   extends: arm64_a630_gles2
@@ -1140,7 +1222,8 @@ arm64_a306_gles2:
     FLAKES_CHANNEL: "#freedreno-ci"
     BARE_METAL_TEST_SCRIPT: "/install/deqp-runner.sh"
     DEQP_EXPECTED_FAILS: deqp-freedreno-a307-fails.txt
-    DEQP_SKIPS: deqp-freedreno-a307-skips.txt
+    DEQP_SKIPS: deqp-default-skips.txt
+    DEQP_FLAKES: deqp-freedreno-a307-flakes.txt
     DEQP_VER: gles2
     DEQP_PARALLEL: 4
     DEQP_EXPECTED_RENDERER: FD307
@@ -1186,7 +1269,7 @@ arm64_a530_gles2:
     # current upstream kernel.
     BM_CMDLINE: "ip=dhcp console=ttyMSM0,115200n8 nosmp"
     DEQP_EXPECTED_FAILS: deqp-freedreno-a530-fails.txt
-    DEQP_SKIPS: deqp-freedreno-a530-skips.txt
+    DEQP_FLAKES: deqp-freedreno-a530-flakes.txt
     DEQP_EXPECTED_RENDERER: FD530
     NIR_VALIDATE: 0
   tags:
@@ -1249,6 +1332,9 @@ radv-fossils:
     # Navi10 (GFX10)
     - export RADV_FORCE_FAMILY="gfx1010"
     - ./install/fossilize-runner.sh
+    # Sienna Cichlid (GFX10)
+    - export RADV_FORCE_FAMILY="gfx1030"
+    - ./install/fossilize-runner.sh
 
 # Traces CI
 .traces-test:
@@ -1281,6 +1367,7 @@ llvmpipe-traces:
     LIBGL_ALWAYS_SOFTWARE: "true"
     GALLIUM_DRIVER: "llvmpipe"
     DEVICE_NAME: "gl-vmware-llvmpipe"
+    DRIVER_NAME: "llvmpipe"
 
 radv-polaris10-traces:
   extends:
@@ -1289,6 +1376,7 @@ radv-polaris10-traces:
     - .test-manual
   variables:
     DEVICE_NAME: "vk-amd-polaris10"
+    DRIVER_NAME: "radv"
   tags:
     - polaris10
 
@@ -1299,6 +1387,7 @@ radv-raven-traces:
     - .test-manual
   variables:
     DEVICE_NAME: "vk-amd-raven"
+    DRIVER_NAME: "radv"
   tags:
     - raven
 
@@ -1310,5 +1399,6 @@ virgl-traces:
     LIBGL_ALWAYS_SOFTWARE: "true"
     GALLIUM_DRIVER: "virpipe"
     DEVICE_NAME: "gl-virgl"
+    DRIVER_NAME: "virgl"
     MESA_GLES_VERSION_OVERRIDE: "3.1"
     MESA_GLSL_VERSION_OVERRIDE: "310"

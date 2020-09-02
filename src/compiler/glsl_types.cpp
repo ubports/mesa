@@ -917,6 +917,8 @@ glsl_type::get_sampler_instance(enum glsl_sampler_dim dim,
       case GLSL_SAMPLER_DIM_SUBPASS_MS:
          return error_type;
       }
+   case GLSL_TYPE_VOID:
+      return shadow ? samplerShadow_type : sampler_type;
    default:
       return error_type;
    }
@@ -1014,6 +1016,19 @@ glsl_type::get_image_instance(enum glsl_sampler_dim dim,
       case GLSL_SAMPLER_DIM_SUBPASS_MS:
          return usubpassInputMS_type;
       case GLSL_SAMPLER_DIM_EXTERNAL:
+         return error_type;
+      }
+   case GLSL_TYPE_VOID:
+      switch (dim) {
+      case GLSL_SAMPLER_DIM_1D:
+         return (array ? vimage1DArray_type : vimage1D_type);
+      case GLSL_SAMPLER_DIM_2D:
+         return (array ? vimage2DArray_type : vimage2D_type);
+      case GLSL_SAMPLER_DIM_3D:
+         return (array ? error_type : vimage3D_type);
+      case GLSL_SAMPLER_DIM_BUF:
+         return (array ? error_type : vbuffer_type);
+      default:
          return error_type;
       }
    default:
@@ -2437,7 +2452,7 @@ glsl_type::get_explicit_type_for_size_align(glsl_type_size_align_func type_info,
       *size = stride * (this->length - 1) + elem_size;
       *alignment = elem_align;
       return glsl_type::get_array_instance(explicit_element, this->length, stride);
-   } else if (this->is_struct()) {
+   } else if (this->is_struct() || this->is_interface()) {
       struct glsl_struct_field *fields = (struct glsl_struct_field *)
          malloc(sizeof(struct glsl_struct_field) * this->length);
 
@@ -2456,7 +2471,15 @@ glsl_type::get_explicit_type_for_size_align(glsl_type_size_align_func type_info,
          *alignment = MAX2(*alignment, field_align);
       }
 
-      const glsl_type *type = glsl_type::get_struct_instance(fields, this->length, this->name, false);
+      const glsl_type *type;
+      if (this->is_struct()) {
+         type = get_struct_instance(fields, this->length, this->name, false);
+      } else {
+         type = get_interface_instance(fields, this->length,
+                                       (enum glsl_interface_packing)this->interface_packing,
+                                       this->interface_row_major,
+                                       this->name);
+      }
       free(fields);
       return type;
    } else if (this->is_matrix()) {
@@ -2656,8 +2679,8 @@ union packed_type {
       unsigned dimensionality:4;
       unsigned shadow:1;
       unsigned array:1;
-      unsigned sampled_type:2;
-      unsigned _pad:19;
+      unsigned sampled_type:5;
+      unsigned _pad:16;
    } sampler;
    struct {
       unsigned base_type:5;
@@ -2968,6 +2991,20 @@ glsl_get_sampler_dim_coordinate_components(enum glsl_sampler_dim dim)
       return 3;
    default:
       unreachable("Unknown sampler dim");
+   }
+}
+
+void
+glsl_print_type(FILE *f, const glsl_type *t)
+{
+   if (t->is_array()) {
+      fprintf(f, "(array ");
+      glsl_print_type(f, t->fields.array);
+      fprintf(f, " %u)", t->length);
+   } else if (t->is_struct() && !is_gl_identifier(t->name)) {
+      fprintf(f, "%s@%p", t->name, (void *) t);
+   } else {
+      fprintf(f, "%s", t->name);
    }
 }
 

@@ -339,9 +339,12 @@ ntq_emit_tmu_general(struct v3d_compile *c, nir_intrinsic_instr *instr,
                         num_components = tmu_writes - 1;
                 }
 
+                uint32_t perquad = is_load
+                   ? GENERAL_TMU_LOOKUP_PER_QUAD
+                   : GENERAL_TMU_LOOKUP_PER_PIXEL;
                 uint32_t config = (0xffffff00 |
                                    tmu_op << 3|
-                                   GENERAL_TMU_LOOKUP_PER_PIXEL);
+                                   perquad);
                 if (num_components == 1) {
                         config |= GENERAL_TMU_LOOKUP_TYPE_32BIT_UI;
                 } else {
@@ -738,6 +741,19 @@ emit_fragment_input(struct v3d_compile *c, int attr, nir_variable *var,
 }
 
 static void
+emit_compact_fragment_input(struct v3d_compile *c, int attr, nir_variable *var,
+                            int array_index)
+{
+        /* Compact variables are scalar arrays where each set of 4 elements
+         * consumes a single location.
+         */
+        int loc_offset = array_index / 4;
+        int chan = var->data.location_frac + array_index % 4;
+        c->inputs[(attr + loc_offset) * 4  + chan] =
+              emit_fragment_varying(c, var, chan, loc_offset);
+}
+
+static void
 add_output(struct v3d_compile *c,
            uint32_t decl_offset,
            uint8_t slot,
@@ -784,7 +800,7 @@ ntq_emit_comparison(struct v3d_compile *c,
                 vir_set_pf(vir_XOR_dest(c, nop, src0, src1), V3D_QPU_PF_PUSHZ);
                 break;
 
-        case nir_op_fne32:
+        case nir_op_fneu32:
         case nir_op_sne:
                 vir_set_pf(vir_FCMP_dest(c, nop, src0, src1), V3D_QPU_PF_PUSHZ);
                 cond_invert = true;
@@ -1028,7 +1044,7 @@ ntq_emit_alu(struct v3d_compile *c, nir_alu_instr *instr)
         case nir_op_i2b32:
         case nir_op_f2b32:
         case nir_op_feq32:
-        case nir_op_fne32:
+        case nir_op_fneu32:
         case nir_op_fge32:
         case nir_op_flt32:
         case nir_op_ieq32:
@@ -1504,7 +1520,7 @@ ntq_setup_vs_inputs(struct v3d_compile *c)
          * from the start of the attribute to the number of components we
          * declare we need in c->vattr_sizes[].
          */
-        nir_foreach_variable(var, &c->s->inputs) {
+        nir_foreach_shader_in_variable(var, c->s) {
                 /* No VS attribute array support. */
                 assert(MAX2(glsl_get_length(var->type), 1) == 1);
 
@@ -1569,7 +1585,7 @@ ntq_setup_vs_inputs(struct v3d_compile *c)
 static bool
 program_reads_point_coord(struct v3d_compile *c)
 {
-        nir_foreach_variable(var, &c->s->inputs) {
+        nir_foreach_shader_in_variable(var, c->s) {
                 if (util_varying_is_point_coord(var->data.location,
                                                 c->fs_key->point_sprite_mask)) {
                         return true;
@@ -1585,13 +1601,13 @@ get_sorted_input_variables(struct v3d_compile *c,
                            nir_variable ***vars)
 {
         *num_entries = 0;
-        nir_foreach_variable(var, &c->s->inputs)
+        nir_foreach_shader_in_variable(var, c->s)
                 (*num_entries)++;
 
         *vars = ralloc_array(c, nir_variable *, *num_entries);
 
         unsigned i = 0;
-        nir_foreach_variable(var, &c->s->inputs)
+        nir_foreach_shader_in_variable(var, c->s)
                 (*vars)[i++] = var;
 
         /* Sort the variables so that we emit the input setup in
@@ -1658,6 +1674,9 @@ ntq_setup_fs_inputs(struct v3d_compile *c)
                                                        c->fs_key->point_sprite_mask)) {
                         c->inputs[loc * 4 + 0] = c->point_x;
                         c->inputs[loc * 4 + 1] = c->point_y;
+                } else if (var->data.compact) {
+                        for (int j = 0; j < array_len; j++)
+                                emit_compact_fragment_input(c, loc, var, j);
                 } else {
                         for (int j = 0; j < array_len; j++)
                                 emit_fragment_input(c, loc + j, var, j);
@@ -1671,7 +1690,7 @@ ntq_setup_outputs(struct v3d_compile *c)
         if (c->s->info.stage != MESA_SHADER_FRAGMENT)
                 return;
 
-        nir_foreach_variable(var, &c->s->outputs) {
+        nir_foreach_shader_out_variable(var, c->s) {
                 unsigned array_len = MAX2(glsl_get_length(var->type), 1);
                 unsigned loc = var->data.driver_location * 4;
 
@@ -1760,6 +1779,8 @@ ntq_emit_image_size(struct v3d_compile *c, nir_intrinsic_instr *instr)
 {
         unsigned image_index = nir_src_as_uint(instr->src[0]);
         bool is_array = nir_intrinsic_image_array(instr);
+
+        assert(nir_src_as_uint(instr->src[1]) == 0);
 
         ntq_store_dest(c, &instr->dest, 0,
                        vir_uniform(c, QUNIFORM_IMAGE_WIDTH, image_index));
@@ -2376,6 +2397,10 @@ ntq_emit_intrinsic(struct v3d_compile *c, nir_intrinsic_instr *instr)
                                vir_uniform(c, QUNIFORM_FB_LAYERS, 0));
                 break;
 
+        case nir_intrinsic_load_sample_id:
+                ntq_store_dest(c, &instr->dest, 0, vir_SAMPID(c));
+                break;
+
         default:
                 fprintf(stderr, "Unknown intrinsic: ");
                 nir_print_instr(&instr->instr, stderr);
@@ -2571,6 +2596,12 @@ ntq_emit_jump(struct v3d_compile *c, nir_jump_instr *jump)
 
         case nir_jump_return:
                 unreachable("All returns shouold be lowered\n");
+                break;
+
+        case nir_jump_goto:
+        case nir_jump_goto_if:
+                unreachable("not supported\n");
+                break;
         }
 }
 
@@ -3015,10 +3046,15 @@ v3d_nir_to_vir(struct v3d_compile *c)
                         break;
 
                 if (c->threads == min_threads) {
-                        fprintf(stderr, "Failed to register allocate at %d threads:\n",
-                                c->threads);
-                        vir_dump(c);
-                        c->failed = true;
+                        if (c->fallback_scheduler) {
+                                fprintf(stderr,
+                                        "Failed to register allocate at %d "
+                                        "threads:\n",
+                                        c->threads);
+                                vir_dump(c);
+                        }
+                        c->compilation_result =
+                                V3D_COMPILATION_FAILED_REGISTER_ALLOCATION;
                         return;
                 }
 

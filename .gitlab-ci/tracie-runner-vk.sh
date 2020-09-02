@@ -20,9 +20,6 @@ export WINEESYNC=1
 export DXVK_LOG_LEVEL="none"
 export DXVK_STATE_CACHE=0
 
-# For artifact uploads to MinIO
-cp install/.minio_credentials .
-
 # Perform a self-test to ensure tracie is working properly.
 python3 -m pytest -v --pyargs $INSTALL/tracie/tests/test.py
 
@@ -37,4 +34,4 @@ vulkaninfo | grep "Mesa $MESA_VERSION\(\s\|$\)"
 # file:
 # https://docs.gitlab.com/runner/configuration/advanced-configuration.html#the-runners-section
 PATH="/gfxreconstruct/build/bin:$PATH" \
-    python3 "$INSTALL/tracie/tracie.py" --file "$INSTALL/traces.yml" --device-name "$DEVICE_NAME"
+    python3 "$INSTALL/tracie/tracie.py" --file "$INSTALL/traces-$DRIVER_NAME.yml" --device-name "$DEVICE_NAME"

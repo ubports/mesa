@@ -527,6 +527,9 @@ RADV driver environment variables
       validate the LLVM IR before LLVM compiles the shader
    ``errors``
       display more info about errors
+   ``forcecompress``
+      Enables DCC,FMASK,CMASK,HTILE in situations where the driver supports it
+      but normally does not deem it beneficial.
    ``info``
       show GPU-related information
    ``metashaders``
@@ -609,6 +612,14 @@ RADV driver environment variables
       validate register assignment of ACO IR and catches many RA bugs
    ``perfwarn``
       abort on some suboptimal code generation
+   ``force-waitcnt``
+      force emitting waitcnt states if there is something to wait for
+   ``novn``
+      disable value numbering
+   ``noopt``
+      disable various optimizations
+   ``noscheduling``
+      disable instructions scheduling
 
 radeonsi driver environment variables
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

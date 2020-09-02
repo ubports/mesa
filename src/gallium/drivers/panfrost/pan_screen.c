@@ -48,7 +48,7 @@
 #include "pan_resource.h"
 #include "pan_public.h"
 #include "pan_util.h"
-#include "pandecode/decode.h"
+#include "decode.h"
 
 #include "pan_context.h"
 #include "midgard/midgard_compile.h"
@@ -59,7 +59,7 @@ static const struct debug_named_value debug_options[] = {
         {"msgs",      PAN_DBG_MSGS,	"Print debug messages"},
         {"trace",     PAN_DBG_TRACE,    "Trace the command stream"},
         {"deqp",      PAN_DBG_DEQP,     "Hacks for dEQP"},
-        {"afbc",      PAN_DBG_AFBC,     "Enable non-conformant AFBC impl"},
+        {"afbc",      PAN_DBG_AFBC,     "Enable AFBC buffer sharing"},
         {"sync",      PAN_DBG_SYNC,     "Wait for each job's completion and check for any GPU fault"},
         {"precompile", PAN_DBG_PRECOMPILE, "Precompile shaders for shader-db"},
         {"nofp16",     PAN_DBG_NOFP16,     "Disable 16-bit support"},
@@ -134,6 +134,7 @@ panfrost_get_param(struct pipe_screen *screen, enum pipe_cap param)
         case PIPE_CAP_OCCLUSION_QUERY:
         case PIPE_CAP_TGSI_INSTANCEID:
         case PIPE_CAP_TEXTURE_MULTISAMPLE:
+        case PIPE_CAP_SURFACE_SAMPLE_COUNT:
         case PIPE_CAP_PRIMITIVE_RESTART:
         case PIPE_CAP_PRIMITIVE_RESTART_FIXED_INDEX:
                 return !is_bifrost;
@@ -160,6 +161,7 @@ panfrost_get_param(struct pipe_screen *screen, enum pipe_cap param)
         case PIPE_CAP_MAX_STREAM_OUTPUT_SEPARATE_COMPONENTS:
         case PIPE_CAP_MAX_STREAM_OUTPUT_INTERLEAVED_COMPONENTS:
                 return is_bifrost ? 0 : 64;
+        case PIPE_CAP_STREAM_OUTPUT_PAUSE_RESUME:
         case PIPE_CAP_STREAM_OUTPUT_INTERLEAVE_BUFFERS:
                 return is_bifrost ? 0 : 1;
 
@@ -176,8 +178,6 @@ panfrost_get_param(struct pipe_screen *screen, enum pipe_cap param)
                 return 16;
 
         /* For faking GLES 3.1 for dEQP-GLES31 */
-        case PIPE_CAP_MAX_COMBINED_HW_ATOMIC_COUNTERS:
-        case PIPE_CAP_MAX_COMBINED_HW_ATOMIC_COUNTER_BUFFERS:
         case PIPE_CAP_IMAGE_LOAD_FORMATTED:
         case PIPE_CAP_CUBE_MAP_ARRAY:
         case PIPE_CAP_COMPUTE:
@@ -189,6 +189,10 @@ panfrost_get_param(struct pipe_screen *screen, enum pipe_cap param)
         case PIPE_CAP_QUERY_TIMESTAMP:
         case PIPE_CAP_CONDITIONAL_RENDER:
                 return is_gl3;
+
+        /* TODO: Where does this req come from in practice? */
+        case PIPE_CAP_VERTEX_BUFFER_STRIDE_4BYTE_ALIGNED_ONLY:
+                return 1;
 
         case PIPE_CAP_MAX_TEXTURE_2D_SIZE:
                 return 4096;
@@ -227,6 +231,9 @@ panfrost_get_param(struct pipe_screen *screen, enum pipe_cap param)
                 return PIPE_ENDIAN_NATIVE;
 
                 return 1;
+
+        case PIPE_CAP_MAX_TEXTURE_GATHER_COMPONENTS:
+                return is_deqp ? 4 : 0;
 
         case PIPE_CAP_MIN_TEXTURE_GATHER_OFFSET:
                 return -8;
@@ -335,7 +342,7 @@ panfrost_get_shader_param(struct pipe_screen *screen,
                 return 1;
 
         case PIPE_SHADER_CAP_FP16:
-        case PIPE_SHADER_CAP_GLSL_16BIT_TEMPS:
+        case PIPE_SHADER_CAP_GLSL_16BIT_CONSTS:
                 return !is_nofp16;
 
         case PIPE_SHADER_CAP_FP16_DERIVATIVES:
@@ -482,6 +489,48 @@ panfrost_is_format_supported( struct pipe_screen *screen,
                 return false;
 
         return fmt.hw && ((relevant_bind & ~fmt.bind) == 0);
+}
+
+/* We always support linear and tiled operations, both external and internal.
+ * We support AFBC for a subset of formats, and colourspace transform for a
+ * subset of those. */
+
+static void
+panfrost_query_dmabuf_modifiers(struct pipe_screen *screen,
+                enum pipe_format format, int max, uint64_t *modifiers, unsigned
+                int *external_only, int *out_count)
+{
+        /* Query AFBC status */
+        bool afbc = panfrost_format_supports_afbc(format);
+        bool ytr = panfrost_afbc_can_ytr(format);
+
+        /* Don't advertise AFBC before T760 */
+        struct panfrost_device *dev = pan_device(screen);
+        afbc &= !(dev->quirks & MIDGARD_NO_AFBC);
+
+        /* XXX: AFBC scanout is broken on mainline RK3399 with older kernels */
+        afbc &= (dev->debug & PAN_DBG_AFBC);
+
+        unsigned count = 0;
+
+        for (unsigned i = 0; i < PAN_MODIFIER_COUNT; ++i) {
+                if (drm_is_afbc(pan_best_modifiers[i]) && !afbc)
+                        continue;
+
+                if ((pan_best_modifiers[i] & AFBC_FORMAT_MOD_YTR) && !ytr)
+                        continue;
+
+                count++;
+
+                if (max > (int) count) {
+                        modifiers[count] = pan_best_modifiers[i];
+
+                        if (external_only)
+                                external_only[count] = false;
+                }
+        }
+
+        *out_count = count;
 }
 
 static int
@@ -694,6 +743,7 @@ panfrost_create_screen(int fd, struct renderonly *ro)
         screen->base.get_paramf = panfrost_get_paramf;
         screen->base.get_timestamp = panfrost_get_timestamp;
         screen->base.is_format_supported = panfrost_is_format_supported;
+        screen->base.query_dmabuf_modifiers = panfrost_query_dmabuf_modifiers;
         screen->base.context_create = panfrost_create_context;
         screen->base.get_compiler_options = panfrost_screen_get_compiler_options;
         screen->base.fence_reference = panfrost_fence_reference;

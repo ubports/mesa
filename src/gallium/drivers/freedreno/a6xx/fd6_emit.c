@@ -34,6 +34,7 @@
 
 #include "freedreno_log.h"
 #include "freedreno_resource.h"
+#include "freedreno_state.h"
 #include "freedreno_query_hw.h"
 #include "common/freedreno_guardband.h"
 
@@ -346,7 +347,7 @@ fd6_emit_textures(struct fd_pipe *pipe, struct fd_ringbuffer *ring,
 			OUT_RING(state, sampler->texsamp0);
 			OUT_RING(state, sampler->texsamp1);
 			OUT_RING(state, sampler->texsamp2 |
-				A6XX_TEX_SAMP_2_BCOLOR_OFFSET((i + bcolor_offset) * sizeof(struct bcolor_entry)));
+				A6XX_TEX_SAMP_2_BCOLOR(i + bcolor_offset));
 			OUT_RING(state, sampler->texsamp3);
 			needs_border |= sampler->needs_border;
 		}
@@ -823,13 +824,13 @@ fd6_emit_state(struct fd_ringbuffer *ring, struct fd6_emit *emit)
 		fd6_emit_take_group(emit, state, FD6_GROUP_VBO, ENABLE_ALL);
 	}
 
-	if (dirty & FD_DIRTY_ZSA) {
-		struct fd6_zsa_stateobj *zsa = fd6_zsa_stateobj(ctx->zsa);
+	if (dirty & (FD_DIRTY_ZSA | FD_DIRTY_RASTERIZER)) {
+		struct fd_ringbuffer *state =
+			fd6_zsa_state(ctx,
+					util_format_is_pure_integer(pipe_surface_format(pfb->cbufs[0])),
+					fd_depth_clamp_enabled(ctx));
 
-		if (util_format_is_pure_integer(pipe_surface_format(pfb->cbufs[0])))
-			fd6_emit_add_group(emit, zsa->stateobj_no_alpha, FD6_GROUP_ZSA, ENABLE_ALL);
-		else
-			fd6_emit_add_group(emit, zsa->stateobj, FD6_GROUP_ZSA, ENABLE_ALL);
+		fd6_emit_add_group(emit, state, FD6_GROUP_ZSA, ENABLE_ALL);
 	}
 
 	if (dirty & (FD_DIRTY_ZSA | FD_DIRTY_BLEND | FD_DIRTY_PROG)) {
@@ -917,6 +918,24 @@ fd6_emit_state(struct fd_ringbuffer *ring, struct fd6_emit *emit)
 					.vert = guardband_y
 				)
 			);
+	}
+
+	/* The clamp ranges are only used when the rasterizer wants depth
+	 * clamping.
+	 */
+	if ((dirty & (FD_DIRTY_VIEWPORT | FD_DIRTY_RASTERIZER)) &&
+			fd_depth_clamp_enabled(ctx)) {
+		float zmin, zmax;
+		util_viewport_zmin_zmax(&ctx->viewport, ctx->rasterizer->clip_halfz,
+				&zmin, &zmax);
+
+		OUT_REG(ring,
+				A6XX_GRAS_CL_Z_CLAMP_MIN(0, zmin),
+				A6XX_GRAS_CL_Z_CLAMP_MAX(0, zmax));
+
+		OUT_REG(ring,
+				A6XX_RB_Z_CLAMP_MIN(zmin),
+				A6XX_RB_Z_CLAMP_MAX(zmax));
 	}
 
 	if (dirty & FD_DIRTY_PROG) {
@@ -1174,7 +1193,7 @@ fd6_emit_restore(struct fd_batch *batch, struct fd_ringbuffer *ring)
 	WRITE(REG_A6XX_UCHE_UNKNOWN_0E12, 0x3200000);
 	WRITE(REG_A6XX_UCHE_CLIENT_PF, 4);
 	WRITE(REG_A6XX_RB_UNKNOWN_8E01, 0x1);
-	WRITE(REG_A6XX_SP_UNKNOWN_AB00, 0x5);
+	WRITE(REG_A6XX_SP_MODE_CONTROL, A6XX_SP_MODE_CONTROL_CONSTANT_DEMOTION_ENABLE | 4);
 	WRITE(REG_A6XX_VFD_ADD_OFFSET, A6XX_VFD_ADD_OFFSET_VERTEX);
 	WRITE(REG_A6XX_RB_UNKNOWN_8811, 0x00000010);
 	WRITE(REG_A6XX_PC_MODE_CNTL, 0x1f);
@@ -1200,7 +1219,7 @@ fd6_emit_restore(struct fd_batch *batch, struct fd_ringbuffer *ring)
 
 	WRITE(REG_A6XX_PC_UNKNOWN_9980, 0);
 
-	WRITE(REG_A6XX_PC_UNKNOWN_9B07, 0);
+	WRITE(REG_A6XX_PC_MULTIVIEW_CNTL, 0);
 
 	WRITE(REG_A6XX_SP_UNKNOWN_A81B, 0);
 
@@ -1230,7 +1249,7 @@ fd6_emit_restore(struct fd_batch *batch, struct fd_ringbuffer *ring)
 	OUT_PKT4(ring, REG_A6XX_VFD_MODE_CNTL, 1);
 	OUT_RING(ring, 0x00000000);   /* VFD_MODE_CNTL */
 
-	WRITE(REG_A6XX_VFD_UNKNOWN_A008, 0);
+	WRITE(REG_A6XX_VFD_MULTIVIEW_CNTL, 0);
 
 	OUT_PKT4(ring, REG_A6XX_PC_MODE_CNTL, 1);
 	OUT_RING(ring, 0x0000001f);   /* PC_MODE_CNTL */

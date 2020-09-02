@@ -509,7 +509,8 @@ validate_deref_instr(nir_deref_instr *instr, validate_state *state)
          validate_assert(state, instr->mode == nir_var_mem_ubo ||
                                 instr->mode == nir_var_mem_ssbo ||
                                 instr->mode == nir_var_mem_shared ||
-                                instr->mode == nir_var_mem_global);
+                                instr->mode == nir_var_mem_global ||
+                                instr->mode == nir_var_mem_constant);
       }
    }
 }
@@ -585,10 +586,19 @@ validate_intrinsic_instr(nir_intrinsic_instr *instr, validate_state *state)
       break;
    }
 
+   case nir_intrinsic_load_ubo_vec4: {
+      int bit_size = nir_dest_bit_size(instr->dest);
+      validate_assert(state, bit_size >= 8);
+      validate_assert(state, (nir_intrinsic_component(instr) +
+                              instr->num_components) * (bit_size / 8) <= 16);
+      break;
+   }
+
    case nir_intrinsic_load_ubo:
    case nir_intrinsic_load_ssbo:
    case nir_intrinsic_load_shared:
    case nir_intrinsic_load_global:
+   case nir_intrinsic_load_global_constant:
    case nir_intrinsic_load_scratch:
    case nir_intrinsic_load_constant:
       /* These memory load operations must have alignments */
@@ -777,9 +787,12 @@ validate_jump_instr(nir_jump_instr *instr, validate_state *state)
    case nir_jump_return:
       validate_assert(state, block->successors[0] == state->impl->end_block);
       validate_assert(state, block->successors[1] == NULL);
+      validate_assert(state, instr->target == NULL);
+      validate_assert(state, instr->else_target == NULL);
       break;
 
    case nir_jump_break:
+      validate_assert(state, state->impl->structured);
       validate_assert(state, state->loop != NULL);
       if (state->loop) {
          nir_block *after =
@@ -787,15 +800,36 @@ validate_jump_instr(nir_jump_instr *instr, validate_state *state)
          validate_assert(state, block->successors[0] == after);
       }
       validate_assert(state, block->successors[1] == NULL);
+      validate_assert(state, instr->target == NULL);
+      validate_assert(state, instr->else_target == NULL);
       break;
 
    case nir_jump_continue:
+      validate_assert(state, state->impl->structured);
       validate_assert(state, state->loop != NULL);
       if (state->loop) {
          nir_block *first = nir_loop_first_block(state->loop);
          validate_assert(state, block->successors[0] == first);
       }
       validate_assert(state, block->successors[1] == NULL);
+      validate_assert(state, instr->target == NULL);
+      validate_assert(state, instr->else_target == NULL);
+      break;
+
+   case nir_jump_goto:
+      validate_assert(state, !state->impl->structured);
+      validate_assert(state, instr->target == block->successors[0]);
+      validate_assert(state, instr->target != NULL);
+      validate_assert(state, instr->else_target == NULL);
+      break;
+
+   case nir_jump_goto_if:
+      validate_assert(state, !state->impl->structured);
+      validate_assert(state, instr->target == block->successors[1]);
+      validate_assert(state, instr->else_target == block->successors[0]);
+      validate_src(&instr->condition, state, 0, 1);
+      validate_assert(state, instr->target != NULL);
+      validate_assert(state, instr->else_target != NULL);
       break;
 
    default:
@@ -926,7 +960,9 @@ validate_block(nir_block *block, validate_state *state)
              pred->successors[1] == block);
    }
 
-   if (!nir_block_ends_in_jump(block)) {
+   if (!state->impl->structured) {
+      validate_assert(state, nir_block_ends_in_jump(block));
+   } else if (!nir_block_ends_in_jump(block)) {
       nir_cf_node *next = nir_cf_node_next(&block->cf_node);
       if (next == NULL) {
          switch (state->parent_node->type) {
@@ -962,12 +998,14 @@ validate_block(nir_block *block, validate_state *state)
                    nir_if_first_then_block(if_stmt));
             validate_assert(state, block->successors[1] ==
                    nir_if_first_else_block(if_stmt));
-         } else {
-            validate_assert(state, next->type == nir_cf_node_loop);
+         } else if (next->type == nir_cf_node_loop) {
             nir_loop *loop = nir_cf_node_as_loop(next);
             validate_assert(state, block->successors[0] ==
                    nir_loop_first_block(loop));
             validate_assert(state, block->successors[1] == NULL);
+         } else {
+            validate_assert(state,
+               !"Structured NIR cannot have consecutive blocks");
          }
       }
    }
@@ -976,6 +1014,8 @@ validate_block(nir_block *block, validate_state *state)
 static void
 validate_if(nir_if *if_stmt, validate_state *state)
 {
+   validate_assert(state, state->impl->structured);
+
    state->if_stmt = if_stmt;
 
    validate_assert(state, !exec_node_is_head_sentinel(if_stmt->cf_node.node.prev));
@@ -1011,6 +1051,8 @@ validate_if(nir_if *if_stmt, validate_state *state)
 static void
 validate_loop(nir_loop *loop, validate_state *state)
 {
+   validate_assert(state, state->impl->structured);
+
    validate_assert(state, !exec_node_is_head_sentinel(loop->cf_node.node.prev));
    nir_cf_node *prev_node = nir_cf_node_prev(&loop->cf_node);
    validate_assert(state, prev_node->type == nir_cf_node_block);
@@ -1178,7 +1220,7 @@ validate_function_impl(nir_function_impl *impl, validate_state *state)
    state->parent_node = &impl->cf_node;
 
    exec_list_validate(&impl->locals);
-   nir_foreach_variable(var, &impl->locals) {
+   nir_foreach_function_temp_variable(var, impl) {
       validate_var_decl(var, nir_var_function_temp, state);
    }
 
@@ -1288,38 +1330,20 @@ nir_validate_shader(nir_shader *shader, const char *when)
 
    state.shader = shader;
 
-   exec_list_validate(&shader->uniforms);
-   nir_foreach_variable(var, &shader->uniforms) {
-      validate_var_decl(var, nir_var_uniform |
-                             nir_var_mem_ubo |
-                             nir_var_mem_ssbo,
-                        &state);
-   }
+   nir_variable_mode valid_modes =
+      nir_var_shader_in |
+      nir_var_shader_out |
+      nir_var_shader_temp |
+      nir_var_uniform |
+      nir_var_mem_ubo |
+      nir_var_system_value |
+      nir_var_mem_ssbo |
+      nir_var_mem_shared |
+      nir_var_mem_constant;
 
-   exec_list_validate(&shader->inputs);
-   nir_foreach_variable(var, &shader->inputs) {
-     validate_var_decl(var, nir_var_shader_in, &state);
-   }
-
-   exec_list_validate(&shader->outputs);
-   nir_foreach_variable(var, &shader->outputs) {
-     validate_var_decl(var, nir_var_shader_out, &state);
-   }
-
-   exec_list_validate(&shader->shared);
-   nir_foreach_variable(var, &shader->shared) {
-      validate_var_decl(var, nir_var_mem_shared, &state);
-   }
-
-   exec_list_validate(&shader->globals);
-   nir_foreach_variable(var, &shader->globals) {
-     validate_var_decl(var, nir_var_shader_temp, &state);
-   }
-
-   exec_list_validate(&shader->system_values);
-   nir_foreach_variable(var, &shader->system_values) {
-     validate_var_decl(var, nir_var_system_value, &state);
-   }
+   exec_list_validate(&shader->variables);
+   nir_foreach_variable_in_shader(var, shader)
+     validate_var_decl(var, valid_modes, &state);
 
    exec_list_validate(&shader->functions);
    foreach_list_typed(nir_function, func, node, &shader->functions) {

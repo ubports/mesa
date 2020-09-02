@@ -318,6 +318,9 @@ void print_regs(ra_ctx& ctx, bool vgprs, RegisterFile& reg_file)
 
 unsigned get_subdword_operand_stride(chip_class chip, const aco_ptr<Instruction>& instr, unsigned idx, RegClass rc)
 {
+   /* v_readfirstlane_b32 cannot use SDWA */
+   if (instr->opcode == aco_opcode::p_as_uniform)
+      return 4;
    if (instr->format == Format::PSEUDO && chip >= GFX8)
       return rc.bytes() % 2 == 0 ? 2 : 1;
 
@@ -591,7 +594,7 @@ std::pair<PhysReg, bool> get_reg_simple(ra_ctx& ctx,
    RegClass rc = info.rc;
 
    if (stride == 1) {
-
+      info.rc = RegClass(rc.type(), size);
       for (unsigned stride = 8; stride > 1; stride /= 2) {
          if (size % stride)
             continue;
@@ -1256,7 +1259,7 @@ PhysReg get_reg(ra_ctx& ctx,
 
    //FIXME: if nothing helps, shift-rotate the registers to make space
 
-   fprintf(stderr, "ACO: failed to allocate registers during shader compilation\n");
+   aco_err(ctx.program, "Failed to allocate registers during shader compilation.");
    abort();
 }
 

@@ -255,6 +255,7 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_load_ssbo:
    case nir_intrinsic_load_shared:
    case nir_intrinsic_load_global:
+   case nir_intrinsic_load_global_constant:
    case nir_intrinsic_load_uniform:
    case nir_intrinsic_load_push_constant:
    case nir_intrinsic_load_constant:
@@ -593,6 +594,11 @@ visit_jump(nir_jump_instr *jump, struct divergence_state *state)
       return state->divergent_loop_break;
    case nir_jump_return:
       unreachable("NIR divergence analysis: Unsupported return instruction.");
+      break;
+   case nir_jump_goto:
+   case nir_jump_goto_if:
+      unreachable("NIR divergence analysis: Unsupported goto_if instruction.");
+      break;
    }
    return false;
 }

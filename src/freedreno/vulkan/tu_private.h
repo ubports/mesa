@@ -53,7 +53,6 @@
 #include "vk_debug_report.h"
 #include "wsi_common.h"
 
-#include "drm-uapi/msm_drm.h"
 #include "ir3/ir3_compiler.h"
 #include "ir3/ir3_shader.h"
 
@@ -96,7 +95,7 @@ typedef uint32_t xcb_window_t;
 #define MAX_DYNAMIC_BUFFERS                                                  \
    (MAX_DYNAMIC_UNIFORM_BUFFERS + MAX_DYNAMIC_STORAGE_BUFFERS)
 #define TU_MAX_DRM_DEVICES 8
-#define MAX_VIEWS 8
+#define MAX_VIEWS 16
 #define MAX_BIND_POINTS 2 /* compute + graphics */
 /* The Qualcomm driver exposes 0x20000058 */
 #define MAX_STORAGE_BUFFER_RANGE 0x20000000
@@ -112,24 +111,9 @@ typedef uint32_t xcb_window_t;
 
 #define tu_printflike(a, b) __attribute__((__format__(__printf__, a, b)))
 
-static inline uint32_t
-tu_minify(uint32_t n, uint32_t levels)
-{
-   if (unlikely(n == 0))
-      return 0;
-   else
-      return MAX2(n >> levels, 1);
-}
-
 #define for_each_bit(b, dword)                                               \
    for (uint32_t __dword = (dword);                                          \
         (b) = __builtin_ffs(__dword) - 1, __dword; __dword &= ~(1 << (b)))
-
-#define typed_memcpy(dest, src, count)                                       \
-   ({                                                                        \
-      STATIC_ASSERT(sizeof(*src) == sizeof(*dest));                          \
-      memcpy((dest), (src), (count) * sizeof(*(src)));                       \
-   })
 
 #define COND(bool, val) ((bool) ? (val) : 0)
 #define BIT(bit) (1u << (bit))
@@ -216,6 +200,7 @@ struct tu_physical_device
    /* gmem store/load granularity */
 #define GMEM_ALIGN_W 16
 #define GMEM_ALIGN_H 4
+   bool supports_multiview_mask;
 
    struct {
       uint32_t PC_UNKNOWN_9805;
@@ -224,6 +209,8 @@ struct tu_physical_device
 
    int msm_major_version;
    int msm_minor_version;
+
+   bool limited_z24s8;
 
    /* This is the drivers on-disk cache used as a fallback as opposed to
     * the pipeline cache defined by apps.
@@ -352,12 +339,12 @@ enum global_shader {
    GLOBAL_SH_COUNT,
 };
 
+#define TU_BORDER_COLOR_COUNT 4096
+#define TU_BORDER_COLOR_BUILTIN 6
+
 /* This struct defines the layout of the global_bo */
 struct tu6_global
 {
-   /* 6 bcolor_entry entries, one for each VK_BORDER_COLOR */
-   uint8_t border_color[128 * 6];
-
    /* clear/blit shaders, all <= 16 instrs (16 instr = 1 instrlen unit) */
    instr_t shaders[GLOBAL_SH_COUNT][16];
 
@@ -366,13 +353,17 @@ struct tu6_global
    volatile uint32_t vsc_draw_overflow;
    uint32_t _pad1;
    volatile uint32_t vsc_prim_overflow;
-   uint32_t _pad2[3];
+   uint32_t _pad2;
+   uint64_t predicate;
 
    /* scratch space for VPC_SO[i].FLUSH_BASE_LO/HI, start on 32 byte boundary. */
    struct {
       uint32_t offset;
       uint32_t pad[7];
    } flush_base[4];
+
+   /* note: larger global bo will be used for customBorderColors */
+   struct bcolor_entry bcolor_builtin[TU_BORDER_COLOR_BUILTIN], bcolor[];
 };
 #define gb_offset(member) offsetof(struct tu6_global, member)
 #define global_iova(cmd, member) ((cmd)->device->global_bo.iova + gb_offset(member))
@@ -415,7 +406,8 @@ struct tu_device
 
    uint32_t vsc_draw_strm_pitch;
    uint32_t vsc_prim_strm_pitch;
-   mtx_t vsc_pitch_mtx;
+   BITSET_DECLARE(custom_border_color, TU_BORDER_COLOR_COUNT);
+   mtx_t mutex;
 };
 
 VkResult _tu_device_set_lost(struct tu_device *device,
@@ -752,13 +744,34 @@ enum tu_cmd_access_mask {
    TU_ACCESS_CCU_DEPTH_INCOHERENT_READ = 1 << 8,
    TU_ACCESS_CCU_DEPTH_INCOHERENT_WRITE = 1 << 9,
 
-   TU_ACCESS_SYSMEM_READ = 1 << 10,
-   TU_ACCESS_SYSMEM_WRITE = 1 << 11,
+   /* Accesses by the host */
+   TU_ACCESS_HOST_READ = 1 << 10,
+   TU_ACCESS_HOST_WRITE = 1 << 11,
 
-   /* Set if a WFI is required due to data being read by the CP or the 2D
-    * engine.
+   /* Accesses by a GPU engine which bypasses any cache. e.g. writes via
+    * CP_EVENT_WRITE::BLIT and the CP are SYSMEM_WRITE.
     */
-   TU_ACCESS_WFI_READ = 1 << 12,
+   TU_ACCESS_SYSMEM_READ = 1 << 12,
+   TU_ACCESS_SYSMEM_WRITE = 1 << 13,
+
+   /* Set if a WFI is required. This can be required for:
+    * - 2D engine which (on some models) doesn't wait for flushes to complete
+    *   before starting
+    * - CP draw indirect opcodes, where we need to wait for any flushes to
+    *   complete but the CP implicitly waits for WFI's to complete and
+    *   therefore we only need a WFI after the flushes.
+    */
+   TU_ACCESS_WFI_READ = 1 << 14,
+
+   /* Set if a CP_WAIT_FOR_ME is required due to the data being read by the CP
+    * without it waiting for any WFI.
+    */
+   TU_ACCESS_WFM_READ = 1 << 15,
+
+   /* Memory writes from the CP start in-order with draws and event writes,
+    * but execute asynchronously and hence need a CP_WAIT_MEM_WRITES if read.
+    */
+   TU_ACCESS_CP_WRITE = 1 << 16,
 
    TU_ACCESS_READ =
       TU_ACCESS_UCHE_READ |
@@ -766,7 +779,10 @@ enum tu_cmd_access_mask {
       TU_ACCESS_CCU_DEPTH_READ |
       TU_ACCESS_CCU_COLOR_INCOHERENT_READ |
       TU_ACCESS_CCU_DEPTH_INCOHERENT_READ |
-      TU_ACCESS_SYSMEM_READ,
+      TU_ACCESS_HOST_READ |
+      TU_ACCESS_SYSMEM_READ |
+      TU_ACCESS_WFI_READ |
+      TU_ACCESS_WFM_READ,
 
    TU_ACCESS_WRITE =
       TU_ACCESS_UCHE_WRITE |
@@ -774,7 +790,9 @@ enum tu_cmd_access_mask {
       TU_ACCESS_CCU_COLOR_INCOHERENT_WRITE |
       TU_ACCESS_CCU_DEPTH_WRITE |
       TU_ACCESS_CCU_DEPTH_INCOHERENT_WRITE |
-      TU_ACCESS_SYSMEM_WRITE,
+      TU_ACCESS_HOST_WRITE |
+      TU_ACCESS_SYSMEM_WRITE |
+      TU_ACCESS_CP_WRITE,
 
    TU_ACCESS_ALL =
       TU_ACCESS_READ |
@@ -788,18 +806,31 @@ enum tu_cmd_flush_bits {
    TU_CMD_FLAG_CCU_INVALIDATE_COLOR = 1 << 3,
    TU_CMD_FLAG_CACHE_FLUSH = 1 << 4,
    TU_CMD_FLAG_CACHE_INVALIDATE = 1 << 5,
+   TU_CMD_FLAG_WAIT_MEM_WRITES = 1 << 6,
+   TU_CMD_FLAG_WAIT_FOR_IDLE = 1 << 7,
+   TU_CMD_FLAG_WAIT_FOR_ME = 1 << 8,
 
    TU_CMD_FLAG_ALL_FLUSH =
       TU_CMD_FLAG_CCU_FLUSH_DEPTH |
       TU_CMD_FLAG_CCU_FLUSH_COLOR |
-      TU_CMD_FLAG_CACHE_FLUSH,
+      TU_CMD_FLAG_CACHE_FLUSH |
+      /* Treat the CP as a sort of "cache" which may need to be "flushed" via
+       * waiting for writes to land with WAIT_FOR_MEM_WRITES.
+       */
+      TU_CMD_FLAG_WAIT_MEM_WRITES,
 
-   TU_CMD_FLAG_ALL_INVALIDATE =
+   TU_CMD_FLAG_GPU_INVALIDATE =
       TU_CMD_FLAG_CCU_INVALIDATE_DEPTH |
       TU_CMD_FLAG_CCU_INVALIDATE_COLOR |
       TU_CMD_FLAG_CACHE_INVALIDATE,
 
-   TU_CMD_FLAG_WFI = 1 << 6,
+   TU_CMD_FLAG_ALL_INVALIDATE =
+      TU_CMD_FLAG_GPU_INVALIDATE |
+      /* Treat the CP as a sort of "cache" which may need to be "invalidated"
+       * via waiting for UCHE/CCU flushes to land with WFI/WFM.
+       */
+      TU_CMD_FLAG_WAIT_FOR_IDLE |
+      TU_CMD_FLAG_WAIT_FOR_ME,
 };
 
 /* Changing the CCU from sysmem mode to gmem mode or vice-versa is pretty
@@ -881,6 +912,9 @@ struct tu_cmd_state
    struct tu_cs_entry tile_store_ib;
 
    bool xfb_used;
+   bool has_tess;
+   bool has_subpass_predication;
+   bool predication_active;
 };
 
 struct tu_cmd_pool
@@ -909,6 +943,18 @@ enum tu_cmd_buffer_status
    TU_CMD_BUFFER_STATUS_EXECUTABLE,
    TU_CMD_BUFFER_STATUS_PENDING,
 };
+
+#ifndef MSM_SUBMIT_BO_READ
+#define MSM_SUBMIT_BO_READ             0x0001
+#define MSM_SUBMIT_BO_WRITE            0x0002
+#define MSM_SUBMIT_BO_DUMP             0x0004
+
+struct drm_msm_gem_submit_bo {
+   uint32_t flags;          /* in, mask of MSM_SUBMIT_BO_x */
+   uint32_t handle;         /* in, GEM handle */
+   uint64_t presumed;       /* in/out, presumed buffer address */
+};
+#endif
 
 struct tu_bo_list
 {
@@ -965,8 +1011,6 @@ struct tu_cmd_buffer
    struct tu_cs draw_cs;
    struct tu_cs draw_epilogue_cs;
    struct tu_cs sub_cs;
-
-   bool has_tess;
 
    uint32_t vsc_draw_strm_pitch;
    uint32_t vsc_prim_strm_pitch;
@@ -1035,10 +1079,14 @@ struct tu_shader
    uint8_t active_desc_sets;
 };
 
+bool
+tu_nir_lower_multiview(nir_shader *nir, uint32_t mask, struct tu_device *dev);
+
 struct tu_shader *
 tu_shader_create(struct tu_device *dev,
                  gl_shader_stage stage,
                  const VkPipelineShaderStageCreateInfo *stage_info,
+                 unsigned multiview_mask,
                  struct tu_pipeline_layout *layout,
                  const VkAllocationCallbacks *alloc);
 
@@ -1149,7 +1197,9 @@ tu6_emit_vpc(struct tu_cs *cs,
              const struct ir3_shader_variant *hs,
              const struct ir3_shader_variant *ds,
              const struct ir3_shader_variant *gs,
-             const struct ir3_shader_variant *fs);
+             const struct ir3_shader_variant *fs,
+             uint32_t patch_control_points,
+             bool vshs_workgroup);
 
 void
 tu6_emit_fs_inputs(struct tu_cs *cs, const struct ir3_shader_variant *fs);
@@ -1161,6 +1211,7 @@ tu_resolve_sysmem(struct tu_cmd_buffer *cmd,
                   struct tu_cs *cs,
                   struct tu_image_view *src,
                   struct tu_image_view *dst,
+                  uint32_t layer_mask,
                   uint32_t layers,
                   const VkRect2D *rect);
 
@@ -1306,6 +1357,11 @@ struct tu_image_view
    uint32_t RB_2D_DST_INFO;
 
    uint32_t RB_BLIT_DST_INFO;
+
+   /* for d32s8 separate stencil */
+   uint64_t stencil_base_addr;
+   uint32_t stencil_layer_size;
+   uint32_t stencil_PITCH;
 };
 
 struct tu_sampler_ycbcr_conversion {
@@ -1335,6 +1391,12 @@ tu_cs_image_ref_2d(struct tu_cs *cs, const struct tu_image_view *iview, uint32_t
 void
 tu_cs_image_flag_ref(struct tu_cs *cs, const struct tu_image_view *iview, uint32_t layer);
 
+void
+tu_cs_image_stencil_ref(struct tu_cs *cs, const struct tu_image_view *iview, uint32_t layer);
+
+#define tu_image_view_stencil(iview, x) \
+   ((iview->x & ~A6XX_##x##_COLOR_FORMAT__MASK) | A6XX_##x##_COLOR_FORMAT(FMT6_8_UINT))
+
 VkResult
 tu_image_create(VkDevice _device,
                 const VkImageCreateInfo *pCreateInfo,
@@ -1351,8 +1413,9 @@ tu_image_from_gralloc(VkDevice device_h,
                       VkImage *out_image_h);
 
 void
-tu_image_view_init(struct tu_image_view *view,
-                   const VkImageViewCreateInfo *pCreateInfo);
+tu_image_view_init(struct tu_image_view *iview,
+                   const VkImageViewCreateInfo *pCreateInfo,
+                   bool limited_z24s8);
 
 struct tu_buffer_view
 {
@@ -1427,6 +1490,7 @@ struct tu_subpass
    VkSampleCountFlagBits samples;
 
    uint32_t srgb_cntl;
+   uint32_t multiview_mask;
 
    struct tu_subpass_barrier start_barrier;
 };
@@ -1437,9 +1501,14 @@ struct tu_render_pass_attachment
    uint32_t samples;
    uint32_t cpp;
    VkImageAspectFlags clear_mask;
+   uint32_t clear_views;
    bool load;
    bool store;
    int32_t gmem_offset;
+   /* for D32S8 separate stencil: */
+   bool load_stencil;
+   bool store_stencil;
+   int32_t gmem_offset_stencil;
 };
 
 struct tu_render_pass
@@ -1512,14 +1581,11 @@ tu_update_descriptor_set_with_template(
    VkDescriptorUpdateTemplate descriptorUpdateTemplate,
    const void *pData);
 
-int
-tu_drm_get_gpu_id(const struct tu_physical_device *dev, uint32_t *id);
-
-int
-tu_drm_get_gmem_size(const struct tu_physical_device *dev, uint32_t *size);
-
-int
-tu_drm_get_gmem_base(const struct tu_physical_device *dev, uint64_t *base);
+VkResult
+tu_physical_device_init(struct tu_physical_device *device,
+                        struct tu_instance *instance);
+VkResult
+tu_enumerate_devices(struct tu_instance *instance);
 
 int
 tu_drm_submitqueue_new(const struct tu_device *dev,
@@ -1528,21 +1594,6 @@ tu_drm_submitqueue_new(const struct tu_device *dev,
 
 void
 tu_drm_submitqueue_close(const struct tu_device *dev, uint32_t queue_id);
-
-uint32_t
-tu_gem_new(const struct tu_device *dev, uint64_t size, uint32_t flags);
-uint32_t
-tu_gem_import_dmabuf(const struct tu_device *dev,
-                     int prime_fd,
-                     uint64_t size);
-int
-tu_gem_export_dmabuf(const struct tu_device *dev, uint32_t gem_handle);
-void
-tu_gem_close(const struct tu_device *dev, uint32_t gem_handle);
-uint64_t
-tu_gem_info_offset(const struct tu_device *dev, uint32_t gem_handle);
-uint64_t
-tu_gem_info_iova(const struct tu_device *dev, uint32_t gem_handle);
 
 #define TU_DEFINE_HANDLE_CASTS(__tu_type, __VkType)                          \
                                                                              \

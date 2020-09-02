@@ -297,6 +297,14 @@ static void
 gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader,
                       void *dead_ctx)
 {
+   unsigned slot_mask = 0;
+
+   if (nir_intrinsic_infos[instr->intrinsic].index_map[NIR_INTRINSIC_IO_SEMANTICS] > 0) {
+      nir_io_semantics semantics = nir_intrinsic_io_semantics(instr);
+
+      slot_mask = BITFIELD64_RANGE(semantics.location, semantics.num_slots);
+   }
+
    switch (instr->intrinsic) {
    case nir_intrinsic_demote:
    case nir_intrinsic_demote_if:
@@ -345,6 +353,41 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader,
       break;
    }
 
+   case nir_intrinsic_load_input:
+      if (shader->info.stage == MESA_SHADER_TESS_EVAL)
+         shader->info.patch_inputs_read |= slot_mask;
+      else
+         shader->info.inputs_read |= slot_mask;
+      break;
+
+   case nir_intrinsic_load_per_vertex_input:
+   case nir_intrinsic_load_input_vertex:
+   case nir_intrinsic_load_interpolated_input:
+      shader->info.inputs_read |= slot_mask;
+      break;
+
+   case nir_intrinsic_load_output:
+      if (shader->info.stage == MESA_SHADER_TESS_CTRL)
+         shader->info.patch_outputs_read |= slot_mask;
+      else
+         shader->info.outputs_read |= slot_mask;
+      break;
+
+   case nir_intrinsic_load_per_vertex_output:
+      shader->info.outputs_read |= slot_mask;
+      break;
+
+   case nir_intrinsic_store_output:
+      if (shader->info.stage == MESA_SHADER_TESS_CTRL)
+         shader->info.patch_outputs_written |= slot_mask;
+      else
+         shader->info.outputs_written |= slot_mask;
+      break;
+
+   case nir_intrinsic_store_per_vertex_output:
+      shader->info.outputs_written |= slot_mask;
+      break;
+
    case nir_intrinsic_load_draw_id:
    case nir_intrinsic_load_frag_coord:
    case nir_intrinsic_load_point_coord:
@@ -390,8 +433,7 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader,
 
    case nir_intrinsic_emit_vertex:
    case nir_intrinsic_emit_vertex_with_counter:
-      if (nir_intrinsic_stream_id(instr) > 0)
-         shader->info.gs.uses_streams = true;
+      shader->info.gs.active_stream_mask |= 1 << nir_intrinsic_stream_id(instr);
 
       break;
 
@@ -601,7 +643,7 @@ nir_shader_gather_info(nir_shader *shader, nir_function_impl *entrypoint)
    shader->info.image_buffers = 0;
    shader->info.msaa_images = 0;
 
-   nir_foreach_variable(var, &shader->uniforms) {
+   nir_foreach_uniform_variable(var, shader) {
       /* Bindless textures and images don't use non-bindless slots.
        * Interface blocks imply inputs, outputs, UBO, or SSBO, which can only
        * mean bindless.

@@ -574,7 +574,7 @@ create_entry(struct vectorize_ctx *ctx,
       nir_ssa_def *base = entry->info->base_src >= 0 ?
                           intrin->src[entry->info->base_src].ssa : NULL;
       uint64_t offset = 0;
-      if (nir_intrinsic_infos[intrin->intrinsic].index_map[NIR_INTRINSIC_BASE])
+      if (nir_intrinsic_has_base(intrin))
          offset += nir_intrinsic_base(intrin);
       entry->key = create_entry_key_from_offset(entry, base, 1, &offset);
       entry->offset = offset;
@@ -586,7 +586,7 @@ create_entry(struct vectorize_ctx *ctx,
    if (entry->info->resource_src >= 0)
       entry->key->resource = intrin->src[entry->info->resource_src].ssa;
 
-   if (nir_intrinsic_infos[intrin->intrinsic].index_map[NIR_INTRINSIC_ACCESS])
+   if (nir_intrinsic_has_access(intrin))
       entry->access = nir_intrinsic_access(intrin);
    else if (entry->key->var)
       entry->access = entry->key->var->data.access;
@@ -663,7 +663,7 @@ get_best_align(struct entry *entry)
          best_align = gcd(best_align, entry->key->offset_defs_mul[i]);
    }
 
-   if (nir_intrinsic_infos[entry->intrin->intrinsic].index_map[NIR_INTRINSIC_ALIGN_MUL])
+   if (nir_intrinsic_has_align_mul(entry->intrin))
       best_align = MAX2(best_align, nir_intrinsic_align(entry->intrin));
 
    /* ensure the result is a power of two that fits in a int32_t */
@@ -766,9 +766,7 @@ static nir_deref_instr *subtract_deref(nir_builder *b, nir_deref_instr *deref, i
 
 static bool update_align(struct entry *entry)
 {
-   bool has_align_index =
-      nir_intrinsic_infos[entry->intrin->intrinsic].index_map[NIR_INTRINSIC_ALIGN_MUL];
-   if (has_align_index) {
+   if (nir_intrinsic_has_align_mul(entry->intrin)) {
       unsigned align = get_best_align(entry);
       if (align != nir_intrinsic_align(entry->intrin)) {
          nir_intrinsic_set_align(entry->intrin, align, 0);
@@ -850,10 +848,7 @@ vectorize_loads(nir_builder *b, struct vectorize_ctx *ctx,
    }
 
    /* update base/align */
-   bool has_base_index =
-      nir_intrinsic_infos[first->intrin->intrinsic].index_map[NIR_INTRINSIC_BASE];
-
-   if (first != low && has_base_index)
+   if (first != low && nir_intrinsic_has_base(first->intrin))
       nir_intrinsic_set_base(first->intrin, nir_intrinsic_base(low->intrin));
 
    first->key = low->key;
@@ -935,10 +930,7 @@ vectorize_stores(nir_builder *b, struct vectorize_ctx *ctx,
    }
 
    /* update base/align */
-   bool has_base_index =
-      nir_intrinsic_infos[second->intrin->intrinsic].index_map[NIR_INTRINSIC_BASE];
-
-   if (second != low && has_base_index)
+   if (second != low && nir_intrinsic_has_base(second->intrin))
       nir_intrinsic_set_base(second->intrin, nir_intrinsic_base(low->intrin));
 
    second->key = low->key;
@@ -1226,10 +1218,12 @@ handle_barrier(struct vectorize_ctx *ctx, bool *progress, nir_function_impl *imp
          modes = nir_var_mem_shared;
          break;
       case nir_intrinsic_scoped_barrier:
-	 if (nir_intrinsic_memory_scope(intrin) == NIR_SCOPE_NONE)
+         if (nir_intrinsic_memory_scope(intrin) == NIR_SCOPE_NONE)
             break;
 
-         modes = nir_intrinsic_memory_modes(intrin);
+         modes = nir_intrinsic_memory_modes(intrin) & (nir_var_mem_ssbo |
+                                                       nir_var_mem_shared |
+                                                       nir_var_mem_global);
          acquire = nir_intrinsic_memory_semantics(intrin) & NIR_MEMORY_ACQUIRE;
          release = nir_intrinsic_memory_semantics(intrin) & NIR_MEMORY_RELEASE;
          switch (nir_intrinsic_memory_scope(intrin)) {
@@ -1359,12 +1353,12 @@ nir_opt_load_store_vectorize(nir_shader *shader, nir_variable_mode modes,
    ctx->callback = callback;
    ctx->robust_modes = robust_modes;
 
-   nir_index_vars(shader, NULL, modes);
+   nir_shader_index_vars(shader, modes);
 
    nir_foreach_function(function, shader) {
       if (function->impl) {
          if (modes & nir_var_function_temp)
-            nir_index_vars(shader, function->impl, nir_var_function_temp);
+            nir_function_impl_index_vars(function->impl);
 
          nir_foreach_block(block, function->impl)
             progress |= process_block(function->impl, ctx, block);

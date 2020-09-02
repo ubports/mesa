@@ -1367,7 +1367,7 @@ handle_vs_input_decl(struct radv_shader_context *ctx,
 static void
 handle_vs_inputs(struct radv_shader_context *ctx,
                  struct nir_shader *nir) {
-	nir_foreach_variable(variable, &nir->inputs)
+	nir_foreach_shader_in_variable(variable, nir)
 		handle_vs_input_decl(ctx, variable);
 }
 
@@ -1377,7 +1377,7 @@ prepare_interp_optimize(struct radv_shader_context *ctx,
 {
 	bool uses_center = false;
 	bool uses_centroid = false;
-	nir_foreach_variable(variable, &nir->inputs) {
+	nir_foreach_shader_in_variable(variable, nir) {
 		if (glsl_get_base_type(glsl_without_array(variable->type)) != GLSL_TYPE_FLOAT ||
 		    variable->data.sample)
 			continue;
@@ -4090,7 +4090,7 @@ LLVMModuleRef ac_translate_nir_to_llvm(struct ac_llvm_compiler *ac_llvm,
 			ac_emit_barrier(&ctx.ac, ctx.stage);
 		}
 
-		nir_foreach_variable(variable, &shaders[i]->outputs)
+		nir_foreach_shader_out_variable(variable, shaders[i])
 			scan_shader_output_decl(&ctx, variable, shaders[i], shaders[i]->info.stage);
 
 		ac_setup_rings(&ctx);
@@ -4142,8 +4142,9 @@ LLVMModuleRef ac_translate_nir_to_llvm(struct ac_llvm_compiler *ac_llvm,
 			unsigned tcs_num_outputs = util_last_bit64(ctx.args->shader_info->tcs.outputs_written);
 			unsigned tcs_num_patch_outputs = util_last_bit64(ctx.args->shader_info->tcs.patch_outputs_written);
 			args->shader_info->tcs.num_patches = ctx.tcs_num_patches;
-			args->shader_info->tcs.lds_size =
+			args->shader_info->tcs.num_lds_blocks =
 				calculate_tess_lds_size(
+					ctx.args->options->chip_class,
 					ctx.args->options->key.tcs.input_vertices,
 					ctx.shader->info.tess.tcs_vertices_out,
 					ctx.tcs_num_inputs,
@@ -4408,7 +4409,7 @@ radv_compile_gs_copy_shader(struct ac_llvm_compiler *ac_llvm,
 
 	ac_setup_rings(&ctx);
 
-	nir_foreach_variable(variable, &geom_shader->outputs) {
+	nir_foreach_shader_out_variable(variable, geom_shader) {
 		scan_shader_output_decl(&ctx, variable, geom_shader, MESA_SHADER_VERTEX);
 		ac_handle_shader_output_decl(&ctx.ac, &ctx.abi, geom_shader,
 					     variable, MESA_SHADER_VERTEX);

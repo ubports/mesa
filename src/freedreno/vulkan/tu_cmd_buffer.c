@@ -27,10 +27,11 @@
 
 #include "tu_private.h"
 
-#include "registers/adreno_pm4.xml.h"
-#include "registers/adreno_common.xml.h"
+#include "adreno_pm4.xml.h"
+#include "adreno_common.xml.h"
 
 #include "vk_format.h"
+#include "vk_util.h"
 
 #include "tu_cs.h"
 
@@ -159,8 +160,12 @@ tu6_emit_flushes(struct tu_cmd_buffer *cmd_buffer,
       tu6_emit_event_write(cmd_buffer, cs, CACHE_FLUSH_TS);
    if (flushes & TU_CMD_FLAG_CACHE_INVALIDATE)
       tu6_emit_event_write(cmd_buffer, cs, CACHE_INVALIDATE);
-   if (flushes & TU_CMD_FLAG_WFI)
+   if (flushes & TU_CMD_FLAG_WAIT_MEM_WRITES)
+      tu_cs_emit_pkt7(cs, CP_WAIT_MEM_WRITES, 0);
+   if (flushes & TU_CMD_FLAG_WAIT_FOR_IDLE)
       tu_cs_emit_wfi(cs);
+   if (flushes & TU_CMD_FLAG_WAIT_FOR_ME)
+      tu_cs_emit_pkt7(cs, CP_WAIT_FOR_ME, 0);
 }
 
 /* "Normal" cache flushes, that don't require any special handling */
@@ -214,10 +219,11 @@ tu_emit_cache_flush_ccu(struct tu_cmd_buffer *cmd_buffer,
       flushes |=
          TU_CMD_FLAG_CCU_INVALIDATE_COLOR |
          TU_CMD_FLAG_CCU_INVALIDATE_DEPTH |
-         TU_CMD_FLAG_WFI;
+         TU_CMD_FLAG_WAIT_FOR_IDLE;
       cmd_buffer->state.cache.pending_flush_bits &= ~(
          TU_CMD_FLAG_CCU_INVALIDATE_COLOR |
-         TU_CMD_FLAG_CCU_INVALIDATE_DEPTH);
+         TU_CMD_FLAG_CCU_INVALIDATE_DEPTH |
+         TU_CMD_FLAG_WAIT_FOR_IDLE);
    }
 
    tu6_emit_flushes(cmd_buffer, cs, flushes);
@@ -285,11 +291,18 @@ tu6_emit_zs(struct tu_cmd_buffer *cmd,
                    A6XX_GRAS_LRZ_BUFFER_PITCH(0),
                    A6XX_GRAS_LRZ_FAST_CLEAR_BUFFER_BASE(0));
 
-   if (attachment->format == VK_FORMAT_S8_UINT) {
+   if (attachment->format == VK_FORMAT_D32_SFLOAT_S8_UINT ||
+       attachment->format == VK_FORMAT_S8_UINT) {
+
       tu_cs_emit_pkt4(cs, REG_A6XX_RB_STENCIL_INFO, 6);
       tu_cs_emit(cs, A6XX_RB_STENCIL_INFO(.separate_stencil = true).value);
-      tu_cs_image_ref(cs, iview, 0);
-      tu_cs_emit(cs, attachment->gmem_offset);
+      if (attachment->format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+         tu_cs_image_stencil_ref(cs, iview, 0);
+         tu_cs_emit(cs, attachment->gmem_offset_stencil);
+      } else {
+         tu_cs_image_ref(cs, iview, 0);
+         tu_cs_emit(cs, attachment->gmem_offset);
+      }
    } else {
       tu_cs_emit_regs(cs,
                      A6XX_RB_STENCIL_INFO(0));
@@ -327,7 +340,8 @@ tu6_emit_mrt(struct tu_cmd_buffer *cmd,
    tu_cs_emit_regs(cs,
                    A6XX_SP_SRGB_CNTL(.dword = subpass->srgb_cntl));
 
-   tu_cs_emit_regs(cs, A6XX_GRAS_MAX_LAYER_INDEX(fb->layers - 1));
+   unsigned layers = MAX2(fb->layers, util_logbase2(subpass->multiview_mask) + 1);
+   tu_cs_emit_regs(cs, A6XX_GRAS_MAX_LAYER_INDEX(layers - 1));
 }
 
 void
@@ -428,7 +442,19 @@ tu6_emit_render_cntl(struct tu_cmd_buffer *cmd,
 static void
 tu6_emit_blit_scissor(struct tu_cmd_buffer *cmd, struct tu_cs *cs, bool align)
 {
+
    const VkRect2D *render_area = &cmd->state.render_area;
+
+   /* Avoid assertion fails with an empty render area at (0, 0) where the
+    * subtraction below wraps around. Empty render areas should be forced to
+    * the sysmem path by use_sysmem_rendering(). It's not even clear whether
+    * an empty scissor here works, and the blob seems to force sysmem too as
+    * it sets something wrong (non-empty) for the scissor.
+    */
+   if (render_area->extent.width == 0 ||
+       render_area->extent.height == 0)
+      return;
+
    uint32_t x1 = render_area->offset.x;
    uint32_t y1 = render_area->offset.y;
    uint32_t x2 = x1 + render_area->extent.width - 1;
@@ -544,6 +570,29 @@ use_hw_binning(struct tu_cmd_buffer *cmd)
    if (cmd->state.xfb_used)
       return true;
 
+   /* Some devices have a newer a630_sqe.fw in which, only in CP_DRAW_INDX and
+    * CP_DRAW_INDX_OFFSET, visibility-based skipping happens *before*
+    * predication-based skipping. It seems this breaks predication, because
+    * draws skipped by predication will not be executed in the binning phase,
+    * and therefore won't have an entry in the draw stream, but the
+    * visibility-based skipping will expect it to have an entry. The result is
+    * a GPU hang when actually executing the first non-predicated draw.
+    * However, it seems that things still work if the whole renderpass is
+    * predicated. Affected tests are
+    * dEQP-VK.conditional_rendering.draw_clear.draw.case_2 as well as a few
+    * other case_N.
+    *
+    * Broken FW version: 016ee181
+    * linux-firmware (working) FW version: 016ee176
+    *
+    * All known a650_sqe.fw versions don't have this bug.
+    *
+    * TODO: we should do version detection of the FW so that devices using the
+    * linux-firmware version of a630_sqe.fw don't need this workaround.
+    */
+   if (cmd->state.has_subpass_predication && cmd->device->physical_device->gpu_id != 650)
+      return false;
+
    if (unlikely(cmd->device->physical_device->instance->debug_flags & TU_DEBUG_NOBIN))
       return false;
 
@@ -559,6 +608,13 @@ use_sysmem_rendering(struct tu_cmd_buffer *cmd)
    if (unlikely(cmd->device->physical_device->instance->debug_flags & TU_DEBUG_SYSMEM))
       return true;
 
+   /* If hw binning is required because of XFB but doesn't work because of the
+    * conditional rendering bug, fallback to sysmem.
+    */
+   if (cmd->state.xfb_used && cmd->state.has_subpass_predication &&
+       cmd->device->physical_device->gpu_id != 650)
+      return true;
+
    /* can't fit attachments into gmem */
    if (!cmd->state.pass->gmem_pixels)
       return true;
@@ -566,7 +622,12 @@ use_sysmem_rendering(struct tu_cmd_buffer *cmd)
    if (cmd->state.framebuffer->layers > 1)
       return true;
 
-   if (cmd->has_tess)
+   /* Use sysmem for empty render areas */
+   if (cmd->state.render_area.extent.width == 0 ||
+       cmd->state.render_area.extent.height == 0)
+      return true;
+
+   if (cmd->state.has_tess)
       return true;
 
    return false;
@@ -624,6 +685,7 @@ tu6_emit_tile_select(struct tu_cmd_buffer *cmd,
 static void
 tu6_emit_sysmem_resolve(struct tu_cmd_buffer *cmd,
                         struct tu_cs *cs,
+                        uint32_t layer_mask,
                         uint32_t a,
                         uint32_t gmem_a)
 {
@@ -631,7 +693,7 @@ tu6_emit_sysmem_resolve(struct tu_cmd_buffer *cmd,
    struct tu_image_view *dst = fb->attachments[a].attachment;
    struct tu_image_view *src = fb->attachments[gmem_a].attachment;
 
-   tu_resolve_sysmem(cmd, cs, src, dst, fb->layers, &cmd->state.render_area);
+   tu_resolve_sysmem(cmd, cs, src, dst, layer_mask, fb->layers, &cmd->state.render_area);
 }
 
 static void
@@ -671,7 +733,7 @@ tu6_emit_sysmem_resolves(struct tu_cmd_buffer *cmd,
          if (a == VK_ATTACHMENT_UNUSED)
             continue;
 
-         tu6_emit_sysmem_resolve(cmd, cs, a,
+         tu6_emit_sysmem_resolve(cmd, cs, subpass->multiview_mask, a,
                                  subpass->color_attachments[i].attachment);
       }
    }
@@ -735,6 +797,11 @@ tu6_init_hw(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
          .gfx_bindless = 0x1f,
          .cs_bindless = 0x1f));
 
+   tu_cs_emit_wfi(cs);
+
+   cmd->state.cache.pending_flush_bits &=
+      ~(TU_CMD_FLAG_WAIT_FOR_IDLE | TU_CMD_FLAG_CACHE_INVALIDATE);
+
    tu_cs_emit_regs(cs,
                    A6XX_RB_CCU_CNTL(.offset = phys_dev->ccu_offset_bypass));
    cmd->state.ccu_state = TU_CMD_CCU_SYSMEM;
@@ -759,7 +826,8 @@ tu6_init_hw(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
    tu_cs_emit_write_reg(cs, REG_A6XX_RB_UNKNOWN_8E01, 0x0);
    tu_cs_emit_write_reg(cs, REG_A6XX_SP_UNKNOWN_A982, 0);
    tu_cs_emit_write_reg(cs, REG_A6XX_SP_UNKNOWN_A9A8, 0);
-   tu_cs_emit_write_reg(cs, REG_A6XX_SP_UNKNOWN_AB00, 0x5);
+   tu_cs_emit_write_reg(cs, REG_A6XX_SP_MODE_CONTROL,
+                        A6XX_SP_MODE_CONTROL_CONSTANT_DEMOTION_ENABLE | 4);
 
    /* TODO: set A6XX_VFD_ADD_OFFSET_INSTANCE and fix ir3 to avoid adding base instance */
    tu_cs_emit_write_reg(cs, REG_A6XX_VFD_ADD_OFFSET, A6XX_VFD_ADD_OFFSET_VERTEX);
@@ -789,11 +857,9 @@ tu6_init_hw(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
 
    tu_cs_emit_regs(cs, A6XX_VPC_SO_DISABLE(true));
 
-   tu_cs_emit_write_reg(cs, REG_A6XX_PC_UNKNOWN_9801, 0);
    tu_cs_emit_write_reg(cs, REG_A6XX_PC_UNKNOWN_9980, 0);
 
    tu_cs_emit_write_reg(cs, REG_A6XX_PC_PRIMITIVE_CNTL_6, 0);
-   tu_cs_emit_write_reg(cs, REG_A6XX_PC_UNKNOWN_9B07, 0);
 
    tu_cs_emit_write_reg(cs, REG_A6XX_SP_UNKNOWN_A81B, 0);
 
@@ -810,8 +876,6 @@ tu6_init_hw(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
    tu_cs_emit_write_reg(cs, REG_A6XX_HLSQ_CONTROL_5_REG, 0xfc);
 
    tu_cs_emit_write_reg(cs, REG_A6XX_VFD_MODE_CNTL, 0x00000000);
-
-   tu_cs_emit_write_reg(cs, REG_A6XX_VFD_UNKNOWN_A008, 0);
 
    tu_cs_emit_write_reg(cs, REG_A6XX_PC_MODE_CNTL, 0x0000001f);
 
@@ -837,10 +901,10 @@ tu6_init_hw(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
 
    tu_cs_emit_regs(cs,
                    A6XX_SP_TP_BORDER_COLOR_BASE_ADDR(.bo = &dev->global_bo,
-                                                     .bo_offset = gb_offset(border_color)));
+                                                     .bo_offset = gb_offset(bcolor_builtin)));
    tu_cs_emit_regs(cs,
                    A6XX_SP_PS_TP_BORDER_COLOR_BASE_ADDR(.bo = &dev->global_bo,
-                                                        .bo_offset = gb_offset(border_color)));
+                                                        .bo_offset = gb_offset(bcolor_builtin)));
 
    /* VSC buffers:
     * use vsc pitches from the largest values used so far with this device
@@ -849,7 +913,7 @@ tu6_init_hw(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
     *
     * if overflow is detected, the stream size is increased by 2x
     */
-   mtx_lock(&dev->vsc_pitch_mtx);
+   mtx_lock(&dev->mutex);
 
    struct tu6_global *global = dev->global_bo.map;
 
@@ -865,7 +929,7 @@ tu6_init_hw(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
    cmd->vsc_prim_strm_pitch = dev->vsc_prim_strm_pitch;
    cmd->vsc_draw_strm_pitch = dev->vsc_draw_strm_pitch;
 
-   mtx_unlock(&dev->vsc_pitch_mtx);
+   mtx_unlock(&dev->mutex);
 
    struct tu_bo *vsc_bo;
    uint32_t size0 = cmd->vsc_prim_strm_pitch * MAX_VSC_PIPES +
@@ -1027,7 +1091,7 @@ tu_emit_input_attachments(struct tu_cmd_buffer *cmd,
     * renderpass, this would avoid emitting both sysmem/gmem versions
     *
     * emit two texture descriptors for each input, as a workaround for
-    * d24s8, which can be sampled as both float (depth) and integer (stencil)
+    * d24s8/d32s8, which can be sampled as both float (depth) and integer (stencil)
     * tu_shader lowers uint input attachment loads to use the 2nd descriptor
     * in the pair
     * TODO: a smarter workaround
@@ -1051,6 +1115,8 @@ tu_emit_input_attachments(struct tu_cmd_buffer *cmd,
       const struct tu_render_pass_attachment *att =
          &cmd->state.pass->attachments[a];
       uint32_t *dst = &texture.map[A6XX_TEX_CONST_DWORDS * i];
+      uint32_t gmem_offset = att->gmem_offset;
+      uint32_t cpp = att->cpp;
 
       memcpy(dst, iview->descriptor, A6XX_TEX_CONST_DWORDS * 4);
 
@@ -1061,11 +1127,32 @@ tu_emit_input_attachments(struct tu_cmd_buffer *cmd,
          dst[0] &= ~(A6XX_TEX_CONST_0_FMT__MASK |
             A6XX_TEX_CONST_0_SWIZ_X__MASK | A6XX_TEX_CONST_0_SWIZ_Y__MASK |
             A6XX_TEX_CONST_0_SWIZ_Z__MASK | A6XX_TEX_CONST_0_SWIZ_W__MASK);
-         dst[0] |= A6XX_TEX_CONST_0_FMT(FMT6_S8Z24_UINT) |
-            A6XX_TEX_CONST_0_SWIZ_X(A6XX_TEX_Y) |
-            A6XX_TEX_CONST_0_SWIZ_Y(A6XX_TEX_ZERO) |
-            A6XX_TEX_CONST_0_SWIZ_Z(A6XX_TEX_ZERO) |
-            A6XX_TEX_CONST_0_SWIZ_W(A6XX_TEX_ONE);
+         if (cmd->device->physical_device->limited_z24s8) {
+            dst[0] |= A6XX_TEX_CONST_0_FMT(FMT6_8_8_8_8_UINT) |
+               A6XX_TEX_CONST_0_SWIZ_X(A6XX_TEX_W) |
+               A6XX_TEX_CONST_0_SWIZ_Y(A6XX_TEX_ZERO) |
+               A6XX_TEX_CONST_0_SWIZ_Z(A6XX_TEX_ZERO) |
+               A6XX_TEX_CONST_0_SWIZ_W(A6XX_TEX_ONE);
+         } else {
+            dst[0] |= A6XX_TEX_CONST_0_FMT(FMT6_Z24_UINT_S8_UINT) |
+               A6XX_TEX_CONST_0_SWIZ_X(A6XX_TEX_Y) |
+               A6XX_TEX_CONST_0_SWIZ_Y(A6XX_TEX_ZERO) |
+               A6XX_TEX_CONST_0_SWIZ_Z(A6XX_TEX_ZERO) |
+               A6XX_TEX_CONST_0_SWIZ_W(A6XX_TEX_ONE);
+         }
+      }
+
+      if (i % 2 == 1 && att->format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+         dst[0] &= ~A6XX_TEX_CONST_0_FMT__MASK;
+         dst[0] |= A6XX_TEX_CONST_0_FMT(FMT6_8_UINT);
+         dst[2] &= ~(A6XX_TEX_CONST_2_PITCHALIGN__MASK | A6XX_TEX_CONST_2_PITCH__MASK);
+         dst[2] |= A6XX_TEX_CONST_2_PITCH(iview->stencil_PITCH << 6);
+         dst[3] = 0;
+         dst[4] = iview->stencil_base_addr;
+         dst[5] = (dst[5] & 0xffff) | iview->stencil_base_addr >> 32;
+
+         cpp = att->samples;
+         gmem_offset = att->gmem_offset_stencil;
       }
 
       if (!gmem)
@@ -1076,9 +1163,9 @@ tu_emit_input_attachments(struct tu_cmd_buffer *cmd,
       dst[0] |= A6XX_TEX_CONST_0_TILE_MODE(TILE6_2);
       dst[2] =
          A6XX_TEX_CONST_2_TYPE(A6XX_TEX_2D) |
-         A6XX_TEX_CONST_2_PITCH(cmd->state.framebuffer->tile0.width * att->cpp);
+         A6XX_TEX_CONST_2_PITCH(cmd->state.framebuffer->tile0.width * cpp);
       dst[3] = 0;
-      dst[4] = cmd->device->physical_device->gmem_base + att->gmem_offset;
+      dst[4] = cmd->device->physical_device->gmem_base + gmem_offset;
       dst[5] = A6XX_TEX_CONST_5_DEPTH(1);
       for (unsigned i = 6; i < A6XX_TEX_CONST_DWORDS; i++)
          dst[i] = 0;
@@ -1535,8 +1622,21 @@ tu_BeginCommandBuffer(VkCommandBuffer commandBuffer,
          break;
       }
    } else if (cmd_buffer->level == VK_COMMAND_BUFFER_LEVEL_SECONDARY) {
+      assert(pBeginInfo->pInheritanceInfo);
+
+      vk_foreach_struct(ext, pBeginInfo->pInheritanceInfo) {
+         switch (ext->sType) {
+         case VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_CONDITIONAL_RENDERING_INFO_EXT: {
+            const VkCommandBufferInheritanceConditionalRenderingInfoEXT *cond_rend = (void *) ext;
+            cmd_buffer->state.predication_active = cond_rend->conditionalRenderingEnable;
+            break;
+         default:
+            break;
+         }
+         }
+      }
+
       if (pBeginInfo->flags & VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT) {
-         assert(pBeginInfo->pInheritanceInfo);
          cmd_buffer->state.pass = tu_render_pass_from_handle(pBeginInfo->pInheritanceInfo->renderPass);
          cmd_buffer->state.subpass =
             &cmd_buffer->state.pass->subpasses[pBeginInfo->pInheritanceInfo->subpass];
@@ -2192,8 +2292,26 @@ tu_flush_for_access(struct tu_cache_state *cache,
 {
    enum tu_cmd_flush_bits flush_bits = 0;
 
+   if (src_mask & TU_ACCESS_HOST_WRITE) {
+      /* Host writes are always visible to CP, so only invalidate GPU caches */
+      cache->pending_flush_bits |= TU_CMD_FLAG_GPU_INVALIDATE;
+   }
+
    if (src_mask & TU_ACCESS_SYSMEM_WRITE) {
+      /* Invalidate CP and 2D engine (make it do WFI + WFM if necessary) as
+       * well.
+       */
       cache->pending_flush_bits |= TU_CMD_FLAG_ALL_INVALIDATE;
+   }
+
+   if (src_mask & TU_ACCESS_CP_WRITE) {
+      /* Flush the CP write queue. However a WFI shouldn't be necessary as
+       * WAIT_MEM_WRITES should cover it.
+       */
+      cache->pending_flush_bits |=
+         TU_CMD_FLAG_WAIT_MEM_WRITES |
+         TU_CMD_FLAG_GPU_INVALIDATE |
+         TU_CMD_FLAG_WAIT_FOR_ME;
    }
 
 #define SRC_FLUSH(domain, flush, invalidate) \
@@ -2220,7 +2338,11 @@ tu_flush_for_access(struct tu_cache_state *cache,
 
 #undef SRC_INCOHERENT_FLUSH
 
-   if (dst_mask & (TU_ACCESS_SYSMEM_READ | TU_ACCESS_SYSMEM_WRITE)) {
+   /* Treat host & sysmem write accesses the same, since the kernel implicitly
+    * drains the queue before signalling completion to the host.
+    */
+   if (dst_mask & (TU_ACCESS_SYSMEM_READ | TU_ACCESS_SYSMEM_WRITE |
+                   TU_ACCESS_HOST_READ | TU_ACCESS_HOST_WRITE)) {
       flush_bits |= cache->pending_flush_bits & TU_CMD_FLAG_ALL_FLUSH;
    }
 
@@ -2239,8 +2361,8 @@ tu_flush_for_access(struct tu_cache_state *cache,
 #undef DST_FLUSH
 
 #define DST_INCOHERENT_FLUSH(domain, flush, invalidate) \
-   if (dst_mask & (TU_ACCESS_##domain##_READ |                 \
-                   TU_ACCESS_##domain##_WRITE)) {              \
+   if (dst_mask & (TU_ACCESS_##domain##_INCOHERENT_READ |      \
+                   TU_ACCESS_##domain##_INCOHERENT_WRITE)) {   \
       flush_bits |= TU_CMD_FLAG_##invalidate |                 \
           (cache->pending_flush_bits &                         \
            (TU_CMD_FLAG_ALL_FLUSH & ~TU_CMD_FLAG_##flush));    \
@@ -2252,7 +2374,13 @@ tu_flush_for_access(struct tu_cache_state *cache,
 #undef DST_INCOHERENT_FLUSH
 
    if (dst_mask & TU_ACCESS_WFI_READ) {
-      flush_bits |= TU_CMD_FLAG_WFI;
+      flush_bits |= cache->pending_flush_bits &
+         (TU_CMD_FLAG_ALL_FLUSH | TU_CMD_FLAG_WAIT_FOR_IDLE);
+   }
+
+   if (dst_mask & TU_ACCESS_WFM_READ) {
+      flush_bits |= cache->pending_flush_bits &
+         (TU_CMD_FLAG_ALL_FLUSH | TU_CMD_FLAG_WAIT_FOR_ME);
    }
 
    cache->flush_bits |= flush_bits;
@@ -2265,30 +2393,54 @@ vk2tu_access(VkAccessFlags flags, bool gmem)
    enum tu_cmd_access_mask mask = 0;
 
    /* If the GPU writes a buffer that is then read by an indirect draw
-    * command, we theoretically need a WFI + WAIT_FOR_ME combination to
-    * wait for the writes to complete. The WAIT_FOR_ME is performed as part
-    * of the draw by the firmware, so we just need to execute a WFI.
+    * command, we theoretically need to emit a WFI to wait for any cache
+    * flushes, and then a WAIT_FOR_ME to wait on the CP for the WFI to
+    * complete. Waiting for the WFI to complete is performed as part of the
+    * draw by the firmware, so we just need to execute the WFI.
+    *
+    * Transform feedback counters are read via CP_MEM_TO_REG, which implicitly
+    * does CP_WAIT_FOR_ME, but we still need a WFI if the GPU writes it.
+    *
+    * Currently we read the draw predicate using CP_MEM_TO_MEM, which
+    * also implicitly does CP_WAIT_FOR_ME. However CP_DRAW_PRED_SET does *not*
+    * implicitly do CP_WAIT_FOR_ME, it seems to only wait for counters to
+    * complete since it's written for DX11 where you can only predicate on the
+    * result of a query object. So if we implement 64-bit comparisons in the
+    * future, or if CP_DRAW_PRED_SET grows the capability to do 32-bit
+    * comparisons, then this will have to be dealt with.
     */
    if (flags &
        (VK_ACCESS_INDIRECT_COMMAND_READ_BIT |
+        VK_ACCESS_TRANSFORM_FEEDBACK_COUNTER_READ_BIT_EXT |
+        VK_ACCESS_CONDITIONAL_RENDERING_READ_BIT_EXT |
         VK_ACCESS_MEMORY_READ_BIT)) {
       mask |= TU_ACCESS_WFI_READ;
    }
 
    if (flags &
        (VK_ACCESS_INDIRECT_COMMAND_READ_BIT | /* Read performed by CP */
-        VK_ACCESS_TRANSFORM_FEEDBACK_COUNTER_READ_BIT_EXT | /* Read performed by CP, I think */
         VK_ACCESS_CONDITIONAL_RENDERING_READ_BIT_EXT | /* Read performed by CP */
-        VK_ACCESS_HOST_READ_BIT | /* sysmem by definition */
+        VK_ACCESS_TRANSFORM_FEEDBACK_COUNTER_READ_BIT_EXT | /* Read performed by CP */
         VK_ACCESS_MEMORY_READ_BIT)) {
       mask |= TU_ACCESS_SYSMEM_READ;
    }
 
    if (flags &
-       (VK_ACCESS_HOST_WRITE_BIT |
-        VK_ACCESS_TRANSFORM_FEEDBACK_COUNTER_WRITE_BIT_EXT | /* Write performed by CP, I think */
+       (VK_ACCESS_TRANSFORM_FEEDBACK_COUNTER_WRITE_BIT_EXT |
         VK_ACCESS_MEMORY_WRITE_BIT)) {
-      mask |= TU_ACCESS_SYSMEM_WRITE;
+      mask |= TU_ACCESS_CP_WRITE;
+   }
+
+   if (flags &
+       (VK_ACCESS_HOST_READ_BIT |
+        VK_ACCESS_MEMORY_WRITE_BIT)) {
+      mask |= TU_ACCESS_HOST_READ;
+   }
+
+   if (flags &
+       (VK_ACCESS_HOST_WRITE_BIT |
+        VK_ACCESS_MEMORY_WRITE_BIT)) {
+      mask |= TU_ACCESS_HOST_WRITE;
    }
 
    if (flags &
@@ -2430,8 +2582,10 @@ tu_CmdExecuteCommands(VkCommandBuffer commandBuffer,
             break;
          }
 
-         if (secondary->has_tess)
-            cmd->has_tess = true;
+         if (secondary->state.has_tess)
+            cmd->state.has_tess = true;
+         if (secondary->state.has_subpass_predication)
+            cmd->state.has_subpass_predication = true;
       } else {
          assert(tu_cs_is_empty(&secondary->draw_cs));
          assert(tu_cs_is_empty(&secondary->draw_epilogue_cs));
@@ -2843,10 +2997,11 @@ static VkResult
 tu6_emit_tess_consts(struct tu_cmd_buffer *cmd,
                      uint32_t draw_count,
                      const struct tu_pipeline *pipeline,
-                     struct tu_draw_state *state)
+                     struct tu_draw_state *state,
+                     uint64_t *factor_iova)
 {
    struct tu_cs cs;
-   VkResult result = tu_cs_begin_sub_stream(&cmd->sub_cs, 20, &cs);
+   VkResult result = tu_cs_begin_sub_stream(&cmd->sub_cs, 16, &cs);
    if (result != VK_SUCCESS)
       return result;
 
@@ -2886,14 +3041,7 @@ tu6_emit_tess_consts(struct tu_cmd_buffer *cmd,
       tu_cs_emit_qw(&cs, tess_param_iova);
       tu_cs_emit_qw(&cs, tess_factor_iova);
 
-      tu_cs_emit_pkt4(&cs, REG_A6XX_PC_TESSFACTOR_ADDR_LO, 2);
-      tu_cs_emit_qw(&cs, tess_factor_iova);
-
-      /* TODO: Without this WFI here, the hardware seems unable to read these
-       * addresses we just emitted. Freedreno emits these consts as part of
-       * IB1 instead of in a draw state which might make this WFI unnecessary,
-       * but it requires a bit more indirection (SS6_INDIRECT for consts). */
-      tu_cs_emit_wfi(&cs);
+      *factor_iova = tess_factor_iova;
    }
    *state = tu_cs_end_draw_state(&cmd->sub_cs, &cs);
    return VK_SUCCESS;
@@ -2942,10 +3090,24 @@ tu6_draw_common(struct tu_cmd_buffer *cmd,
          pipeline->active_stages & VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
    struct tu_draw_state tess_consts = {};
    if (has_tess) {
-      cmd->has_tess = true;
-      result = tu6_emit_tess_consts(cmd, draw_count, pipeline, &tess_consts);
+      uint64_t tess_factor_iova = 0;
+
+      cmd->state.has_tess = true;
+      result = tu6_emit_tess_consts(cmd, draw_count, pipeline, &tess_consts, &tess_factor_iova);
       if (result != VK_SUCCESS)
          return result;
+
+      /* this sequence matches what the blob does before every tess draw
+       * PC_TESSFACTOR_ADDR_LO is a non-context register and needs a wfi
+       * before writing to it
+       */
+      tu_cs_emit_wfi(cs);
+
+      tu_cs_emit_pkt4(cs, REG_A6XX_PC_TESSFACTOR_ADDR_LO, 2);
+      tu_cs_emit_qw(cs, tess_factor_iova);
+
+      tu_cs_emit_pkt7(cs, CP_SET_SUBDRAW_SIZE, 1);
+      tu_cs_emit(cs, draw_count);
    }
 
    /* for the first draw in a renderpass, re-emit all the draw states
@@ -3166,6 +3328,20 @@ tu_CmdDrawIndexed(VkCommandBuffer commandBuffer,
    tu_cs_emit(cs, cmd->state.max_index_count);
 }
 
+/* Various firmware bugs/inconsistencies mean that some indirect draw opcodes
+ * do not wait for WFI's to complete before executing. Add a WAIT_FOR_ME if
+ * pending for these opcodes. This may result in a few extra WAIT_FOR_ME's
+ * with these opcodes, but the alternative would add unnecessary WAIT_FOR_ME's
+ * before draw opcodes that don't need it.
+ */
+static void
+draw_wfm(struct tu_cmd_buffer *cmd)
+{
+   cmd->state.renderpass_cache.flush_bits |=
+      cmd->state.renderpass_cache.pending_flush_bits & TU_CMD_FLAG_WAIT_FOR_ME;
+   cmd->state.renderpass_cache.pending_flush_bits &= ~TU_CMD_FLAG_WAIT_FOR_ME;
+}
+
 void
 tu_CmdDrawIndirect(VkCommandBuffer commandBuffer,
                    VkBuffer _buffer,
@@ -3179,15 +3355,17 @@ tu_CmdDrawIndirect(VkCommandBuffer commandBuffer,
 
    cmd->state.vs_params = (struct tu_draw_state) {};
 
-   tu6_draw_common(cmd, cs, false, 0);
-
-   /* workaround for a firmware bug with CP_DRAW_INDIRECT_MULTI, where it
-    * doesn't wait for WFIs to be completed and leads to GPU fault/hang
-    * TODO: this could be worked around in a more performant way,
-    * or there may exist newer firmware that has been fixed
+   /* The latest known a630_sqe.fw fails to wait for WFI before reading the
+    * indirect buffer when using CP_DRAW_INDIRECT_MULTI, so we have to fall
+    * back to CP_WAIT_FOR_ME except for a650 which has a fixed firmware.
+    *
+    * TODO: There may be newer a630_sqe.fw released in the future which fixes
+    * this, if so we should detect it and avoid this workaround.
     */
    if (cmd->device->physical_device->gpu_id != 650)
-      tu_cs_emit_pkt7(cs, CP_WAIT_FOR_ME, 0);
+      draw_wfm(cmd);
+
+   tu6_draw_common(cmd, cs, false, 0);
 
    tu_cs_emit_pkt7(cs, CP_DRAW_INDIRECT_MULTI, 6);
    tu_cs_emit(cs, tu_draw_initiator(cmd, DI_SRC_SEL_AUTO_INDEX));
@@ -3197,7 +3375,7 @@ tu_CmdDrawIndirect(VkCommandBuffer commandBuffer,
    tu_cs_emit_qw(cs, buf->bo->iova + buf->bo_offset + offset);
    tu_cs_emit(cs, stride);
 
-   tu_bo_list_add(&cmd->bo_list, buf->bo, MSM_SUBMIT_BO_READ);
+   tu_bo_list_add(&cmd->bo_list, buf->bo, MSM_SUBMIT_BO_READ | MSM_SUBMIT_BO_DUMP);
 }
 
 void
@@ -3213,15 +3391,10 @@ tu_CmdDrawIndexedIndirect(VkCommandBuffer commandBuffer,
 
    cmd->state.vs_params = (struct tu_draw_state) {};
 
-   tu6_draw_common(cmd, cs, true, 0);
-
-   /* workaround for a firmware bug with CP_DRAW_INDIRECT_MULTI, where it
-    * doesn't wait for WFIs to be completed and leads to GPU fault/hang
-    * TODO: this could be worked around in a more performant way,
-    * or there may exist newer firmware that has been fixed
-    */
    if (cmd->device->physical_device->gpu_id != 650)
-      tu_cs_emit_pkt7(cs, CP_WAIT_FOR_ME, 0);
+      draw_wfm(cmd);
+
+   tu6_draw_common(cmd, cs, true, 0);
 
    tu_cs_emit_pkt7(cs, CP_DRAW_INDIRECT_MULTI, 9);
    tu_cs_emit(cs, tu_draw_initiator(cmd, DI_SRC_SEL_DMA));
@@ -3233,7 +3406,80 @@ tu_CmdDrawIndexedIndirect(VkCommandBuffer commandBuffer,
    tu_cs_emit_qw(cs, buf->bo->iova + buf->bo_offset + offset);
    tu_cs_emit(cs, stride);
 
-   tu_bo_list_add(&cmd->bo_list, buf->bo, MSM_SUBMIT_BO_READ);
+   tu_bo_list_add(&cmd->bo_list, buf->bo, MSM_SUBMIT_BO_READ | MSM_SUBMIT_BO_DUMP);
+}
+
+void
+tu_CmdDrawIndirectCount(VkCommandBuffer commandBuffer,
+                        VkBuffer _buffer,
+                        VkDeviceSize offset,
+                        VkBuffer countBuffer,
+                        VkDeviceSize countBufferOffset,
+                        uint32_t drawCount,
+                        uint32_t stride)
+{
+   TU_FROM_HANDLE(tu_cmd_buffer, cmd, commandBuffer);
+   TU_FROM_HANDLE(tu_buffer, buf, _buffer);
+   TU_FROM_HANDLE(tu_buffer, count_buf, countBuffer);
+   struct tu_cs *cs = &cmd->draw_cs;
+
+   cmd->state.vs_params = (struct tu_draw_state) {};
+
+   /* It turns out that the firmware we have for a650 only partially fixed the
+    * problem with CP_DRAW_INDIRECT_MULTI not waiting for WFI's to complete
+    * before reading indirect parameters. It waits for WFI's before reading
+    * the draw parameters, but after reading the indirect count :(.
+    */
+   draw_wfm(cmd);
+
+   tu6_draw_common(cmd, cs, false, 0);
+
+   tu_cs_emit_pkt7(cs, CP_DRAW_INDIRECT_MULTI, 8);
+   tu_cs_emit(cs, tu_draw_initiator(cmd, DI_SRC_SEL_AUTO_INDEX));
+   tu_cs_emit(cs, A6XX_CP_DRAW_INDIRECT_MULTI_1_OPCODE(INDIRECT_OP_INDIRECT_COUNT) |
+                  A6XX_CP_DRAW_INDIRECT_MULTI_1_DST_OFF(vs_params_offset(cmd)));
+   tu_cs_emit(cs, drawCount);
+   tu_cs_emit_qw(cs, buf->bo->iova + buf->bo_offset + offset);
+   tu_cs_emit_qw(cs, count_buf->bo->iova + count_buf->bo_offset + countBufferOffset);
+   tu_cs_emit(cs, stride);
+
+   tu_bo_list_add(&cmd->bo_list, buf->bo, MSM_SUBMIT_BO_READ | MSM_SUBMIT_BO_DUMP);
+   tu_bo_list_add(&cmd->bo_list, count_buf->bo, MSM_SUBMIT_BO_READ | MSM_SUBMIT_BO_DUMP);
+}
+
+void
+tu_CmdDrawIndexedIndirectCount(VkCommandBuffer commandBuffer,
+                               VkBuffer _buffer,
+                               VkDeviceSize offset,
+                               VkBuffer countBuffer,
+                               VkDeviceSize countBufferOffset,
+                               uint32_t drawCount,
+                               uint32_t stride)
+{
+   TU_FROM_HANDLE(tu_cmd_buffer, cmd, commandBuffer);
+   TU_FROM_HANDLE(tu_buffer, buf, _buffer);
+   TU_FROM_HANDLE(tu_buffer, count_buf, countBuffer);
+   struct tu_cs *cs = &cmd->draw_cs;
+
+   cmd->state.vs_params = (struct tu_draw_state) {};
+
+   draw_wfm(cmd);
+
+   tu6_draw_common(cmd, cs, true, 0);
+
+   tu_cs_emit_pkt7(cs, CP_DRAW_INDIRECT_MULTI, 11);
+   tu_cs_emit(cs, tu_draw_initiator(cmd, DI_SRC_SEL_DMA));
+   tu_cs_emit(cs, A6XX_CP_DRAW_INDIRECT_MULTI_1_OPCODE(INDIRECT_OP_INDIRECT_COUNT_INDEXED) |
+                  A6XX_CP_DRAW_INDIRECT_MULTI_1_DST_OFF(vs_params_offset(cmd)));
+   tu_cs_emit(cs, drawCount);
+   tu_cs_emit_qw(cs, cmd->state.index_va);
+   tu_cs_emit(cs, cmd->state.max_index_count);
+   tu_cs_emit_qw(cs, buf->bo->iova + buf->bo_offset + offset);
+   tu_cs_emit_qw(cs, count_buf->bo->iova + count_buf->bo_offset + countBufferOffset);
+   tu_cs_emit(cs, stride);
+
+   tu_bo_list_add(&cmd->bo_list, buf->bo, MSM_SUBMIT_BO_READ | MSM_SUBMIT_BO_DUMP);
+   tu_bo_list_add(&cmd->bo_list, count_buf->bo, MSM_SUBMIT_BO_READ | MSM_SUBMIT_BO_DUMP);
 }
 
 void tu_CmdDrawIndirectByteCountEXT(VkCommandBuffer commandBuffer,
@@ -3247,6 +3493,13 @@ void tu_CmdDrawIndirectByteCountEXT(VkCommandBuffer commandBuffer,
    TU_FROM_HANDLE(tu_cmd_buffer, cmd, commandBuffer);
    TU_FROM_HANDLE(tu_buffer, buf, _counterBuffer);
    struct tu_cs *cs = &cmd->draw_cs;
+
+   /* All known firmware versions do not wait for WFI's with CP_DRAW_AUTO.
+    * Plus, for the common case where the counter buffer is written by
+    * vkCmdEndTransformFeedback, we need to wait for the CP_WAIT_MEM_WRITES to
+    * complete which means we need a WAIT_FOR_ME anyway.
+    */
+   draw_wfm(cmd);
 
    cmd->state.vs_params = tu6_emit_vs_params(cmd, 0, firstInstance);
 
@@ -3472,6 +3725,8 @@ tu_CmdEndRenderPass(VkCommandBuffer commandBuffer)
    cmd_buffer->state.pass = NULL;
    cmd_buffer->state.subpass = NULL;
    cmd_buffer->state.framebuffer = NULL;
+   cmd_buffer->state.has_tess = false;
+   cmd_buffer->state.has_subpass_predication = false;
 }
 
 void
@@ -3671,3 +3926,64 @@ tu_CmdSetDeviceMask(VkCommandBuffer commandBuffer, uint32_t deviceMask)
 {
    /* No-op */
 }
+
+
+void
+tu_CmdBeginConditionalRenderingEXT(VkCommandBuffer commandBuffer,
+                                   const VkConditionalRenderingBeginInfoEXT *pConditionalRenderingBegin)
+{
+   TU_FROM_HANDLE(tu_cmd_buffer, cmd, commandBuffer);
+
+   cmd->state.predication_active = true;
+   if (cmd->state.pass)
+      cmd->state.has_subpass_predication = true;
+
+   struct tu_cs *cs = cmd->state.pass ? &cmd->draw_cs : &cmd->cs;
+
+   tu_cs_emit_pkt7(cs, CP_DRAW_PRED_ENABLE_GLOBAL, 1);
+   tu_cs_emit(cs, 1);
+
+   /* Wait for any writes to the predicate to land */
+   if (cmd->state.pass)
+      tu_emit_cache_flush_renderpass(cmd, cs);
+   else
+      tu_emit_cache_flush(cmd, cs);
+
+   TU_FROM_HANDLE(tu_buffer, buf, pConditionalRenderingBegin->buffer);
+   uint64_t iova = tu_buffer_iova(buf) + pConditionalRenderingBegin->offset;
+
+   /* qcom doesn't support 32-bit reference values, only 64-bit, but Vulkan
+    * mandates 32-bit comparisons. Our workaround is to copy the the reference
+    * value to the low 32-bits of a location where the high 32 bits are known
+    * to be 0 and then compare that.
+    */
+   tu_cs_emit_pkt7(cs, CP_MEM_TO_MEM, 5);
+   tu_cs_emit(cs, 0);
+   tu_cs_emit_qw(cs, global_iova(cmd, predicate));
+   tu_cs_emit_qw(cs, iova);
+
+   tu_cs_emit_pkt7(cs, CP_WAIT_MEM_WRITES, 0);
+   tu_cs_emit_pkt7(cs, CP_WAIT_FOR_ME, 0);
+
+   bool inv = pConditionalRenderingBegin->flags & VK_CONDITIONAL_RENDERING_INVERTED_BIT_EXT;
+   tu_cs_emit_pkt7(cs, CP_DRAW_PRED_SET, 3);
+   tu_cs_emit(cs, CP_DRAW_PRED_SET_0_SRC(PRED_SRC_MEM) |
+                  CP_DRAW_PRED_SET_0_TEST(inv ? EQ_0_PASS : NE_0_PASS));
+   tu_cs_emit_qw(cs, global_iova(cmd, predicate));
+
+   tu_bo_list_add(&cmd->bo_list, buf->bo, MSM_SUBMIT_BO_READ);
+}
+
+void
+tu_CmdEndConditionalRenderingEXT(VkCommandBuffer commandBuffer)
+{
+   TU_FROM_HANDLE(tu_cmd_buffer, cmd, commandBuffer);
+
+   cmd->state.predication_active = false;
+
+   struct tu_cs *cs = cmd->state.pass ? &cmd->draw_cs : &cmd->cs;
+
+   tu_cs_emit_pkt7(cs, CP_DRAW_PRED_ENABLE_GLOBAL, 1);
+   tu_cs_emit(cs, 0);
+}
+

@@ -92,9 +92,9 @@ struct brw_compiler {
    void (*shader_debug_log)(void *, const char *str, ...) PRINTFLIKE(2, 3);
    void (*shader_perf_log)(void *, const char *str, ...) PRINTFLIKE(2, 3);
 
-   bool scalar_stage[MESA_SHADER_STAGES];
+   bool scalar_stage[MESA_ALL_SHADER_STAGES];
    bool use_tcs_8_patch;
-   struct gl_shader_compiler_options glsl_compiler_options[MESA_SHADER_STAGES];
+   struct gl_shader_compiler_options glsl_compiler_options[MESA_ALL_SHADER_STAGES];
 
    /**
     * Apply workarounds for SIN and COS output range problems.
@@ -210,6 +210,8 @@ struct brw_sampler_prog_key_data {
    uint32_t xy_uxvx_image_mask;
    uint32_t ayuv_image_mask;
    uint32_t xyuv_image_mask;
+   uint32_t bt709_mask;
+   uint32_t bt2020_mask;
 
    /* Scale factor for each texture. */
    float scale_factors[32];

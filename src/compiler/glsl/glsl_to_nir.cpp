@@ -224,7 +224,7 @@ glsl_to_nir(struct gl_context *ctx,
     * inline functions.  That way they get properly initialized at the top
     * of the function and not at the top of its caller.
     */
-   nir_lower_variable_initializers(shader, (nir_variable_mode)~0);
+   nir_lower_variable_initializers(shader, nir_var_all);
    nir_lower_returns(shader);
    nir_inline_functions(shader);
    nir_opt_deref(shader);
@@ -1334,10 +1334,17 @@ nir_visitor::visit(ir_call *ir)
          } else if (op == nir_intrinsic_image_deref_load ||
                     op == nir_intrinsic_image_deref_store) {
             instr->num_components = 4;
+            nir_intrinsic_set_type(instr,
+               nir_get_nir_type_for_glsl_base_type(type->sampled_type));
          }
 
          if (op == nir_intrinsic_image_deref_size ||
              op == nir_intrinsic_image_deref_samples) {
+            /* image_deref_size takes an LOD parameter which is always 0
+             * coming from GLSL.
+             */
+            if (op == nir_intrinsic_image_deref_size)
+               instr->src[1] = nir_src_for_ssa(nir_imm_int(&b, 0));
             nir_builder_instr_insert(&b, &instr->instr);
             break;
          }
@@ -2220,7 +2227,7 @@ nir_visitor::visit(ir_expression *ir)
       break;
    case ir_binop_nequal:
       if (type_is_float(types[0]))
-         result = nir_fne(&b, srcs[0], srcs[1]);
+         result = nir_fneu(&b, srcs[0], srcs[1]);
       else
          result = nir_ine(&b, srcs[0], srcs[1]);
       break;
@@ -2248,7 +2255,7 @@ nir_visitor::visit(ir_expression *ir)
    case ir_binop_any_nequal:
       if (type_is_float(types[0])) {
          switch (ir->operands[0]->type->vector_elements) {
-            case 1: result = nir_fne(&b, srcs[0], srcs[1]); break;
+            case 1: result = nir_fneu(&b, srcs[0], srcs[1]); break;
             case 2: result = nir_bany_fnequal2(&b, srcs[0], srcs[1]); break;
             case 3: result = nir_bany_fnequal3(&b, srcs[0], srcs[1]); break;
             case 4: result = nir_bany_fnequal4(&b, srcs[0], srcs[1]); break;
@@ -2300,12 +2307,14 @@ nir_visitor::visit(ir_expression *ir)
       result = nir_bcsel(&b, srcs[0], srcs[1], srcs[2]);
       break;
    case ir_triop_bitfield_extract:
-      result = (out_type == GLSL_TYPE_INT) ?
-         nir_ibitfield_extract(&b, srcs[0], srcs[1], srcs[2]) :
-         nir_ubitfield_extract(&b, srcs[0], srcs[1], srcs[2]);
+      result = ir->type->is_int_16_32() ?
+         nir_ibitfield_extract(&b, nir_i2i32(&b, srcs[0]), nir_i2i32(&b, srcs[1]), nir_i2i32(&b, srcs[2])) :
+         nir_ubitfield_extract(&b, nir_u2u32(&b, srcs[0]), nir_i2i32(&b, srcs[1]), nir_i2i32(&b, srcs[2]));
       break;
    case ir_quadop_bitfield_insert:
-      result = nir_bitfield_insert(&b, srcs[0], srcs[1], srcs[2], srcs[3]);
+      result = nir_bitfield_insert(&b,
+                                   nir_u2u32(&b, srcs[0]), nir_u2u32(&b, srcs[1]),
+                                   nir_i2i32(&b, srcs[2]), nir_i2i32(&b, srcs[3]));
       break;
    case ir_quadop_vector:
       result = nir_vec(&b, srcs, ir->type->vector_elements);

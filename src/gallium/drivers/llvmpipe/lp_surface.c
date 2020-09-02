@@ -132,6 +132,15 @@ static void lp_blit(struct pipe_context *pipe,
       return;
    }
 
+   /* for 32-bit unorm depth, avoid the conversions to float and back,
+      which can introduce accuracy errors. */
+   if (blit_info->src.format == PIPE_FORMAT_Z32_UNORM &&
+       blit_info->dst.format == PIPE_FORMAT_Z32_UNORM && info.filter == PIPE_TEX_FILTER_NEAREST) {
+      info.src.format = PIPE_FORMAT_R32_UINT;
+      info.dst.format = PIPE_FORMAT_R32_UINT;
+      info.mask = PIPE_MASK_R;
+   }
+
    /* XXX turn off occlusion and streamout queries */
 
    util_blitter_save_vertex_buffer_slot(lp->blitter, lp->vertex_buffer);
@@ -304,6 +313,10 @@ llvmpipe_clear_render_target(struct pipe_context *pipe,
    if (dst->texture->nr_samples > 1) {
       struct pipe_box box;
       u_box_2d(dstx, dsty, width, height, &box);
+      if (dst->texture->target != PIPE_BUFFER) {
+         box.z = dst->u.tex.first_layer;
+         box.depth = dst->u.tex.last_layer - dst->u.tex.first_layer + 1;
+      }
       for (unsigned s = 0; s < util_res_sample_count(dst->texture); s++) {
          lp_clear_color_texture_msaa(pipe, dst->texture, dst->format,
                                      color, s, &box);
@@ -369,6 +382,10 @@ llvmpipe_clear_depth_stencil(struct pipe_context *pipe,
       uint64_t zstencil = util_pack64_z_stencil(dst->format, depth, stencil);
       struct pipe_box box;
       u_box_2d(dstx, dsty, width, height, &box);
+      if (dst->texture->target != PIPE_BUFFER) {
+         box.z = dst->u.tex.first_layer;
+         box.depth = dst->u.tex.last_layer - dst->u.tex.first_layer + 1;
+      }
       for (unsigned s = 0; s < util_res_sample_count(dst->texture); s++)
          lp_clear_depth_stencil_texture_msaa(pipe, dst->texture,
                                              dst->format, clear_flags,

@@ -862,7 +862,7 @@ brw_process_driconf_options(struct brw_context *brw)
    driOptionCache *options = &brw->optionCache;
    driParseConfigFiles(options, &brw->screen->optionCache,
                        brw->driContext->driScreenPriv->myNum,
-                       "i965", NULL, NULL, 0);
+                       "i965", NULL, NULL, 0, NULL, 0);
 
    if (INTEL_DEBUG & DEBUG_NO_HIZ) {
        brw->has_hiz = false;
@@ -922,6 +922,11 @@ brw_process_driconf_options(struct brw_context *brw)
 
    ctx->Const.AllowGLSLCrossStageInterpolationMismatch =
       driQueryOptionb(options, "allow_glsl_cross_stage_interpolation_mismatch");
+
+   char *vendor_str = driQueryOptionstr(options, "force_gl_vendor");
+   /* not an empty string */
+   if (*vendor_str)
+      ctx->Const.VendorOverride = vendor_str;
 
    ctx->Const.dri_config_options_sha1 = ralloc_array(brw, unsigned char, 20);
    driComputeOptionsSha1(&brw->screen->optionCache,

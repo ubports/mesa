@@ -31,10 +31,8 @@
 #include <libsync.h>
 #include <stdbool.h>
 #include <string.h>
-#include <sys/mman.h>
 #include <sys/sysinfo.h>
 #include <unistd.h>
-#include <xf86drm.h>
 
 #include "compiler/glsl_types.h"
 #include "util/debug.h"
@@ -43,14 +41,8 @@
 #include "vk_format.h"
 #include "vk_util.h"
 
-#include "drm-uapi/msm_drm.h"
-
 /* for fd_get_driver/device_uuid() */
 #include "freedreno/common/freedreno_uuid.h"
-
-static void
-tu_semaphore_remove_temp(struct tu_device *device,
-                         struct tu_semaphore *sem);
 
 static int
 tu_device_get_cache_uuid(uint16_t family, void *uuid)
@@ -68,214 +60,34 @@ tu_device_get_cache_uuid(uint16_t family, void *uuid)
    return 0;
 }
 
-static VkResult
-tu_bo_init(struct tu_device *dev,
-           struct tu_bo *bo,
-           uint32_t gem_handle,
-           uint64_t size)
-{
-   uint64_t iova = tu_gem_info_iova(dev, gem_handle);
-   if (!iova)
-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
-
-   *bo = (struct tu_bo) {
-      .gem_handle = gem_handle,
-      .size = size,
-      .iova = iova,
-   };
-
-   return VK_SUCCESS;
-}
-
 VkResult
-tu_bo_init_new(struct tu_device *dev, struct tu_bo *bo, uint64_t size)
-{
-   /* TODO: Choose better flags. As of 2018-11-12, freedreno/drm/msm_bo.c
-    * always sets `flags = MSM_BO_WC`, and we copy that behavior here.
-    */
-   uint32_t gem_handle = tu_gem_new(dev, size, MSM_BO_WC);
-   if (!gem_handle)
-      return vk_error(dev->instance, VK_ERROR_OUT_OF_DEVICE_MEMORY);
-
-   VkResult result = tu_bo_init(dev, bo, gem_handle, size);
-   if (result != VK_SUCCESS) {
-      tu_gem_close(dev, gem_handle);
-      return vk_error(dev->instance, result);
-   }
-
-   return VK_SUCCESS;
-}
-
-VkResult
-tu_bo_init_dmabuf(struct tu_device *dev,
-                  struct tu_bo *bo,
-                  uint64_t size,
-                  int fd)
-{
-   uint32_t gem_handle = tu_gem_import_dmabuf(dev, fd, size);
-   if (!gem_handle)
-      return vk_error(dev->instance, VK_ERROR_INVALID_EXTERNAL_HANDLE);
-
-   VkResult result = tu_bo_init(dev, bo, gem_handle, size);
-   if (result != VK_SUCCESS) {
-      tu_gem_close(dev, gem_handle);
-      return vk_error(dev->instance, result);
-   }
-
-   return VK_SUCCESS;
-}
-
-int
-tu_bo_export_dmabuf(struct tu_device *dev, struct tu_bo *bo)
-{
-   return tu_gem_export_dmabuf(dev, bo->gem_handle);
-}
-
-VkResult
-tu_bo_map(struct tu_device *dev, struct tu_bo *bo)
-{
-   if (bo->map)
-      return VK_SUCCESS;
-
-   uint64_t offset = tu_gem_info_offset(dev, bo->gem_handle);
-   if (!offset)
-      return vk_error(dev->instance, VK_ERROR_OUT_OF_DEVICE_MEMORY);
-
-   /* TODO: Should we use the wrapper os_mmap() like Freedreno does? */
-   void *map = mmap(0, bo->size, PROT_READ | PROT_WRITE, MAP_SHARED,
-                    dev->physical_device->local_fd, offset);
-   if (map == MAP_FAILED)
-      return vk_error(dev->instance, VK_ERROR_MEMORY_MAP_FAILED);
-
-   bo->map = map;
-   return VK_SUCCESS;
-}
-
-void
-tu_bo_finish(struct tu_device *dev, struct tu_bo *bo)
-{
-   assert(bo->gem_handle);
-
-   if (bo->map)
-      munmap(bo->map, bo->size);
-
-   tu_gem_close(dev, bo->gem_handle);
-}
-
-static VkResult
 tu_physical_device_init(struct tu_physical_device *device,
-                        struct tu_instance *instance,
-                        drmDevicePtr drm_device)
+                        struct tu_instance *instance)
 {
-   const char *path = drm_device->nodes[DRM_NODE_RENDER];
    VkResult result = VK_SUCCESS;
-   drmVersionPtr version;
-   int fd;
-   int master_fd = -1;
-
-   fd = open(path, O_RDWR | O_CLOEXEC);
-   if (fd < 0) {
-      return vk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
-                       "failed to open device %s", path);
-   }
-
-   /* Version 1.3 added MSM_INFO_IOVA. */
-   const int min_version_major = 1;
-   const int min_version_minor = 3;
-
-   version = drmGetVersion(fd);
-   if (!version) {
-      close(fd);
-      return vk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
-                       "failed to query kernel driver version for device %s",
-                       path);
-   }
-
-   if (strcmp(version->name, "msm")) {
-      drmFreeVersion(version);
-      close(fd);
-      return vk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
-                       "device %s does not use the msm kernel driver", path);
-   }
-
-   if (version->version_major != min_version_major ||
-       version->version_minor < min_version_minor) {
-      result = vk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
-                         "kernel driver for device %s has version %d.%d, "
-                         "but Vulkan requires version >= %d.%d",
-                         path, version->version_major, version->version_minor,
-                         min_version_major, min_version_minor);
-      drmFreeVersion(version);
-      close(fd);
-      return result;
-   }
-
-   device->msm_major_version = version->version_major;
-   device->msm_minor_version = version->version_minor;
-
-   drmFreeVersion(version);
-
-   if (instance->debug_flags & TU_DEBUG_STARTUP)
-      tu_logi("Found compatible device '%s'.", path);
-
-   vk_object_base_init(NULL, &device->base, VK_OBJECT_TYPE_PHYSICAL_DEVICE);
-   device->instance = instance;
-   assert(strlen(path) < ARRAY_SIZE(device->path));
-   strncpy(device->path, path, ARRAY_SIZE(device->path));
-
-   if (instance->enabled_extensions.KHR_display) {
-      master_fd =
-         open(drm_device->nodes[DRM_NODE_PRIMARY], O_RDWR | O_CLOEXEC);
-      if (master_fd >= 0) {
-         /* TODO: free master_fd is accel is not working? */
-      }
-   }
-
-   device->master_fd = master_fd;
-   device->local_fd = fd;
-
-   if (tu_drm_get_gpu_id(device, &device->gpu_id)) {
-      if (instance->debug_flags & TU_DEBUG_STARTUP)
-         tu_logi("Could not query the GPU ID");
-      result = vk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED,
-                         "could not get GPU ID");
-      goto fail;
-   }
-
-   if (tu_drm_get_gmem_size(device, &device->gmem_size)) {
-      if (instance->debug_flags & TU_DEBUG_STARTUP)
-         tu_logi("Could not query the GMEM size");
-      result = vk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED,
-                         "could not get GMEM size");
-      goto fail;
-   }
-
-   if (tu_drm_get_gmem_base(device, &device->gmem_base)) {
-      if (instance->debug_flags & TU_DEBUG_STARTUP)
-         tu_logi("Could not query the GMEM size");
-      result = vk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED,
-                         "could not get GMEM size");
-      goto fail;
-   }
 
    memset(device->name, 0, sizeof(device->name));
    sprintf(device->name, "FD%d", device->gpu_id);
+
+   device->limited_z24s8 = (device->gpu_id == 630);
 
    switch (device->gpu_id) {
    case 618:
       device->ccu_offset_gmem = 0x7c000; /* 0x7e000 in some cases? */
       device->ccu_offset_bypass = 0x10000;
-      device->tile_align_w = 64;
+      device->tile_align_w = 32;
       device->magic.PC_UNKNOWN_9805 = 0x0;
       device->magic.SP_UNKNOWN_A0F8 = 0x0;
+      device->supports_multiview_mask = false; /* TODO */
       break;
    case 630:
    case 640:
       device->ccu_offset_gmem = 0xf8000;
       device->ccu_offset_bypass = 0x20000;
-      device->tile_align_w = 64;
+      device->tile_align_w = 32;
       device->magic.PC_UNKNOWN_9805 = 0x1;
       device->magic.SP_UNKNOWN_A0F8 = 0x1;
+      device->supports_multiview_mask = device->gpu_id != 630;
       break;
    case 650:
       device->ccu_offset_gmem = 0x114000;
@@ -283,6 +95,7 @@ tu_physical_device_init(struct tu_physical_device *device,
       device->tile_align_w = 96;
       device->magic.PC_UNKNOWN_9805 = 0x2;
       device->magic.SP_UNKNOWN_A0F8 = 0x2;
+      device->supports_multiview_mask = true;
       break;
    default:
       result = vk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED,
@@ -324,9 +137,9 @@ tu_physical_device_init(struct tu_physical_device *device,
    return VK_SUCCESS;
 
 fail:
-   close(fd);
-   if (master_fd != -1)
-      close(master_fd);
+   close(device->local_fd);
+   if (device->master_fd != -1)
+      close(device->master_fd);
    return result;
 }
 
@@ -495,46 +308,6 @@ tu_DestroyInstance(VkInstance _instance,
    vk_free(&instance->alloc, instance);
 }
 
-static VkResult
-tu_enumerate_devices(struct tu_instance *instance)
-{
-   /* TODO: Check for more devices ? */
-   drmDevicePtr devices[8];
-   VkResult result = VK_ERROR_INCOMPATIBLE_DRIVER;
-   int max_devices;
-
-   instance->physical_device_count = 0;
-
-   max_devices = drmGetDevices2(0, devices, ARRAY_SIZE(devices));
-
-   if (instance->debug_flags & TU_DEBUG_STARTUP) {
-      if (max_devices < 0)
-         tu_logi("drmGetDevices2 returned error: %s\n", strerror(max_devices));
-      else
-         tu_logi("Found %d drm nodes", max_devices);
-   }
-
-   if (max_devices < 1)
-      return vk_error(instance, VK_ERROR_INCOMPATIBLE_DRIVER);
-
-   for (unsigned i = 0; i < (unsigned) max_devices; i++) {
-      if (devices[i]->available_nodes & 1 << DRM_NODE_RENDER &&
-          devices[i]->bustype == DRM_BUS_PLATFORM) {
-
-         result = tu_physical_device_init(
-            instance->physical_devices + instance->physical_device_count,
-            instance, devices[i]);
-         if (result == VK_SUCCESS)
-            ++instance->physical_device_count;
-         else if (result != VK_ERROR_INCOMPATIBLE_DRIVER)
-            break;
-      }
-   }
-   drmFreeDevices(devices, max_devices);
-
-   return result;
-}
-
 VkResult
 tu_EnumeratePhysicalDevices(VkInstance _instance,
                             uint32_t *pPhysicalDeviceCount,
@@ -622,17 +395,17 @@ tu_GetPhysicalDeviceFeatures(VkPhysicalDevice physicalDevice,
       .textureCompressionASTC_LDR = true,
       .textureCompressionBC = true,
       .occlusionQueryPrecise = true,
-      .pipelineStatisticsQuery = false,
-      .vertexPipelineStoresAndAtomics = false,
-      .fragmentStoresAndAtomics = false,
+      .pipelineStatisticsQuery = true,
+      .vertexPipelineStoresAndAtomics = true,
+      .fragmentStoresAndAtomics = true,
       .shaderTessellationAndGeometryPointSize = false,
       .shaderImageGatherExtended = false,
       .shaderStorageImageExtendedFormats = false,
       .shaderStorageImageMultisample = false,
-      .shaderUniformBufferArrayDynamicIndexing = false,
-      .shaderSampledImageArrayDynamicIndexing = false,
-      .shaderStorageBufferArrayDynamicIndexing = false,
-      .shaderStorageImageArrayDynamicIndexing = false,
+      .shaderUniformBufferArrayDynamicIndexing = true,
+      .shaderSampledImageArrayDynamicIndexing = true,
+      .shaderStorageBufferArrayDynamicIndexing = true,
+      .shaderStorageImageArrayDynamicIndexing = true,
       .shaderStorageImageReadWithoutFormat = false,
       .shaderStorageImageWriteWithoutFormat = false,
       .shaderClipDistance = false,
@@ -659,7 +432,7 @@ tu_GetPhysicalDeviceFeatures2(VkPhysicalDevice physicalDevice,
          features->uniformAndStorageBuffer16BitAccess  = false;
          features->storagePushConstant16               = false;
          features->storageInputOutput16                = false;
-         features->multiview                           = false;
+         features->multiview                           = true;
          features->multiviewGeometryShader             = false;
          features->multiviewTessellationShader         = false;
          features->variablePointersStorageBuffer       = true;
@@ -667,6 +440,59 @@ tu_GetPhysicalDeviceFeatures2(VkPhysicalDevice physicalDevice,
          features->protectedMemory                     = false;
          features->samplerYcbcrConversion              = true;
          features->shaderDrawParameters                = true;
+         break;
+      }
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES: {
+         VkPhysicalDeviceVulkan12Features *features = (void *) ext;
+         features->samplerMirrorClampToEdge            = true;
+         features->drawIndirectCount                   = true;
+         features->storageBuffer8BitAccess             = false;
+         features->uniformAndStorageBuffer8BitAccess   = false;
+         features->storagePushConstant8                = false;
+         features->shaderBufferInt64Atomics            = false;
+         features->shaderSharedInt64Atomics            = false;
+         features->shaderFloat16                       = false;
+         features->shaderInt8                          = false;
+
+         features->descriptorIndexing                                 = false;
+         features->shaderInputAttachmentArrayDynamicIndexing          = false;
+         features->shaderUniformTexelBufferArrayDynamicIndexing       = false;
+         features->shaderStorageTexelBufferArrayDynamicIndexing       = false;
+         features->shaderUniformBufferArrayNonUniformIndexing         = false;
+         features->shaderSampledImageArrayNonUniformIndexing          = false;
+         features->shaderStorageBufferArrayNonUniformIndexing         = false;
+         features->shaderStorageImageArrayNonUniformIndexing          = false;
+         features->shaderInputAttachmentArrayNonUniformIndexing       = false;
+         features->shaderUniformTexelBufferArrayNonUniformIndexing    = false;
+         features->shaderStorageTexelBufferArrayNonUniformIndexing    = false;
+         features->descriptorBindingUniformBufferUpdateAfterBind      = false;
+         features->descriptorBindingSampledImageUpdateAfterBind       = false;
+         features->descriptorBindingStorageImageUpdateAfterBind       = false;
+         features->descriptorBindingStorageBufferUpdateAfterBind      = false;
+         features->descriptorBindingUniformTexelBufferUpdateAfterBind = false;
+         features->descriptorBindingStorageTexelBufferUpdateAfterBind = false;
+         features->descriptorBindingUpdateUnusedWhilePending          = false;
+         features->descriptorBindingPartiallyBound                    = false;
+         features->descriptorBindingVariableDescriptorCount           = false;
+         features->runtimeDescriptorArray                             = false;
+
+         features->samplerFilterMinmax                 = true;
+         features->scalarBlockLayout                   = false;
+         features->imagelessFramebuffer                = false;
+         features->uniformBufferStandardLayout         = false;
+         features->shaderSubgroupExtendedTypes         = false;
+         features->separateDepthStencilLayouts         = false;
+         features->hostQueryReset                      = true;
+         features->timelineSemaphore                   = false;
+         features->bufferDeviceAddress                 = false;
+         features->bufferDeviceAddressCaptureReplay    = false;
+         features->bufferDeviceAddressMultiDevice      = false;
+         features->vulkanMemoryModel                   = false;
+         features->vulkanMemoryModelDeviceScope        = false;
+         features->vulkanMemoryModelAvailabilityVisibilityChains = false;
+         features->shaderOutputViewportIndex           = false;
+         features->shaderOutputLayer                   = false;
+         features->subgroupBroadcastDynamicId          = false;
          break;
       }
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VARIABLE_POINTERS_FEATURES: {
@@ -678,7 +504,7 @@ tu_GetPhysicalDeviceFeatures2(VkPhysicalDevice physicalDevice,
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES: {
          VkPhysicalDeviceMultiviewFeatures *features =
             (VkPhysicalDeviceMultiviewFeatures *) ext;
-         features->multiview = false;
+         features->multiview = true;
          features->multiviewGeometryShader = false;
          features->multiviewTessellationShader = false;
          break;
@@ -738,8 +564,8 @@ tu_GetPhysicalDeviceFeatures2(VkPhysicalDevice physicalDevice,
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CONDITIONAL_RENDERING_FEATURES_EXT: {
          VkPhysicalDeviceConditionalRenderingFeaturesEXT *features =
             (VkPhysicalDeviceConditionalRenderingFeaturesEXT *) ext;
-         features->conditionalRendering = false;
-         features->inheritedConditionalRendering = false;
+         features->conditionalRendering = true;
+         features->inheritedConditionalRendering = true;
          break;
       }
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT: {
@@ -766,6 +592,30 @@ tu_GetPhysicalDeviceFeatures2(VkPhysicalDevice physicalDevice,
          VkPhysicalDevicePrivateDataFeaturesEXT *features =
             (VkPhysicalDevicePrivateDataFeaturesEXT *)ext;
          features->privateData = true;
+         break;
+      }
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_ENABLE_FEATURES_EXT: {
+         VkPhysicalDeviceDepthClipEnableFeaturesEXT *features =
+            (VkPhysicalDeviceDepthClipEnableFeaturesEXT *)ext;
+         features->depthClipEnable = true;
+         break;
+      }
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_4444_FORMATS_FEATURES_EXT: {
+         VkPhysicalDevice4444FormatsFeaturesEXT *features = (void *)ext;
+         features->formatA4R4G4B4 = true;
+         features->formatA4B4G4R4 = true;
+         break;
+      }
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT: {
+         VkPhysicalDeviceCustomBorderColorFeaturesEXT *features = (void *) ext;
+         features->customBorderColors = true;
+         features->customBorderColorWithoutFormat = true;
+         break;
+      }
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES_EXT: {
+         VkPhysicalDeviceHostQueryResetFeaturesEXT *features =
+            (VkPhysicalDeviceHostQueryResetFeaturesEXT *)ext;
+         features->hostQueryReset = true;
          break;
       }
       default:
@@ -1016,6 +866,11 @@ tu_GetPhysicalDeviceProperties2(VkPhysicalDevice physicalDevice,
          props->maxVertexAttribDivisor = UINT32_MAX;
          break;
       }
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_PROPERTIES_EXT: {
+         VkPhysicalDeviceCustomBorderColorPropertiesEXT *props = (void *)ext;
+         props->maxCustomBorderColorSamplers = TU_BORDER_COLOR_COUNT;
+         break;
+      }
       default:
          break;
       }
@@ -1141,60 +996,6 @@ tu_get_device_extension_index(const char *name)
    return -1;
 }
 
-struct PACKED bcolor_entry {
-   uint32_t fp32[4];
-   uint16_t ui16[4];
-   int16_t  si16[4];
-   uint16_t fp16[4];
-   uint16_t rgb565;
-   uint16_t rgb5a1;
-   uint16_t rgba4;
-   uint8_t __pad0[2];
-   uint8_t  ui8[4];
-   int8_t   si8[4];
-   uint32_t rgb10a2;
-   uint32_t z24; /* also s8? */
-   uint16_t srgb[4];      /* appears to duplicate fp16[], but clamped, used for srgb */
-   uint8_t  __pad1[56];
-} border_color[] = {
-   [VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK] = {},
-   [VK_BORDER_COLOR_INT_TRANSPARENT_BLACK] = {},
-   [VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK] = {
-      .fp32[3] = 0x3f800000,
-      .ui16[3] = 0xffff,
-      .si16[3] = 0x7fff,
-      .fp16[3] = 0x3c00,
-      .rgb5a1 = 0x8000,
-      .rgba4 = 0xf000,
-      .ui8[3] = 0xff,
-      .si8[3] = 0x7f,
-      .rgb10a2 = 0xc0000000,
-      .srgb[3] = 0x3c00,
-   },
-   [VK_BORDER_COLOR_INT_OPAQUE_BLACK] = {
-      .fp32[3] = 1,
-      .fp16[3] = 1,
-   },
-   [VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE] = {
-      .fp32[0 ... 3] = 0x3f800000,
-      .ui16[0 ... 3] = 0xffff,
-      .si16[0 ... 3] = 0x7fff,
-      .fp16[0 ... 3] = 0x3c00,
-      .rgb565 = 0xffff,
-      .rgb5a1 = 0xffff,
-      .rgba4 = 0xffff,
-      .ui8[0 ... 3] = 0xff,
-      .si8[0 ... 3] = 0x7f,
-      .rgb10a2 = 0xffffffff,
-      .z24 = 0xffffff,
-      .srgb[0 ... 3] = 0x3c00,
-   },
-   [VK_BORDER_COLOR_INT_OPAQUE_WHITE] = {
-      .fp32[0 ... 3] = 1,
-      .fp16[0 ... 3] = 1,
-   },
-};
-
 VkResult
 tu_CreateDevice(VkPhysicalDevice physicalDevice,
                 const VkDeviceCreateInfo *pCreateInfo,
@@ -1204,6 +1005,7 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
    TU_FROM_HANDLE(tu_physical_device, physical_device, physicalDevice);
    VkResult result;
    struct tu_device *device;
+   bool custom_border_colors = false;
 
    /* Check enabled features */
    if (pCreateInfo->pEnabledFeatures) {
@@ -1217,6 +1019,18 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
          if (enabled_feature[i] && !supported_feature[i])
             return vk_error(physical_device->instance,
                             VK_ERROR_FEATURE_NOT_PRESENT);
+      }
+   }
+
+   vk_foreach_struct_const(ext, pCreateInfo->pNext) {
+      switch (ext->sType) {
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT: {
+         const VkPhysicalDeviceCustomBorderColorFeaturesEXT *border_color_features = (const void *)ext;
+         custom_border_colors = border_color_features->customBorderColors;
+         break;
+      }
+      default:
+         break;
       }
    }
 
@@ -1278,8 +1092,11 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
    device->vsc_draw_strm_pitch = 0x1000 + VSC_PAD;
    device->vsc_prim_strm_pitch = 0x4000 + VSC_PAD;
 
-   STATIC_ASSERT(sizeof(border_color) == sizeof(((struct tu6_global*) 0)->border_color));
-   result = tu_bo_init_new(device, &device->global_bo, sizeof(struct tu6_global));
+   uint32_t global_size = sizeof(struct tu6_global);
+   if (custom_border_colors)
+      global_size += TU_BORDER_COLOR_COUNT * sizeof(struct bcolor_entry);
+
+   result = tu_bo_init_new(device, &device->global_bo, global_size);
    if (result != VK_SUCCESS)
       goto fail_global_bo;
 
@@ -1287,8 +1104,24 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
    if (result != VK_SUCCESS)
       goto fail_global_bo_map;
 
-   memcpy(device->global_bo.map + gb_offset(border_color), border_color, sizeof(border_color));
+   struct tu6_global *global = device->global_bo.map;
    tu_init_clear_blit_shaders(device->global_bo.map);
+   global->predicate = 0;
+   tu6_pack_border_color(&global->bcolor_builtin[VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK],
+                         &(VkClearColorValue) {}, false);
+   tu6_pack_border_color(&global->bcolor_builtin[VK_BORDER_COLOR_INT_TRANSPARENT_BLACK],
+                         &(VkClearColorValue) {}, true);
+   tu6_pack_border_color(&global->bcolor_builtin[VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK],
+                         &(VkClearColorValue) { .float32[3] = 1.0f }, false);
+   tu6_pack_border_color(&global->bcolor_builtin[VK_BORDER_COLOR_INT_OPAQUE_BLACK],
+                         &(VkClearColorValue) { .int32[3] = 1 }, true);
+   tu6_pack_border_color(&global->bcolor_builtin[VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE],
+                         &(VkClearColorValue) { .float32[0 ... 3] = 1.0f }, false);
+   tu6_pack_border_color(&global->bcolor_builtin[VK_BORDER_COLOR_INT_OPAQUE_WHITE],
+                         &(VkClearColorValue) { .int32[0 ... 3] = 1 }, true);
+
+   /* initialize to ones so ffs can be used to find unused slots */
+   BITSET_ONES(device->custom_border_color);
 
    VkPipelineCacheCreateInfo ci;
    ci.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
@@ -1307,7 +1140,7 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
    for (unsigned i = 0; i < ARRAY_SIZE(device->scratch_bos); i++)
       mtx_init(&device->scratch_bos[i].construct_mtx, mtx_plain);
 
-   mtx_init(&device->vsc_pitch_mtx, mtx_plain);
+   mtx_init(&device->mutex, mtx_plain);
 
    *pDevice = tu_device_to_handle(device);
    return VK_SUCCESS;
@@ -1482,183 +1315,6 @@ tu_GetDeviceQueue(VkDevice _device,
                              .queueIndex = queueIndex };
 
    tu_GetDeviceQueue2(_device, &info, pQueue);
-}
-
-static VkResult
-tu_get_semaphore_syncobjs(const VkSemaphore *sems,
-                          uint32_t sem_count,
-                          bool wait,
-                          struct drm_msm_gem_submit_syncobj **out,
-                          uint32_t *out_count)
-{
-   uint32_t syncobj_count = 0;
-   struct drm_msm_gem_submit_syncobj *syncobjs;
-
-   for (uint32_t i = 0; i  < sem_count; ++i) {
-      TU_FROM_HANDLE(tu_semaphore, sem, sems[i]);
-
-      struct tu_semaphore_part *part =
-         sem->temporary.kind != TU_SEMAPHORE_NONE ?
-            &sem->temporary : &sem->permanent;
-
-      if (part->kind == TU_SEMAPHORE_SYNCOBJ)
-         ++syncobj_count;
-   }
-
-   *out = NULL;
-   *out_count = syncobj_count;
-   if (!syncobj_count)
-      return VK_SUCCESS;
-
-   *out = syncobjs = calloc(syncobj_count, sizeof (*syncobjs));
-   if (!syncobjs)
-      return VK_ERROR_OUT_OF_HOST_MEMORY;
-
-   for (uint32_t i = 0, j = 0; i  < sem_count; ++i) {
-      TU_FROM_HANDLE(tu_semaphore, sem, sems[i]);
-
-      struct tu_semaphore_part *part =
-         sem->temporary.kind != TU_SEMAPHORE_NONE ?
-            &sem->temporary : &sem->permanent;
-
-      if (part->kind == TU_SEMAPHORE_SYNCOBJ) {
-         syncobjs[j].handle = part->syncobj;
-         syncobjs[j].flags = wait ? MSM_SUBMIT_SYNCOBJ_RESET : 0;
-         ++j;
-      }
-   }
-
-   return VK_SUCCESS;
-}
-
-
-static void
-tu_semaphores_remove_temp(struct tu_device *device,
-                          const VkSemaphore *sems,
-                          uint32_t sem_count)
-{
-   for (uint32_t i = 0; i  < sem_count; ++i) {
-      TU_FROM_HANDLE(tu_semaphore, sem, sems[i]);
-      tu_semaphore_remove_temp(device, sem);
-   }
-}
-
-VkResult
-tu_QueueSubmit(VkQueue _queue,
-               uint32_t submitCount,
-               const VkSubmitInfo *pSubmits,
-               VkFence _fence)
-{
-   TU_FROM_HANDLE(tu_queue, queue, _queue);
-   VkResult result;
-
-   for (uint32_t i = 0; i < submitCount; ++i) {
-      const VkSubmitInfo *submit = pSubmits + i;
-      const bool last_submit = (i == submitCount - 1);
-      struct drm_msm_gem_submit_syncobj *in_syncobjs = NULL, *out_syncobjs = NULL;
-      uint32_t nr_in_syncobjs, nr_out_syncobjs;
-      struct tu_bo_list bo_list;
-      tu_bo_list_init(&bo_list);
-
-      result = tu_get_semaphore_syncobjs(pSubmits[i].pWaitSemaphores,
-                                         pSubmits[i].waitSemaphoreCount,
-                                         false, &in_syncobjs, &nr_in_syncobjs);
-      if (result != VK_SUCCESS) {
-         return tu_device_set_lost(queue->device,
-                                   "failed to allocate space for semaphore submission\n");
-      }
-
-      result = tu_get_semaphore_syncobjs(pSubmits[i].pSignalSemaphores,
-                                         pSubmits[i].signalSemaphoreCount,
-                                         false, &out_syncobjs, &nr_out_syncobjs);
-      if (result != VK_SUCCESS) {
-         free(in_syncobjs);
-         return tu_device_set_lost(queue->device,
-                                   "failed to allocate space for semaphore submission\n");
-      }
-
-      uint32_t entry_count = 0;
-      for (uint32_t j = 0; j < submit->commandBufferCount; ++j) {
-         TU_FROM_HANDLE(tu_cmd_buffer, cmdbuf, submit->pCommandBuffers[j]);
-         entry_count += cmdbuf->cs.entry_count;
-      }
-
-      struct drm_msm_gem_submit_cmd cmds[entry_count];
-      uint32_t entry_idx = 0;
-      for (uint32_t j = 0; j < submit->commandBufferCount; ++j) {
-         TU_FROM_HANDLE(tu_cmd_buffer, cmdbuf, submit->pCommandBuffers[j]);
-         struct tu_cs *cs = &cmdbuf->cs;
-         for (unsigned i = 0; i < cs->entry_count; ++i, ++entry_idx) {
-            cmds[entry_idx].type = MSM_SUBMIT_CMD_BUF;
-            cmds[entry_idx].submit_idx =
-               tu_bo_list_add(&bo_list, cs->entries[i].bo,
-                              MSM_SUBMIT_BO_READ | MSM_SUBMIT_BO_DUMP);
-            cmds[entry_idx].submit_offset = cs->entries[i].offset;
-            cmds[entry_idx].size = cs->entries[i].size;
-            cmds[entry_idx].pad = 0;
-            cmds[entry_idx].nr_relocs = 0;
-            cmds[entry_idx].relocs = 0;
-         }
-
-         tu_bo_list_merge(&bo_list, &cmdbuf->bo_list);
-      }
-
-      uint32_t flags = MSM_PIPE_3D0;
-      if (nr_in_syncobjs) {
-         flags |= MSM_SUBMIT_SYNCOBJ_IN;
-      }
-      if (nr_out_syncobjs) {
-         flags |= MSM_SUBMIT_SYNCOBJ_OUT;
-      }
-
-      if (last_submit) {
-         flags |= MSM_SUBMIT_FENCE_FD_OUT;
-      }
-
-      struct drm_msm_gem_submit req = {
-         .flags = flags,
-         .queueid = queue->msm_queue_id,
-         .bos = (uint64_t)(uintptr_t) bo_list.bo_infos,
-         .nr_bos = bo_list.count,
-         .cmds = (uint64_t)(uintptr_t)cmds,
-         .nr_cmds = entry_count,
-         .in_syncobjs = (uint64_t)(uintptr_t)in_syncobjs,
-         .out_syncobjs = (uint64_t)(uintptr_t)out_syncobjs,
-         .nr_in_syncobjs = nr_in_syncobjs,
-         .nr_out_syncobjs = nr_out_syncobjs,
-         .syncobj_stride = sizeof(struct drm_msm_gem_submit_syncobj),
-      };
-
-      int ret = drmCommandWriteRead(queue->device->physical_device->local_fd,
-                                    DRM_MSM_GEM_SUBMIT,
-                                    &req, sizeof(req));
-      if (ret) {
-         free(in_syncobjs);
-         free(out_syncobjs);
-         return tu_device_set_lost(queue->device, "submit failed: %s\n",
-                                   strerror(errno));
-      }
-
-      tu_bo_list_destroy(&bo_list);
-      free(in_syncobjs);
-      free(out_syncobjs);
-
-      tu_semaphores_remove_temp(queue->device, pSubmits[i].pWaitSemaphores,
-                                pSubmits[i].waitSemaphoreCount);
-      if (last_submit) {
-         /* no need to merge fences as queue execution is serialized */
-         tu_fence_update_fd(&queue->submit_fence, req.fence_fd);
-      } else if (last_submit) {
-         close(req.fence_fd);
-      }
-   }
-
-   if (_fence != VK_NULL_HANDLE) {
-      TU_FROM_HANDLE(tu_fence, fence, _fence);
-      tu_fence_copy(fence, &queue->submit_fence);
-   }
-
-   return VK_SUCCESS;
 }
 
 VkResult
@@ -2067,80 +1723,6 @@ tu_QueueBindSparse(VkQueue _queue,
    return VK_SUCCESS;
 }
 
-// Queue semaphore functions
-
-
-static void
-tu_semaphore_part_destroy(struct tu_device *device,
-                          struct tu_semaphore_part *part)
-{
-   switch(part->kind) {
-   case TU_SEMAPHORE_NONE:
-      break;
-   case TU_SEMAPHORE_SYNCOBJ:
-      drmSyncobjDestroy(device->physical_device->local_fd, part->syncobj);
-      break;
-   }
-   part->kind = TU_SEMAPHORE_NONE;
-}
-
-static void
-tu_semaphore_remove_temp(struct tu_device *device,
-                         struct tu_semaphore *sem)
-{
-   if (sem->temporary.kind != TU_SEMAPHORE_NONE) {
-      tu_semaphore_part_destroy(device, &sem->temporary);
-   }
-}
-
-VkResult
-tu_CreateSemaphore(VkDevice _device,
-                   const VkSemaphoreCreateInfo *pCreateInfo,
-                   const VkAllocationCallbacks *pAllocator,
-                   VkSemaphore *pSemaphore)
-{
-   TU_FROM_HANDLE(tu_device, device, _device);
-
-   struct tu_semaphore *sem =
-         vk_object_alloc(&device->vk, pAllocator, sizeof(*sem),
-                         VK_OBJECT_TYPE_SEMAPHORE);
-   if (!sem)
-      return vk_error(device->instance, VK_ERROR_OUT_OF_HOST_MEMORY);
-
-   const VkExportSemaphoreCreateInfo *export =
-      vk_find_struct_const(pCreateInfo->pNext, EXPORT_SEMAPHORE_CREATE_INFO);
-   VkExternalSemaphoreHandleTypeFlags handleTypes =
-      export ? export->handleTypes : 0;
-
-   sem->permanent.kind = TU_SEMAPHORE_NONE;
-   sem->temporary.kind = TU_SEMAPHORE_NONE;
-
-   if (handleTypes) {
-      if (drmSyncobjCreate(device->physical_device->local_fd, 0, &sem->permanent.syncobj) < 0) {
-          vk_free2(&device->vk.alloc, pAllocator, sem);
-          return VK_ERROR_OUT_OF_HOST_MEMORY;
-      }
-      sem->permanent.kind = TU_SEMAPHORE_SYNCOBJ;
-   }
-   *pSemaphore = tu_semaphore_to_handle(sem);
-   return VK_SUCCESS;
-}
-
-void
-tu_DestroySemaphore(VkDevice _device,
-                    VkSemaphore _semaphore,
-                    const VkAllocationCallbacks *pAllocator)
-{
-   TU_FROM_HANDLE(tu_device, device, _device);
-   TU_FROM_HANDLE(tu_semaphore, sem, _semaphore);
-   if (!_semaphore)
-      return;
-
-   tu_semaphore_part_destroy(device, &sem->permanent);
-   tu_semaphore_part_destroy(device, &sem->temporary);
-
-   vk_object_free(&device->vk, pAllocator, sem);
-}
 
 VkResult
 tu_CreateEvent(VkDevice _device,
@@ -2315,6 +1897,24 @@ tu_init_sampler(struct tu_device *device,
       vk_find_struct_const(pCreateInfo->pNext, SAMPLER_REDUCTION_MODE_CREATE_INFO);
    const struct VkSamplerYcbcrConversionInfo *ycbcr_conversion =
       vk_find_struct_const(pCreateInfo->pNext,  SAMPLER_YCBCR_CONVERSION_INFO);
+   const VkSamplerCustomBorderColorCreateInfoEXT *custom_border_color =
+      vk_find_struct_const(pCreateInfo->pNext, SAMPLER_CUSTOM_BORDER_COLOR_CREATE_INFO_EXT);
+   /* for non-custom border colors, the VK enum is translated directly to an offset in
+    * the border color buffer. custom border colors are located immediately after the
+    * builtin colors, and thus an offset of TU_BORDER_COLOR_BUILTIN is added.
+    */
+   uint32_t border_color = (unsigned) pCreateInfo->borderColor;
+   if (pCreateInfo->borderColor == VK_BORDER_COLOR_FLOAT_CUSTOM_EXT ||
+       pCreateInfo->borderColor == VK_BORDER_COLOR_INT_CUSTOM_EXT) {
+      mtx_lock(&device->mutex);
+      border_color = BITSET_FFS(device->custom_border_color);
+      BITSET_CLEAR(device->custom_border_color, border_color);
+      mtx_unlock(&device->mutex);
+      tu6_pack_border_color(device->global_bo.map + gb_offset(bcolor[border_color]),
+                            &custom_border_color->customBorderColor,
+                            pCreateInfo->borderColor == VK_BORDER_COLOR_INT_CUSTOM_EXT);
+      border_color += TU_BORDER_COLOR_BUILTIN;
+   }
 
    unsigned aniso = pCreateInfo->anisotropyEnable ?
       util_last_bit(MIN2((uint32_t)pCreateInfo->maxAnisotropy >> 1, 8)) : 0;
@@ -2338,13 +1938,7 @@ tu_init_sampler(struct tu_device *device,
       A6XX_TEX_SAMP_1_MAX_LOD(max_lod) |
       COND(pCreateInfo->compareEnable,
            A6XX_TEX_SAMP_1_COMPARE_FUNC(tu6_compare_func(pCreateInfo->compareOp)));
-   /* This is an offset into the border_color BO, which we fill with all the
-    * possible Vulkan border colors in the correct order, so we can just use
-    * the Vulkan enum with no translation necessary.
-    */
-   sampler->descriptor[2] =
-      A6XX_TEX_SAMP_2_BCOLOR_OFFSET((unsigned) pCreateInfo->borderColor *
-                                    sizeof(struct bcolor_entry));
+   sampler->descriptor[2] = A6XX_TEX_SAMP_2_BCOLOR(border_color);
    sampler->descriptor[3] = 0;
 
    if (reduction) {
@@ -2394,9 +1988,20 @@ tu_DestroySampler(VkDevice _device,
 {
    TU_FROM_HANDLE(tu_device, device, _device);
    TU_FROM_HANDLE(tu_sampler, sampler, _sampler);
+   uint32_t border_color;
 
    if (!sampler)
       return;
+
+   border_color = (sampler->descriptor[2] & A6XX_TEX_SAMP_2_BCOLOR__MASK) >> A6XX_TEX_SAMP_2_BCOLOR__SHIFT;
+   if (border_color >= TU_BORDER_COLOR_BUILTIN) {
+      border_color -= TU_BORDER_COLOR_BUILTIN;
+      /* if the sampler had a custom border color, free it. TODO: no lock */
+      mtx_lock(&device->mutex);
+      assert(!BITSET_TEST(device->custom_border_color, border_color));
+      BITSET_SET(device->custom_border_color, border_color);
+      mtx_unlock(&device->mutex);
+   }
 
    vk_object_free(&device->vk, pAllocator, sampler);
 }
@@ -2498,134 +2103,6 @@ tu_GetFenceFdKHR(VkDevice _device,
    tu_stub();
 
    return VK_SUCCESS;
-}
-
-VkResult
-tu_ImportSemaphoreFdKHR(VkDevice _device,
-                        const VkImportSemaphoreFdInfoKHR *pImportSemaphoreFdInfo)
-{
-   TU_FROM_HANDLE(tu_device, device, _device);
-   TU_FROM_HANDLE(tu_semaphore, sem, pImportSemaphoreFdInfo->semaphore);
-   int ret;
-   struct tu_semaphore_part *dst = NULL;
-
-   if (pImportSemaphoreFdInfo->flags & VK_SEMAPHORE_IMPORT_TEMPORARY_BIT) {
-      dst = &sem->temporary;
-   } else {
-      dst = &sem->permanent;
-   }
-
-   uint32_t syncobj = dst->kind == TU_SEMAPHORE_SYNCOBJ ? dst->syncobj : 0;
-
-   switch(pImportSemaphoreFdInfo->handleType) {
-      case VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT: {
-         uint32_t old_syncobj = syncobj;
-         ret = drmSyncobjFDToHandle(device->physical_device->local_fd, pImportSemaphoreFdInfo->fd, &syncobj);
-         if (ret == 0) {
-            close(pImportSemaphoreFdInfo->fd);
-            if (old_syncobj)
-               drmSyncobjDestroy(device->physical_device->local_fd, old_syncobj);
-         }
-         break;
-      }
-      case VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT: {
-         if (!syncobj) {
-            ret = drmSyncobjCreate(device->physical_device->local_fd, 0, &syncobj);
-            if (ret)
-               break;
-         }
-         if (pImportSemaphoreFdInfo->fd == -1) {
-            ret = drmSyncobjSignal(device->physical_device->local_fd, &syncobj, 1);
-         } else {
-            ret = drmSyncobjImportSyncFile(device->physical_device->local_fd, syncobj, pImportSemaphoreFdInfo->fd);
-         }
-         if (!ret)
-            close(pImportSemaphoreFdInfo->fd);
-         break;
-      }
-      default:
-         unreachable("Unhandled semaphore handle type");
-   }
-
-   if (ret) {
-      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
-   }
-   dst->syncobj = syncobj;
-   dst->kind = TU_SEMAPHORE_SYNCOBJ;
-
-   return VK_SUCCESS;
-}
-
-VkResult
-tu_GetSemaphoreFdKHR(VkDevice _device,
-                     const VkSemaphoreGetFdInfoKHR *pGetFdInfo,
-                     int *pFd)
-{
-   TU_FROM_HANDLE(tu_device, device, _device);
-   TU_FROM_HANDLE(tu_semaphore, sem, pGetFdInfo->semaphore);
-   int ret;
-   uint32_t syncobj_handle;
-
-   if (sem->temporary.kind != TU_SEMAPHORE_NONE) {
-      assert(sem->temporary.kind == TU_SEMAPHORE_SYNCOBJ);
-      syncobj_handle = sem->temporary.syncobj;
-   } else {
-      assert(sem->permanent.kind == TU_SEMAPHORE_SYNCOBJ);
-      syncobj_handle = sem->permanent.syncobj;
-   }
-
-   switch(pGetFdInfo->handleType) {
-   case VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT:
-      ret = drmSyncobjHandleToFD(device->physical_device->local_fd, syncobj_handle, pFd);
-      break;
-   case VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT:
-      ret = drmSyncobjExportSyncFile(device->physical_device->local_fd, syncobj_handle, pFd);
-      if (!ret) {
-         if (sem->temporary.kind != TU_SEMAPHORE_NONE) {
-            tu_semaphore_part_destroy(device, &sem->temporary);
-         } else {
-            drmSyncobjReset(device->physical_device->local_fd, &syncobj_handle, 1);
-         }
-      }
-      break;
-   default:
-      unreachable("Unhandled semaphore handle type");
-   }
-
-   if (ret)
-      return vk_error(device->instance, VK_ERROR_INVALID_EXTERNAL_HANDLE);
-   return VK_SUCCESS;
-}
-
-
-static bool tu_has_syncobj(struct tu_physical_device *pdev)
-{
-   uint64_t value;
-   if (drmGetCap(pdev->local_fd, DRM_CAP_SYNCOBJ, &value))
-      return false;
-   return value && pdev->msm_major_version == 1 && pdev->msm_minor_version >= 6;
-}
-
-void
-tu_GetPhysicalDeviceExternalSemaphoreProperties(
-   VkPhysicalDevice physicalDevice,
-   const VkPhysicalDeviceExternalSemaphoreInfo *pExternalSemaphoreInfo,
-   VkExternalSemaphoreProperties *pExternalSemaphoreProperties)
-{
-   TU_FROM_HANDLE(tu_physical_device, pdev, physicalDevice);
-
-   if (tu_has_syncobj(pdev) &&
-       (pExternalSemaphoreInfo->handleType == VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT ||
-        pExternalSemaphoreInfo->handleType == VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT)) {
-      pExternalSemaphoreProperties->exportFromImportedHandleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT | VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
-      pExternalSemaphoreProperties->compatibleHandleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT | VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
-      pExternalSemaphoreProperties->externalSemaphoreFeatures = VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT |
-         VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT;
-   } else {
-      pExternalSemaphoreProperties->exportFromImportedHandleTypes = 0;
-      pExternalSemaphoreProperties->compatibleHandleTypes = 0;
-      pExternalSemaphoreProperties->externalSemaphoreFeatures = 0;
-   }
 }
 
 void

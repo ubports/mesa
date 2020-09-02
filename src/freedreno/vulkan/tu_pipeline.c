@@ -264,6 +264,7 @@ struct tu_pipeline_builder
    VkFormat color_attachment_formats[MAX_RTS];
    VkFormat depth_attachment_format;
    uint32_t render_components;
+   uint32_t multiview_mask;
 };
 
 static bool
@@ -445,7 +446,7 @@ tu6_emit_xs_config(struct tu_cs *cs,
 
    const struct ir3_const_state *const_state = ir3_const_state(xs);
    uint32_t base = const_state->offsets.immediate;
-   int size = const_state->immediates_count;
+   int size = DIV_ROUND_UP(const_state->immediates_count, 4);
 
    /* truncate size to avoid writing constants that shader
     * does not use:
@@ -464,12 +465,7 @@ tu6_emit_xs_config(struct tu_cs *cs,
    tu_cs_emit(cs, CP_LOAD_STATE6_1_EXT_SRC_ADDR(0));
    tu_cs_emit(cs, CP_LOAD_STATE6_2_EXT_SRC_ADDR_HI(0));
 
-   for (unsigned i = 0; i < size; i++) {
-      tu_cs_emit(cs, const_state->immediates[i].val[0]);
-      tu_cs_emit(cs, const_state->immediates[i].val[1]);
-      tu_cs_emit(cs, const_state->immediates[i].val[2]);
-      tu_cs_emit(cs, const_state->immediates[i].val[3]);
-   }
+   tu_cs_emit_array(cs, const_state->immediates, size * 4);
 }
 
 static void
@@ -534,11 +530,18 @@ tu6_emit_vs_system_values(struct tu_cs *cs,
          ir3_find_sysval_regid(gs, SYSTEM_VALUE_GS_HEADER_IR3) :
          regid(63, 0);
 
+   /* Note: we currently don't support multiview with tess or GS. If we did,
+    * and the HW actually works, then we'd have to somehow share this across
+    * stages. Note that the blob doesn't support this either.
+    */
+   const uint32_t viewid_regid =
+      ir3_find_sysval_regid(vs, SYSTEM_VALUE_VIEW_INDEX);
+
    tu_cs_emit_pkt4(cs, REG_A6XX_VFD_CONTROL_1, 6);
    tu_cs_emit(cs, A6XX_VFD_CONTROL_1_REGID4VTX(vertexid_regid) |
                   A6XX_VFD_CONTROL_1_REGID4INST(instanceid_regid) |
                   A6XX_VFD_CONTROL_1_REGID4PRIMID(primitiveid_regid) |
-                  0xfc000000);
+                  A6XX_VFD_CONTROL_1_REGID4VIEWID(viewid_regid));
    tu_cs_emit(cs, A6XX_VFD_CONTROL_2_REGID_HSPATCHID(hs_patch_regid) |
                   A6XX_VFD_CONTROL_2_REGID_INVOCATIONID(hs_invocation_regid));
    tu_cs_emit(cs, A6XX_VFD_CONTROL_3_REGID_DSPATCHID(ds_patch_regid) |
@@ -740,7 +743,9 @@ tu6_emit_vpc(struct tu_cs *cs,
              const struct ir3_shader_variant *hs,
              const struct ir3_shader_variant *ds,
              const struct ir3_shader_variant *gs,
-             const struct ir3_shader_variant *fs)
+             const struct ir3_shader_variant *fs,
+             uint32_t patch_control_points,
+             bool vshs_workgroup)
 {
    /* note: doesn't compile as static because of the array regs.. */
    const struct reg_config {
@@ -847,6 +852,14 @@ tu6_emit_vpc(struct tu_cs *cs,
 
    tu6_setup_streamout(cs, last_shader, &linkage);
 
+   /* The GPU hangs on some models when there are no outputs (xs_pack::CNT),
+    * at least when a DS is the last stage, so add a dummy output to keep it
+    * happy if there aren't any. We do this late in order to avoid emitting
+    * any unused code and make sure that optimizations don't remove it.
+    */
+   if (linkage.cnt == 0)
+      ir3_link_add(&linkage, 0, 0x1, linkage.max_loc);
+
    /* map outputs of the last shader to VPC */
    assert(linkage.cnt <= 32);
    const uint32_t sp_out_count = DIV_ROUND_UP(linkage.cnt, 2);
@@ -900,20 +913,34 @@ tu6_emit_vpc(struct tu_cs *cs,
    tu_cs_emit(cs, A6XX_VPC_CNTL_0_NUMNONPOSVAR(fs ? fs->total_in : 0) |
                   COND(fs && fs->total_in, A6XX_VPC_CNTL_0_VARYING) |
                   A6XX_VPC_CNTL_0_PRIMIDLOC(linkage.primid_loc) |
-                  A6XX_VPC_CNTL_0_UNKLOC(0xff));
+                  A6XX_VPC_CNTL_0_VIEWIDLOC(linkage.viewid_loc));
 
    if (hs) {
       shader_info *hs_info = &hs->shader->nir->info;
+      uint32_t unknown_a831 = vs->output_size;
+
       tu_cs_emit_pkt4(cs, REG_A6XX_PC_TESS_NUM_VERTEX, 1);
       tu_cs_emit(cs, hs_info->tess.tcs_vertices_out);
 
       /* Total attribute slots in HS incoming patch. */
-      tu_cs_emit_pkt4(cs, REG_A6XX_PC_UNKNOWN_9801, 1);
-      tu_cs_emit(cs,
-            hs_info->tess.tcs_vertices_out * vs->output_size / 4);
+      tu_cs_emit_pkt4(cs, REG_A6XX_PC_HS_INPUT_SIZE, 1);
+      tu_cs_emit(cs, patch_control_points * vs->output_size / 4);
+
+      /* for A650 this value seems to be local memory size per wave */
+      if (vshs_workgroup) {
+         const uint32_t wavesize = 64;
+         /* note: if HS is really just the VS extended, then this
+          * should be by MAX2(patch_control_points, hs_info->tess.tcs_vertices_out)
+          * however that doesn't match the blob, and fails some dEQP tests.
+          */
+         uint32_t prims_per_wave = wavesize / hs_info->tess.tcs_vertices_out;
+         uint32_t total_size = vs->output_size * patch_control_points * prims_per_wave;
+         unknown_a831 = DIV_ROUND_UP(total_size, wavesize);
+      }
 
       tu_cs_emit_pkt4(cs, REG_A6XX_SP_HS_UNKNOWN_A831, 1);
-      tu_cs_emit(cs, vs->output_size);
+      tu_cs_emit(cs, unknown_a831);
+
       /* In SPIR-V generated from GLSL, the tessellation primitive params are
        * are specified in the tess eval shader, but in SPIR-V generated from
        * HLSL, they are specified in the tess control shader. */
@@ -991,9 +1018,6 @@ tu6_emit_vpc(struct tu_cs *cs,
       tu_cs_emit_pkt4(cs, REG_A6XX_PC_PRIMITIVE_CNTL_6, 1);
       tu_cs_emit(cs, A6XX_PC_PRIMITIVE_CNTL_6_STRIDE_IN_VPC(vec4_size));
 
-      tu_cs_emit_pkt4(cs, REG_A6XX_PC_UNKNOWN_9B07, 1);
-      tu_cs_emit(cs, 0);
-
       tu_cs_emit_pkt4(cs, REG_A6XX_SP_GS_PRIM_SIZE, 1);
       tu_cs_emit(cs, vs->output_size);
    }
@@ -1045,8 +1069,7 @@ tu6_vpc_varying_mode(const struct ir3_shader_variant *fs,
          *interp_mode |= INTERP_ONE << 6;
          shift += 2;
       }
-   } else if ((fs->inputs[index].interpolate == INTERP_MODE_FLAT) ||
-              fs->inputs[index].rasterflat) {
+   } else if (fs->inputs[index].flat) {
       for (int i = 0; i < 4; i++) {
          if (compmask & (1 << i)) {
             *interp_mode |= INTERP_FLAT << shift;
@@ -1363,6 +1386,8 @@ tu6_emit_program(struct tu_cs *cs,
    const struct ir3_shader_variant *gs = builder->variants[MESA_SHADER_GEOMETRY];
    const struct ir3_shader_variant *fs = builder->variants[MESA_SHADER_FRAGMENT];
    gl_shader_stage stage = MESA_SHADER_VERTEX;
+   uint32_t cps_per_patch = builder->create_info->pTessellationState ?
+      builder->create_info->pTessellationState->patchControlPoints : 0;
 
    STATIC_ASSERT(MESA_SHADER_VERTEX == 0);
 
@@ -1392,10 +1417,38 @@ tu6_emit_program(struct tu_cs *cs,
       tu6_emit_xs_config(cs, stage, xs, builder->shader_iova[stage]);
    }
 
+   if (!binning_pass) {
+      uint32_t multiview_views = util_logbase2(builder->multiview_mask) + 1;
+      uint32_t multiview_cntl = builder->multiview_mask ?
+         A6XX_PC_MULTIVIEW_CNTL_ENABLE |
+         A6XX_PC_MULTIVIEW_CNTL_VIEWS(multiview_views) |
+         A6XX_PC_MULTIVIEW_CNTL_DISABLEMULTIPOS /* TODO multi-pos output */
+         : 0;
+
+      /* Copy what the blob does here. This will emit an extra 0x3f
+       * CP_EVENT_WRITE when multiview is disabled. I'm not exactly sure what
+       * this is working around yet.
+       */
+      tu_cs_emit_pkt7(cs, CP_REG_WRITE, 3);
+      tu_cs_emit(cs, CP_REG_WRITE_0_TRACKER(UNK_EVENT_WRITE));
+      tu_cs_emit(cs, REG_A6XX_PC_MULTIVIEW_CNTL);
+      tu_cs_emit(cs, multiview_cntl);
+
+      tu_cs_emit_pkt4(cs, REG_A6XX_VFD_MULTIVIEW_CNTL, 1);
+      tu_cs_emit(cs, multiview_cntl);
+
+      if (multiview_cntl &&
+          builder->device->physical_device->supports_multiview_mask) {
+         tu_cs_emit_pkt4(cs, REG_A6XX_PC_MULTIVIEW_MASK, 1);
+         tu_cs_emit(cs, builder->multiview_mask);
+      }
+   }
+
    tu_cs_emit_pkt4(cs, REG_A6XX_SP_HS_UNKNOWN_A831, 1);
    tu_cs_emit(cs, 0);
 
-   tu6_emit_vpc(cs, vs, hs, ds, gs, fs);
+   tu6_emit_vpc(cs, vs, hs, ds, gs, fs, cps_per_patch,
+                builder->device->physical_device->gpu_id == 650);
    tu6_emit_vpc_varying_modes(cs, fs);
 
    if (fs) {
@@ -1415,8 +1468,6 @@ tu6_emit_program(struct tu_cs *cs,
    }
 
    if (gs || hs) {
-      uint32_t cps_per_patch = builder->create_info->pTessellationState ?
-            builder->create_info->pTessellationState->patchControlPoints : 0;
       tu6_emit_geom_tess_consts(cs, vs, hs, ds, gs, cps_per_patch);
    }
 }
@@ -1635,7 +1686,8 @@ tu6_emit_sample_locations(struct tu_cs *cs, const VkSampleLocationsInfoEXT *samp
 
 static uint32_t
 tu6_gras_su_cntl(const VkPipelineRasterizationStateCreateInfo *rast_info,
-                 VkSampleCountFlagBits samples)
+                 VkSampleCountFlagBits samples,
+                 bool multiview)
 {
    uint32_t gras_su_cntl = 0;
 
@@ -1654,6 +1706,12 @@ tu6_gras_su_cntl(const VkPipelineRasterizationStateCreateInfo *rast_info,
 
    if (samples > VK_SAMPLE_COUNT_1_BIT)
       gras_su_cntl |= A6XX_GRAS_SU_CNTL_MSAA_ENABLE;
+
+   if (multiview) {
+      gras_su_cntl |=
+         A6XX_GRAS_SU_CNTL_UNK17 |
+         A6XX_GRAS_SU_CNTL_MULTIVIEW_ENABLE;
+   }
 
    return gras_su_cntl;
 }
@@ -1964,8 +2022,8 @@ tu_pipeline_builder_compile_shaders(struct tu_pipeline_builder *builder,
          continue;
 
       struct tu_shader *shader =
-         tu_shader_create(builder->device, stage, stage_info, builder->layout,
-                          builder->alloc);
+         tu_shader_create(builder->device, stage, stage_info, builder->multiview_mask,
+                          builder->layout, builder->alloc);
       if (!shader)
          return VK_ERROR_OUT_OF_HOST_MEMORY;
 
@@ -2216,13 +2274,21 @@ tu_pipeline_builder_parse_rasterization(struct tu_pipeline_builder *builder,
 
    enum a6xx_polygon_mode mode = tu6_polygon_mode(rast_info->polygonMode);
 
+   bool depth_clip_disable = rast_info->depthClampEnable;
+
+   const VkPipelineRasterizationDepthClipStateCreateInfoEXT *depth_clip_state =
+      vk_find_struct_const(rast_info, PIPELINE_RASTERIZATION_DEPTH_CLIP_STATE_CREATE_INFO_EXT);
+   if (depth_clip_state)
+      depth_clip_disable = !depth_clip_state->depthClipEnable;
+
    struct tu_cs cs;
    pipeline->rast_state = tu_cs_draw_state(&pipeline->cs, &cs, 9);
 
    tu_cs_emit_regs(&cs,
                    A6XX_GRAS_CL_CNTL(
-                     .znear_clip_disable = rast_info->depthClampEnable,
-                     .zfar_clip_disable = rast_info->depthClampEnable,
+                     .znear_clip_disable = depth_clip_disable,
+                     .zfar_clip_disable = depth_clip_disable,
+                     /* TODO should this be depth_clip_disable instead? */
                      .unk5 = rast_info->depthClampEnable,
                      .zero_gb_scale_z = 1,
                      .vp_clip_code_ignore = 1));
@@ -2239,7 +2305,7 @@ tu_pipeline_builder_parse_rasterization(struct tu_pipeline_builder *builder,
                    A6XX_GRAS_SU_POINT_SIZE(1.0f));
 
    pipeline->gras_su_cntl =
-      tu6_gras_su_cntl(rast_info, builder->samples);
+      tu6_gras_su_cntl(rast_info, builder->samples, builder->multiview_mask != 0);
 
    if (tu_pipeline_static_state(pipeline, &cs, VK_DYNAMIC_STATE_LINE_WIDTH, 2)) {
       pipeline->gras_su_cntl |=
@@ -2460,6 +2526,13 @@ tu_pipeline_builder_init_graphics(
       .layout = layout,
    };
 
+   const struct tu_render_pass *pass =
+      tu_render_pass_from_handle(create_info->renderPass);
+   const struct tu_subpass *subpass =
+      &pass->subpasses[create_info->subpass];
+
+   builder->multiview_mask = subpass->multiview_mask;
+
    builder->rasterizer_discard =
       create_info->pRasterizationState->rasterizerDiscardEnable;
 
@@ -2467,11 +2540,6 @@ tu_pipeline_builder_init_graphics(
       builder->samples = VK_SAMPLE_COUNT_1_BIT;
    } else {
       builder->samples = create_info->pMultisampleState->rasterizationSamples;
-
-      const struct tu_render_pass *pass =
-         tu_render_pass_from_handle(create_info->renderPass);
-      const struct tu_subpass *subpass =
-         &pass->subpasses[create_info->subpass];
 
       const uint32_t a = subpass->depth_stencil_attachment.attachment;
       builder->depth_attachment_format = (a != VK_ATTACHMENT_UNUSED) ?
@@ -2575,7 +2643,7 @@ tu_compute_pipeline_create(VkDevice device,
    struct ir3_shader_key key = {};
 
    struct tu_shader *shader =
-      tu_shader_create(dev, MESA_SHADER_COMPUTE, stage_info, layout, pAllocator);
+      tu_shader_create(dev, MESA_SHADER_COMPUTE, stage_info, 0, layout, pAllocator);
    if (!shader) {
       result = VK_ERROR_OUT_OF_HOST_MEMORY;
       goto fail;

@@ -626,13 +626,16 @@ radv_cmd_buffer_after_draw(struct radv_cmd_buffer *cmd_buffer,
 
 static void
 radv_save_pipeline(struct radv_cmd_buffer *cmd_buffer,
-		   struct radv_pipeline *pipeline, enum ring_type ring)
+		   struct radv_pipeline *pipeline)
 {
 	struct radv_device *device = cmd_buffer->device;
+	enum ring_type ring;
 	uint32_t data[2];
 	uint64_t va;
 
 	va = radv_buffer_get_va(device->trace_bo);
+
+	ring = radv_queue_family_to_ring(cmd_buffer->queue_family_index);
 
 	switch (ring) {
 	case RING_GFX:
@@ -1313,7 +1316,7 @@ radv_emit_graphics_pipeline(struct radv_cmd_buffer *cmd_buffer)
 				   pipeline->gs_copy_shader->bo);
 
 	if (unlikely(cmd_buffer->device->trace_bo))
-		radv_save_pipeline(cmd_buffer, pipeline, RING_GFX);
+		radv_save_pipeline(cmd_buffer, pipeline);
 
 	cmd_buffer->state.emitted_pipeline = pipeline;
 
@@ -1736,6 +1739,20 @@ radv_emit_fb_ds_state(struct radv_cmd_buffer *cmd_buffer,
 	radeon_set_context_reg(cmd_buffer->cs, R_028ABC_DB_HTILE_SURFACE, ds->db_htile_surface);
 
 	if (cmd_buffer->device->physical_device->rad_info.chip_class >= GFX10) {
+		/* Enable HTILE caching in L2 for small chips. */
+		unsigned meta_write_policy, meta_read_policy;
+		/* TODO: investigate whether LRU improves performance on other chips too */
+		if (cmd_buffer->device->physical_device->rad_info.num_render_backends <= 4) {
+			meta_write_policy = V_02807C_CACHE_LRU_WR; /* cache writes */
+			meta_read_policy =  V_02807C_CACHE_LRU_RD; /* cache reads */
+		} else {
+			meta_write_policy = V_02807C_CACHE_STREAM;    /* write combine */
+			meta_read_policy =  V_02807C_CACHE_NOA;       /* don't cache reads */
+		}
+
+		bool zs_big_page = cmd_buffer->device->physical_device->rad_info.chip_class >= GFX10_3 &&
+				   (image->alignment % (64 * 1024) == 0);
+
 		radeon_set_context_reg(cmd_buffer->cs, R_028014_DB_HTILE_DATA_BASE, ds->db_htile_data_base);
 		radeon_set_context_reg(cmd_buffer->cs, R_02801C_DB_DEPTH_SIZE_XY, ds->db_depth_size);
 
@@ -1748,12 +1765,22 @@ radv_emit_fb_ds_state(struct radv_cmd_buffer *cmd_buffer,
 		radeon_emit(cmd_buffer->cs, ds->db_z_read_base);
 		radeon_emit(cmd_buffer->cs, ds->db_stencil_read_base);
 
-		radeon_set_context_reg_seq(cmd_buffer->cs, R_028068_DB_Z_READ_BASE_HI, 5);
+		radeon_set_context_reg_seq(cmd_buffer->cs, R_028068_DB_Z_READ_BASE_HI, 6);
 		radeon_emit(cmd_buffer->cs, ds->db_z_read_base >> 32);
 		radeon_emit(cmd_buffer->cs, ds->db_stencil_read_base >> 32);
 		radeon_emit(cmd_buffer->cs, ds->db_z_read_base >> 32);
 		radeon_emit(cmd_buffer->cs, ds->db_stencil_read_base >> 32);
 		radeon_emit(cmd_buffer->cs, ds->db_htile_data_base >> 32);
+		radeon_emit(cmd_buffer->cs,
+			    S_02807C_Z_WR_POLICY(V_02807C_CACHE_STREAM) |
+			    S_02807C_S_WR_POLICY(V_02807C_CACHE_STREAM) |
+			    S_02807C_HTILE_WR_POLICY(meta_write_policy) |
+			    S_02807C_ZPCPSD_WR_POLICY(V_02807C_CACHE_STREAM) |
+			    S_02807C_Z_RD_POLICY(V_02807C_CACHE_NOA) |
+			    S_02807C_S_RD_POLICY(V_02807C_CACHE_NOA) |
+			    S_02807C_HTILE_RD_POLICY(meta_read_policy) |
+			    S_02807C_Z_BIG_PAGE(zs_big_page) |
+			    S_02807C_S_BIG_PAGE(zs_big_page));
 	} else if (cmd_buffer->device->physical_device->rad_info.chip_class == GFX9) {
 		radeon_set_context_reg_seq(cmd_buffer->cs, R_028014_DB_HTILE_DATA_BASE, 3);
 		radeon_emit(cmd_buffer->cs, ds->db_htile_data_base);
@@ -2228,6 +2255,7 @@ radv_emit_framebuffer_state(struct radv_cmd_buffer *cmd_buffer)
 	int i;
 	struct radv_framebuffer *framebuffer = cmd_buffer->state.framebuffer;
 	const struct radv_subpass *subpass = cmd_buffer->state.subpass;
+	bool color_big_page = true;
 
 	/* this may happen for inherited secondary recording */
 	if (!framebuffer)
@@ -2252,6 +2280,12 @@ radv_emit_framebuffer_state(struct radv_cmd_buffer *cmd_buffer)
 		radv_emit_fb_color_state(cmd_buffer, i, &cmd_buffer->state.attachments[idx].cb, iview, layout, in_render_loop);
 
 		radv_load_color_clear_metadata(cmd_buffer, iview, i);
+
+		/* BIG_PAGE is an optimization that can only be enabled if all
+		 * color targets are compatible.
+		 */
+		color_big_page &= cmd_buffer->device->physical_device->rad_info.chip_class >= GFX10_3 &&
+				  (iview->image->alignment % (64 * 1024) == 0);
 	}
 
 	if (subpass->depth_stencil_attachment) {
@@ -2292,6 +2326,31 @@ radv_emit_framebuffer_state(struct radv_cmd_buffer *cmd_buffer)
 				       S_028424_OVERWRITE_COMBINER_MRT_SHARING_DISABLE(chip_class <= GFX9) |
 				       S_028424_OVERWRITE_COMBINER_WATERMARK(watermark) |
 				       S_028424_DISABLE_CONSTANT_ENCODE_REG(disable_constant_encode));
+	}
+
+	if (cmd_buffer->device->physical_device->rad_info.chip_class >= GFX10) {
+		/* Enable CMASK/FMASK/DCC caching in L2 for small chips. */
+		unsigned meta_write_policy, meta_read_policy;
+		/* TODO: investigate whether LRU improves performance on other chips too */
+		if (cmd_buffer->device->physical_device->rad_info.num_render_backends <= 4) {
+			meta_write_policy = V_02807C_CACHE_LRU_WR; /* cache writes */
+			meta_read_policy =  V_02807C_CACHE_LRU_RD; /* cache reads */
+		} else {
+			meta_write_policy = V_02807C_CACHE_STREAM;    /* write combine */
+			meta_read_policy =  V_02807C_CACHE_NOA;       /* don't cache reads */
+		}
+
+		radeon_set_context_reg(cmd_buffer->cs, R_028410_CB_RMI_GL2_CACHE_CONTROL,
+				       S_028410_CMASK_WR_POLICY(meta_write_policy) |
+				       S_028410_FMASK_WR_POLICY(meta_write_policy) |
+				       S_028410_DCC_WR_POLICY(meta_write_policy)  |
+				       S_028410_COLOR_WR_POLICY(V_028410_CACHE_STREAM) |
+				       S_028410_CMASK_RD_POLICY(meta_read_policy) |
+				       S_028410_FMASK_RD_POLICY(meta_read_policy) |
+				       S_028410_DCC_RD_POLICY(meta_read_policy) |
+				       S_028410_COLOR_RD_POLICY(V_028410_CACHE_NOA) |
+				       S_028410_FMASK_BIG_PAGE(color_big_page) |
+				       S_028410_COLOR_BIG_PAGE(color_big_page));
 	}
 
 	if (cmd_buffer->device->dfsm_allowed) {
@@ -3548,6 +3607,7 @@ radv_cmd_state_setup_attachments(struct radv_cmd_buffer *cmd_buffer,
 		}
 
 		state->attachments[i].current_layout = att->initial_layout;
+		state->attachments[i].current_in_render_loop = false;
 		state->attachments[i].current_stencil_layout = att->stencil_initial_layout;
 		state->attachments[i].sample_location.count = 0;
 
@@ -4117,7 +4177,7 @@ radv_emit_compute_pipeline(struct radv_cmd_buffer *cmd_buffer)
 			   pipeline->shaders[MESA_SHADER_COMPUTE]->bo);
 
 	if (unlikely(cmd_buffer->device->trace_bo))
-		radv_save_pipeline(cmd_buffer, pipeline, RING_COMPUTE);
+		radv_save_pipeline(cmd_buffer, pipeline);
 }
 
 static void radv_mark_descriptor_sets_dirty(struct radv_cmd_buffer *cmd_buffer,

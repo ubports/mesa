@@ -249,8 +249,10 @@ lower_ubo_load_to_uniform(nir_intrinsic_instr *instr, nir_builder *b,
 	/* We don't have a good way of determining the range of the dynamic
 	 * access in general, so for now just fall back to pulling.
 	 */
-	if (!nir_src_is_const(instr->src[1]) && !ubo_is_gl_uniforms(&range->ubo))
+	if (!nir_src_is_const(instr->src[1]) && !ubo_is_gl_uniforms(&range->ubo)) {
+		track_ubo_use(instr, b, num_ubos);
 		return false;
+	}
 
 	/* After gathering the UBO access ranges, we limit the total
 	 * upload. Don't lower if this load is outside the range.
@@ -325,8 +327,8 @@ instr_is_load_ubo(nir_instr *instr)
 
 	nir_intrinsic_op op = nir_instr_as_intrinsic(instr)->intrinsic;
 
-	/* ir3_nir_lower_io_offsets happens after this pass. */
-	assert(op != nir_intrinsic_load_ubo_ir3);
+	/* nir_lower_ubo_vec4 happens after this pass. */
+	assert(op != nir_intrinsic_load_ubo_vec4);
 
 	return op == nir_intrinsic_load_ubo;
 }

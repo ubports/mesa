@@ -51,6 +51,12 @@ struct zink_gfx_pipeline_state {
 
    VkSampleMask sample_mask;
    uint8_t rast_samples;
+
+   bool primitive_restart;
+
+   /* Pre-hashed value for table lookup, invalid when zero.
+    * Members after this point are not included in pipeline state hash key */
+   uint32_t hash;
 };
 
 VkPipeline

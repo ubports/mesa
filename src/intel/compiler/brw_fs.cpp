@@ -3930,7 +3930,20 @@ fs_visitor::lower_mul_dword_inst(fs_inst *inst, bblock_t *block)
       high.offset = inst->dst.offset % REG_SIZE;
 
       if (devinfo->gen >= 7) {
-         if (inst->src[1].abs)
+         /* From GEN:BUG:1604601757:
+          *
+          * "When multiplying a DW and any lower precision integer, source modifier
+          *  is not supported."
+          *
+          * An unsupported negate modifier on src[1] would ordinarily be
+          * lowered by the subsequent lower_regioning pass.  In this case that
+          * pass would spawn another dword multiply.  Instead, lower the
+          * modifier first.
+          */
+         const bool source_mods_unsupported = (devinfo->gen >= 12);
+
+         if (inst->src[1].abs || (inst->src[1].negate &&
+                                  source_mods_unsupported))
             lower_src_modifiers(this, block, inst, 1);
 
          if (inst->src[1].file == IMM) {
@@ -7828,7 +7841,7 @@ fs_visitor::allocate_registers(bool allow_spilling)
 
       prog_data->total_scratch = brw_get_scratch_size(last_scratch);
 
-      if (stage == MESA_SHADER_COMPUTE) {
+      if (stage == MESA_SHADER_COMPUTE || stage == MESA_SHADER_KERNEL) {
          if (devinfo->is_haswell) {
             /* According to the MEDIA_VFE_STATE's "Per Thread Scratch Space"
              * field documentation, Haswell supports a minimum of 2kB of
@@ -8216,7 +8229,7 @@ fs_visitor::run_fs(bool allow_spilling, bool do_rep_send)
 bool
 fs_visitor::run_cs(bool allow_spilling)
 {
-   assert(stage == MESA_SHADER_COMPUTE);
+   assert(stage == MESA_SHADER_COMPUTE || stage == MESA_SHADER_KERNEL);
 
    setup_cs_payload();
 
@@ -8335,7 +8348,7 @@ brw_compute_flat_inputs(struct brw_wm_prog_data *prog_data,
 {
    prog_data->flat_inputs = 0;
 
-   nir_foreach_variable(var, &shader->inputs) {
+   nir_foreach_shader_in_variable(var, shader) {
       unsigned slots = glsl_count_attribute_slots(var->type, false);
       for (unsigned s = 0; s < slots; s++) {
          int input_index = prog_data->urb_setup[var->data.location + s];
@@ -8437,9 +8450,8 @@ brw_nir_move_interpolation_to_top(nir_shader *nir)
             }
          }
       }
-      nir_metadata_preserve(f->impl, (nir_metadata)
-                            ((unsigned) nir_metadata_block_index |
-                             (unsigned) nir_metadata_dominance));
+      nir_metadata_preserve(f->impl, nir_metadata_block_index |
+                                     nir_metadata_dominance);
    }
 
    return progress;
@@ -8483,9 +8495,8 @@ brw_nir_demote_sample_qualifiers(nir_shader *nir)
          }
       }
 
-      nir_metadata_preserve(f->impl, (nir_metadata)
-                            ((unsigned) nir_metadata_block_index |
-                             (unsigned) nir_metadata_dominance));
+      nir_metadata_preserve(f->impl, nir_metadata_block_index |
+                                     nir_metadata_dominance);
    }
 
    return progress;
@@ -8783,7 +8794,7 @@ brw_compile_fs(const struct brw_compiler *compiler, void *log_data,
 fs_reg *
 fs_visitor::emit_cs_work_group_id_setup()
 {
-   assert(stage == MESA_SHADER_COMPUTE);
+   assert(stage == MESA_SHADER_COMPUTE || stage == MESA_SHADER_KERNEL);
 
    fs_reg *reg = new(this->mem_ctx) fs_reg(vgrf(glsl_type::uvec3_type));
 
@@ -8935,7 +8946,7 @@ brw_compile_cs(const struct brw_compiler *compiler, void *log_data,
                char **error_str)
 {
    prog_data->base.total_shared = src_shader->info.cs.shared_size;
-   prog_data->slm_size = src_shader->num_shared;
+   prog_data->slm_size = src_shader->shared_size;
 
    /* Generate code for all the possible SIMD variants. */
    bool generate_all;

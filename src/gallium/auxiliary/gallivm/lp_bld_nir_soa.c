@@ -307,15 +307,27 @@ static void emit_load_var(struct lp_build_nir_context *bld_base,
    struct lp_build_nir_soa_context *bld = (struct lp_build_nir_soa_context *)bld_base;
    struct gallivm_state *gallivm = bld_base->base.gallivm;
    int dmul = bit_size == 64 ? 2 : 1;
+   unsigned location = var->data.driver_location;
+   unsigned location_frac = var->data.location_frac;
+
+   if (!var->data.compact && !indir_index)
+      location += const_index;
+   else if (var->data.compact) {
+      location += const_index / 4;
+      location_frac += const_index % 4;
+      const_index = 0;
+   }
    switch (deref_mode) {
    case nir_var_shader_in:
       for (unsigned i = 0; i < num_components; i++) {
-         int idx = (i * dmul) + var->data.location_frac;
+         int idx = (i * dmul) + location_frac;
+
          if (bld->gs_iface) {
             LLVMValueRef vertex_index_val = lp_build_const_int32(gallivm, vertex_index);
-            LLVMValueRef attrib_index_val = lp_build_const_int32(gallivm, const_index + var->data.driver_location);
+            LLVMValueRef attrib_index_val = lp_build_const_int32(gallivm, location);
             LLVMValueRef swizzle_index_val = lp_build_const_int32(gallivm, idx);
             LLVMValueRef result2;
+
             result[i] = bld->gs_iface->fetch_input(bld->gs_iface, &bld_base->base,
                                                    false, vertex_index_val, 0, attrib_index_val, swizzle_index_val);
             if (bit_size == 64) {
@@ -330,10 +342,15 @@ static void emit_load_var(struct lp_build_nir_context *bld_base,
             LLVMValueRef swizzle_index_val = lp_build_const_int32(gallivm, idx);
             LLVMValueRef result2;
 
-            if (indir_index)
-               attrib_index_val = lp_build_add(&bld_base->uint_bld, indir_index, lp_build_const_int_vec(gallivm, bld_base->uint_bld.type, var->data.driver_location));
-            else
-               attrib_index_val = lp_build_const_int32(gallivm, const_index + var->data.driver_location);
+            if (indir_index) {
+               if (var->data.compact) {
+                  swizzle_index_val = lp_build_add(&bld_base->uint_bld, indir_index, lp_build_const_int_vec(gallivm, bld_base->uint_bld.type, idx));
+                  attrib_index_val = lp_build_const_int32(gallivm, location);
+               } else
+                  attrib_index_val = lp_build_add(&bld_base->uint_bld, indir_index, lp_build_const_int_vec(gallivm, bld_base->uint_bld.type, var->data.driver_location));
+            } else
+               attrib_index_val = lp_build_const_int32(gallivm, location);
+
             if (var->data.patch) {
                result[i] = bld->tes_iface->fetch_patch_input(bld->tes_iface, &bld_base->base,
                                                              indir_index ? true : false, attrib_index_val, swizzle_index_val);
@@ -348,13 +365,14 @@ static void emit_load_var(struct lp_build_nir_context *bld_base,
                result[i] = bld->tes_iface->fetch_vertex_input(bld->tes_iface, &bld_base->base,
                                                               indir_vertex_index ? true : false,
                                                               indir_vertex_index ? indir_vertex_index : vertex_index_val,
-                                                              indir_index ? true : false, attrib_index_val, swizzle_index_val);
+                                                              (indir_index && !var->data.compact) ? true : false, attrib_index_val,
+                                                              (indir_index && var->data.compact) ? true : false, swizzle_index_val);
                if (bit_size == 64) {
                   LLVMValueRef swizzle_index_val = lp_build_const_int32(gallivm, idx + 1);
                   result2 = bld->tes_iface->fetch_vertex_input(bld->tes_iface, &bld_base->base,
                                                                indir_vertex_index ? true : false,
                                                                indir_vertex_index ? indir_vertex_index : vertex_index_val,
-                                                               indir_index ? true : false, attrib_index_val, swizzle_index_val);
+                                                               indir_index ? true : false, attrib_index_val, false, swizzle_index_val);
                   result[i] = emit_fetch_64bit(bld_base, result[i], result2);
                }
             }
@@ -363,18 +381,24 @@ static void emit_load_var(struct lp_build_nir_context *bld_base,
             LLVMValueRef attrib_index_val;
             LLVMValueRef swizzle_index_val = lp_build_const_int32(gallivm, idx);
 
-            if (indir_index)
-               attrib_index_val = lp_build_add(&bld_base->uint_bld, indir_index, lp_build_const_int_vec(gallivm, bld_base->uint_bld.type, var->data.driver_location));
-            else
-               attrib_index_val = lp_build_const_int32(gallivm, const_index + var->data.driver_location);
+            if (indir_index) {
+               if (var->data.compact) {
+                  swizzle_index_val = lp_build_add(&bld_base->uint_bld, indir_index, lp_build_const_int_vec(gallivm, bld_base->uint_bld.type, idx));
+                  attrib_index_val = lp_build_const_int32(gallivm, location);
+               } else
+                  attrib_index_val = lp_build_add(&bld_base->uint_bld, indir_index, lp_build_const_int_vec(gallivm, bld_base->uint_bld.type, var->data.driver_location));
+            } else
+               attrib_index_val = lp_build_const_int32(gallivm, location);
             result[i] = bld->tcs_iface->emit_fetch_input(bld->tcs_iface, &bld_base->base,
                                                          indir_vertex_index ? true : false, indir_vertex_index ? indir_vertex_index : vertex_index_val,
-                                                         indir_index ? true : false, attrib_index_val, swizzle_index_val);
+                                                         (indir_index && !var->data.compact) ? true : false, attrib_index_val,
+                                                         (indir_index && var->data.compact) ? true : false, swizzle_index_val);
             if (bit_size == 64) {
                LLVMValueRef swizzle_index_val = lp_build_const_int32(gallivm, idx + 1);
                LLVMValueRef result2 = bld->tcs_iface->emit_fetch_input(bld->tcs_iface, &bld_base->base,
                                                                        indir_vertex_index ? true : false, indir_vertex_index ? indir_vertex_index : vertex_index_val,
-                                                                       indir_index ? true : false, attrib_index_val, swizzle_index_val);
+                                                                       indir_index ? true : false, attrib_index_val,
+                                                                       false, swizzle_index_val);
                result[i] = emit_fetch_64bit(bld_base, result[i], result2);
             }
          } else {
@@ -398,12 +422,12 @@ static void emit_load_var(struct lp_build_nir_context *bld_base,
             } else {
                if (bld->indirects & nir_var_shader_in) {
                   LLVMValueRef lindex = lp_build_const_int32(gallivm,
-                                                             var->data.driver_location * 4 + idx);
+                                                             location * 4 + idx);
                   LLVMValueRef input_ptr = lp_build_pointer_get(gallivm->builder,
                                                              bld->inputs_array, lindex);
                   if (bit_size == 64) {
                      LLVMValueRef lindex2 = lp_build_const_int32(gallivm,
-                                                                 var->data.driver_location * 4 + (idx + 1));
+                                                                 location * 4 + (idx + 1));
                      LLVMValueRef input_ptr2 = lp_build_pointer_get(gallivm->builder,
                                                                     bld->inputs_array, lindex2);
                      result[i] = emit_fetch_64bit(bld_base, input_ptr, input_ptr2);
@@ -413,11 +437,11 @@ static void emit_load_var(struct lp_build_nir_context *bld_base,
                } else {
                   if (bit_size == 64) {
                      LLVMValueRef tmp[2];
-                     tmp[0] = bld->inputs[var->data.driver_location + const_index][idx];
-                     tmp[1] = bld->inputs[var->data.driver_location + const_index][idx + 1];
+                     tmp[0] = bld->inputs[location][idx];
+                     tmp[1] = bld->inputs[location][idx + 1];
                      result[i] = emit_fetch_64bit(bld_base, tmp[0], tmp[1]);
                   } else {
-                     result[i] = bld->inputs[var->data.driver_location + const_index][idx];
+                     result[i] = bld->inputs[location][idx];
                   }
                }
             }
@@ -430,7 +454,7 @@ static void emit_load_var(struct lp_build_nir_context *bld_base,
          return;
       }
       for (unsigned i = 0; i < num_components; i++) {
-         int idx = (i * dmul) + var->data.location_frac;
+         int idx = (i * dmul) + location_frac;
          if (bld->tcs_iface) {
             LLVMValueRef vertex_index_val = lp_build_const_int32(gallivm, vertex_index);
             LLVMValueRef attrib_index_val;
@@ -439,16 +463,18 @@ static void emit_load_var(struct lp_build_nir_context *bld_base,
             if (indir_index)
                attrib_index_val = lp_build_add(&bld_base->uint_bld, indir_index, lp_build_const_int_vec(gallivm, bld_base->uint_bld.type, var->data.driver_location));
             else
-               attrib_index_val = lp_build_const_int32(gallivm, const_index + var->data.driver_location);
+               attrib_index_val = lp_build_const_int32(gallivm, location);
 
             result[i] = bld->tcs_iface->emit_fetch_output(bld->tcs_iface, &bld_base->base,
-                                                         indir_vertex_index ? true : false, indir_vertex_index ? indir_vertex_index : vertex_index_val,
-                                                          indir_index ? true : false, attrib_index_val, swizzle_index_val, 0);
+                                                          indir_vertex_index ? true : false, indir_vertex_index ? indir_vertex_index : vertex_index_val,
+                                                          (indir_index && !var->data.compact) ? true : false, attrib_index_val,
+                                                          (indir_index && var->data.compact) ? true : false, swizzle_index_val, 0);
             if (bit_size == 64) {
                LLVMValueRef swizzle_index_val = lp_build_const_int32(gallivm, idx + 1);
                LLVMValueRef result2 = bld->tcs_iface->emit_fetch_output(bld->tcs_iface, &bld_base->base,
                                                                         indir_vertex_index ? true : false, indir_vertex_index ? indir_vertex_index : vertex_index_val,
-                                                                        indir_index ? true : false, attrib_index_val, swizzle_index_val, 0);
+                                                                        indir_index ? true : false, attrib_index_val,
+                                                                        false, swizzle_index_val, 0);
                result[i] = emit_fetch_64bit(bld_base, result[i], result2);
             }
          }
@@ -487,6 +513,7 @@ static void emit_store_chan(struct lp_build_nir_context *bld_base,
 }
 
 static void emit_store_tcs_chan(struct lp_build_nir_context *bld_base,
+                                bool is_compact,
                                 unsigned bit_size,
                                 unsigned location,
                                 unsigned const_index,
@@ -512,9 +539,13 @@ static void emit_store_tcs_chan(struct lp_build_nir_context *bld_base,
    LLVMValueRef attrib_index_val;
    LLVMValueRef swizzle_index_val = lp_build_const_int32(gallivm, swizzle);
 
-   if (indir_index)
-      attrib_index_val = lp_build_add(&bld_base->uint_bld, indir_index, lp_build_const_int_vec(gallivm, bld_base->uint_bld.type, location));
-   else
+   if (indir_index) {
+      if (is_compact) {
+         swizzle_index_val = lp_build_add(&bld_base->uint_bld, indir_index, lp_build_const_int_vec(gallivm, bld_base->uint_bld.type, swizzle));
+         attrib_index_val = lp_build_const_int32(gallivm, const_index + location);
+      } else
+         attrib_index_val = lp_build_add(&bld_base->uint_bld, indir_index, lp_build_const_int_vec(gallivm, bld_base->uint_bld.type, location));
+   } else
       attrib_index_val = lp_build_const_int32(gallivm, const_index + location);
    if (bit_size == 64) {
       LLVMValueRef split_vals[2];
@@ -524,21 +555,25 @@ static void emit_store_tcs_chan(struct lp_build_nir_context *bld_base,
                                         indir_vertex_index ? true : false,
                                         indir_vertex_index,
                                         indir_index ? true : false,
-                                        attrib_index_val, swizzle_index_val,
+                                        attrib_index_val,
+                                        false, swizzle_index_val,
                                         split_vals[0], mask_vec(bld_base));
       bld->tcs_iface->emit_store_output(bld->tcs_iface, &bld_base->base, 0,
                                         indir_vertex_index ? true : false,
                                         indir_vertex_index,
                                         indir_index ? true : false,
-                                        attrib_index_val, swizzle_index_val2,
+                                        attrib_index_val,
+                                        false, swizzle_index_val2,
                                         split_vals[1], mask_vec(bld_base));
    } else {
       chan_val = LLVMBuildBitCast(builder, chan_val, bld_base->base.vec_type, "");
       bld->tcs_iface->emit_store_output(bld->tcs_iface, &bld_base->base, 0,
                                         indir_vertex_index ? true : false,
                                         indir_vertex_index,
-                                        indir_index ? true : false,
-                                        attrib_index_val, swizzle_index_val,
+                                        indir_index && !is_compact ? true : false,
+                                        attrib_index_val,
+                                        indir_index && is_compact ? true : false,
+                                        swizzle_index_val,
                                         chan_val, mask_vec(bld_base));
    }
 }
@@ -567,11 +602,17 @@ static void emit_store_var(struct lp_build_nir_context *bld_base,
             comp = 2;
       }
 
+      if (var->data.compact) {
+         location += const_index / 4;
+         comp += const_index % 4;
+         const_index = 0;
+      }
+
       for (unsigned chan = 0; chan < num_components; chan++) {
          if (writemask & (1u << chan)) {
             LLVMValueRef chan_val = (num_components == 1) ? dst : LLVMBuildExtractValue(builder, dst, chan, "");
             if (bld->tcs_iface) {
-               emit_store_tcs_chan(bld_base, bit_size, location, const_index, indir_vertex_index, indir_index, comp, chan, chan_val);
+               emit_store_tcs_chan(bld_base, var->data.compact, bit_size, location, const_index, indir_vertex_index, indir_index, comp, chan, chan_val);
             } else
                emit_store_chan(bld_base, deref_mode, bit_size, location + const_index, comp, chan, chan_val);
          }

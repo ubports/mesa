@@ -192,6 +192,7 @@ zink_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       return screen->feats.imageCubeArray;
 
    case PIPE_CAP_TEXTURE_BUFFER_OBJECTS:
+   case PIPE_CAP_PRIMITIVE_RESTART:
       return 1;
 
    case PIPE_CAP_TEXTURE_BUFFER_OFFSET_ALIGNMENT:
@@ -432,7 +433,7 @@ zink_get_shader_param(struct pipe_screen *pscreen,
    case PIPE_SHADER_CAP_FP16:
    case PIPE_SHADER_CAP_FP16_DERIVATIVES:
    case PIPE_SHADER_CAP_INT16:
-   case PIPE_SHADER_CAP_GLSL_16BIT_TEMPS:
+   case PIPE_SHADER_CAP_GLSL_16BIT_CONSTS:
       return 0; /* not implemented */
 
    case PIPE_SHADER_CAP_PREFERRED_IR:
@@ -458,7 +459,7 @@ zink_get_shader_param(struct pipe_screen *pscreen,
 
    case PIPE_SHADER_CAP_MAX_SHADER_BUFFERS:
       /* TODO: this limitation is dumb, and will need some fixes in mesa */
-      return MIN2(screen->props.limits.maxPerStageDescriptorStorageBuffers, 8);
+      return MIN2(screen->props.limits.maxPerStageDescriptorStorageBuffers, PIPE_MAX_SHADER_BUFFERS);
 
    case PIPE_SHADER_CAP_SUPPORTED_IRS:
       return (1 << PIPE_SHADER_IR_NIR) | (1 << PIPE_SHADER_IR_TGSI);
@@ -662,24 +663,25 @@ choose_pdev(const VkInstance instance)
    return pdev;
 }
 
-static uint32_t
-find_gfx_queue(const VkPhysicalDevice pdev)
+static void
+update_queue_props(struct zink_screen *screen)
 {
    uint32_t num_queues;
-   vkGetPhysicalDeviceQueueFamilyProperties(pdev, &num_queues, NULL);
+   vkGetPhysicalDeviceQueueFamilyProperties(screen->pdev, &num_queues, NULL);
    assert(num_queues > 0);
 
    VkQueueFamilyProperties *props = malloc(sizeof(*props) * num_queues);
-   vkGetPhysicalDeviceQueueFamilyProperties(pdev, &num_queues, props);
+   vkGetPhysicalDeviceQueueFamilyProperties(screen->pdev, &num_queues, props);
 
    for (uint32_t i = 0; i < num_queues; i++) {
       if (props[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
-         free(props);
-         return i;
+         screen->gfx_queue = i;
+         screen->timestamp_valid_bits = props[i].timestampValidBits;
+         assert(screen->timestamp_valid_bits);
+         break;
       }
    }
-
-   return UINT32_MAX;
+   free(props);
 }
 
 static void
@@ -731,8 +733,18 @@ load_device_extensions(struct zink_screen *screen)
 {
 #define GET_PROC_ADDR(x) do {                                               \
       screen->vk_##x = (PFN_vk##x)vkGetDeviceProcAddr(screen->dev, "vk"#x); \
-      if (!screen->vk_##x)                                                  \
+      if (!screen->vk_##x) {                                                \
+         debug_printf("vkGetDeviceProcAddr failed: vk"#x"\n");              \
          return false;                                                      \
+      } \
+   } while (0)
+
+#define GET_PROC_ADDR_INSTANCE(x) do {                                          \
+      screen->vk_##x = (PFN_vk##x)vkGetInstanceProcAddr(screen->instance, "vk"#x); \
+      if (!screen->vk_##x) {                                                \
+         debug_printf("GetInstanceProcAddr failed: vk"#x"\n");        \
+         return false;                                                      \
+      } \
    } while (0)
    if (screen->have_EXT_transform_feedback) {
       GET_PROC_ADDR(CmdBindTransformFeedbackBuffersEXT);
@@ -750,6 +762,29 @@ load_device_extensions(struct zink_screen *screen)
       GET_PROC_ADDR(CmdEndConditionalRenderingEXT);
    }
 
+   if (screen->have_EXT_calibrated_timestamps) {
+      GET_PROC_ADDR_INSTANCE(GetPhysicalDeviceCalibrateableTimeDomainsEXT);
+      GET_PROC_ADDR(GetCalibratedTimestampsEXT);
+
+      uint32_t num_domains = 0;
+      screen->vk_GetPhysicalDeviceCalibrateableTimeDomainsEXT(screen->pdev, &num_domains, NULL);
+      assert(num_domains > 0);
+
+      VkTimeDomainEXT *domains = malloc(sizeof(VkTimeDomainEXT) * num_domains);
+      screen->vk_GetPhysicalDeviceCalibrateableTimeDomainsEXT(screen->pdev, &num_domains, domains);
+
+      /* VK_TIME_DOMAIN_DEVICE_EXT is used for the ctx->get_timestamp hook and is the only one we really need */
+      ASSERTED bool have_device_time = false;
+      for (unsigned i = 0; i < num_domains; i++) {
+         if (domains[i] == VK_TIME_DOMAIN_DEVICE_EXT) {
+            have_device_time = true;
+            break;
+         }
+      }
+      assert(have_device_time);
+      free(domains);
+   }
+
 #undef GET_PROC_ADDR
 
    return true;
@@ -759,7 +794,9 @@ static struct pipe_screen *
 zink_internal_create_screen(struct sw_winsys *winsys, int fd)
 {
    struct zink_screen *screen = CALLOC_STRUCT(zink_screen);
-   bool have_tf_ext = false, have_cond_render_ext = false, have_EXT_index_type_uint8 = false;
+   bool have_tf_ext = false, have_cond_render_ext = false, have_EXT_index_type_uint8 = false,
+      have_EXT_robustness2_features = false, have_EXT_vertex_attribute_divisor = false,
+      have_EXT_calibrated_timestamps = false;
    if (!screen)
       return NULL;
 
@@ -767,7 +804,7 @@ zink_internal_create_screen(struct sw_winsys *winsys, int fd)
 
    screen->instance = create_instance();
    screen->pdev = choose_pdev(screen->instance);
-   screen->gfx_queue = find_gfx_queue(screen->pdev);
+   update_queue_props(screen);
 
    vkGetPhysicalDeviceMemoryProperties(screen->pdev, &screen->mem_props);
 
@@ -801,6 +838,15 @@ zink_internal_create_screen(struct sw_winsys *winsys, int fd)
             if (!strcmp(extensions[i].extensionName,
                         VK_EXT_INDEX_TYPE_UINT8_EXTENSION_NAME))
                have_EXT_index_type_uint8 = true;
+            if (!strcmp(extensions[i].extensionName,
+                        VK_EXT_ROBUSTNESS_2_EXTENSION_NAME))
+               have_EXT_robustness2_features = true;
+            if (!strcmp(extensions[i].extensionName,
+                        VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME))
+               have_EXT_vertex_attribute_divisor = true;
+            if (!strcmp(extensions[i].extensionName,
+                        VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME))
+               have_EXT_calibrated_timestamps = true;
 
          }
          FREE(extensions);
@@ -827,6 +873,16 @@ zink_internal_create_screen(struct sw_winsys *winsys, int fd)
       index_uint8_feats.pNext = feats.pNext;
       feats.pNext = &index_uint8_feats;
    }
+   if (have_EXT_robustness2_features) {
+      screen->rb2_feats.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT;
+      screen->rb2_feats.pNext = feats.pNext;
+      feats.pNext = &screen->rb2_feats;
+   }
+   if (have_EXT_vertex_attribute_divisor) {
+      screen->vdiv_feats.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT;
+      screen->vdiv_feats.pNext = feats.pNext;
+      feats.pNext = &screen->vdiv_feats;
+   }
    vkGetPhysicalDeviceFeatures2(screen->pdev, &feats);
    memcpy(&screen->feats, &feats.features, sizeof(screen->feats));
    if (have_tf_ext && tf_feats.transformFeedback)
@@ -835,16 +891,32 @@ zink_internal_create_screen(struct sw_winsys *winsys, int fd)
       screen->have_EXT_conditional_rendering = true;
    if (have_EXT_index_type_uint8 && index_uint8_feats.indexTypeUint8)
       screen->have_EXT_index_type_uint8 = true;
+   screen->have_EXT_robustness2_features = have_EXT_robustness2_features;
+   if (have_EXT_vertex_attribute_divisor && screen->vdiv_feats.vertexAttributeInstanceRateDivisor)
+      screen->have_EXT_vertex_attribute_divisor = true;
+   screen->have_EXT_calibrated_timestamps = have_EXT_calibrated_timestamps;
 
    VkPhysicalDeviceProperties2 props = {};
+   VkPhysicalDeviceVertexAttributeDivisorPropertiesEXT vdiv_props = {};
    props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
    if (screen->have_EXT_transform_feedback) {
       screen->tf_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_PROPERTIES_EXT;
-      screen->tf_props.pNext = NULL;
+      screen->tf_props.pNext = props.pNext;
       props.pNext = &screen->tf_props;
+   }
+   if (have_EXT_robustness2_features) {
+      screen->rb2_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_PROPERTIES_EXT;
+      screen->rb2_props.pNext = props.pNext;
+      props.pNext = &screen->rb2_props;
+   }
+   if (have_EXT_vertex_attribute_divisor) {
+      vdiv_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_PROPERTIES_EXT;
+      vdiv_props.pNext = props.pNext;
+      props.pNext = &vdiv_props;
    }
    vkGetPhysicalDeviceProperties2(screen->pdev, &props);
    memcpy(&screen->props, &props.properties, sizeof(screen->props));
+   screen->max_vertex_attrib_divisor = vdiv_props.maxVertexAttribDivisor;
 
    if (!screen->have_KHR_maintenance1) {
       debug_printf("ZINK: VK_KHR_maintenance1 required!\n");
@@ -866,7 +938,7 @@ zink_internal_create_screen(struct sw_winsys *winsys, int fd)
     * this requires us to pass the whole VkPhysicalDeviceFeatures2 struct
     */
    dci.pNext = &feats;
-   const char *extensions[6] = {
+   const char *extensions[9] = {
       VK_KHR_MAINTENANCE1_EXTENSION_NAME,
    };
    num_extensions = 1;
@@ -889,6 +961,12 @@ zink_internal_create_screen(struct sw_winsys *winsys, int fd)
 
    if (screen->have_EXT_transform_feedback)
       extensions[num_extensions++] = VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME;
+   if (screen->have_EXT_robustness2_features)
+      extensions[num_extensions++] = VK_EXT_ROBUSTNESS_2_EXTENSION_NAME;
+   if (screen->have_EXT_vertex_attribute_divisor)
+      extensions[num_extensions++] = VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME;
+   if (screen->have_EXT_calibrated_timestamps)
+      extensions[num_extensions++] = VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME;
    assert(num_extensions <= ARRAY_SIZE(extensions));
 
    dci.ppEnabledExtensionNames = extensions;

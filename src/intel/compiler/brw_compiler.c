@@ -112,7 +112,7 @@ brw_compiler_create(void *mem_ctx, const struct gen_device_info *devinfo)
 
    if (devinfo->gen >= 10) {
       /* We don't support vec4 mode on Cannonlake. */
-      for (int i = MESA_SHADER_VERTEX; i < MESA_SHADER_STAGES; i++)
+      for (int i = MESA_SHADER_VERTEX; i < MESA_ALL_SHADER_STAGES; i++)
          compiler->scalar_stage[i] = true;
    } else {
       compiler->scalar_stage[MESA_SHADER_VERTEX] =
@@ -146,15 +146,7 @@ brw_compiler_create(void *mem_ctx, const struct gen_device_info *devinfo)
       nir_lower_ddiv;
 
    if (!devinfo->has_64bit_float || (INTEL_DEBUG & DEBUG_SOFT64)) {
-      int64_options |= nir_lower_mov64 |
-                       nir_lower_icmp64 |
-                       nir_lower_iadd64 |
-                       nir_lower_iabs64 |
-                       nir_lower_ineg64 |
-                       nir_lower_logic64 |
-                       nir_lower_minmax64 |
-                       nir_lower_shift64 |
-                       nir_lower_extract64;
+      int64_options |= (nir_lower_int64_options)~0;
       fp64_options |= nir_lower_fp64_full_software;
    }
 
@@ -166,7 +158,7 @@ brw_compiler_create(void *mem_ctx, const struct gen_device_info *devinfo)
       int64_options |= nir_lower_imul_2x32_64;
 
    /* We want the GLSL compiler to emit code that uses condition codes */
-   for (int i = 0; i < MESA_SHADER_STAGES; i++) {
+   for (int i = 0; i < MESA_ALL_SHADER_STAGES; i++) {
       compiler->glsl_compiler_options[i].MaxUnrollIterations = 0;
       compiler->glsl_compiler_options[i].MaxIfDepth =
          devinfo->gen < 6 ? 16 : UINT_MAX;
@@ -248,19 +240,14 @@ brw_get_compiler_config_value(const struct brw_compiler *compiler)
 unsigned
 brw_prog_data_size(gl_shader_stage stage)
 {
-   STATIC_ASSERT(MESA_SHADER_VERTEX == 0);
-   STATIC_ASSERT(MESA_SHADER_TESS_CTRL == 1);
-   STATIC_ASSERT(MESA_SHADER_TESS_EVAL == 2);
-   STATIC_ASSERT(MESA_SHADER_GEOMETRY == 3);
-   STATIC_ASSERT(MESA_SHADER_FRAGMENT == 4);
-   STATIC_ASSERT(MESA_SHADER_COMPUTE == 5);
    static const size_t stage_sizes[] = {
-      sizeof(struct brw_vs_prog_data),
-      sizeof(struct brw_tcs_prog_data),
-      sizeof(struct brw_tes_prog_data),
-      sizeof(struct brw_gs_prog_data),
-      sizeof(struct brw_wm_prog_data),
-      sizeof(struct brw_cs_prog_data),
+      [MESA_SHADER_VERTEX]    = sizeof(struct brw_vs_prog_data),
+      [MESA_SHADER_TESS_CTRL] = sizeof(struct brw_tcs_prog_data),
+      [MESA_SHADER_TESS_EVAL] = sizeof(struct brw_tes_prog_data),
+      [MESA_SHADER_GEOMETRY]  = sizeof(struct brw_gs_prog_data),
+      [MESA_SHADER_FRAGMENT]  = sizeof(struct brw_wm_prog_data),
+      [MESA_SHADER_COMPUTE]   = sizeof(struct brw_cs_prog_data),
+      [MESA_SHADER_KERNEL]    = sizeof(struct brw_cs_prog_data),
    };
    assert((int)stage >= 0 && stage < ARRAY_SIZE(stage_sizes));
    return stage_sizes[stage];
@@ -270,12 +257,13 @@ unsigned
 brw_prog_key_size(gl_shader_stage stage)
 {
    static const size_t stage_sizes[] = {
-      sizeof(struct brw_vs_prog_key),
-      sizeof(struct brw_tcs_prog_key),
-      sizeof(struct brw_tes_prog_key),
-      sizeof(struct brw_gs_prog_key),
-      sizeof(struct brw_wm_prog_key),
-      sizeof(struct brw_cs_prog_key),
+      [MESA_SHADER_VERTEX]    = sizeof(struct brw_vs_prog_key),
+      [MESA_SHADER_TESS_CTRL] = sizeof(struct brw_tcs_prog_key),
+      [MESA_SHADER_TESS_EVAL] = sizeof(struct brw_tes_prog_key),
+      [MESA_SHADER_GEOMETRY]  = sizeof(struct brw_gs_prog_key),
+      [MESA_SHADER_FRAGMENT]  = sizeof(struct brw_wm_prog_key),
+      [MESA_SHADER_COMPUTE]   = sizeof(struct brw_cs_prog_key),
+      [MESA_SHADER_KERNEL]    = sizeof(struct brw_cs_prog_key),
    };
    assert((int)stage >= 0 && stage < ARRAY_SIZE(stage_sizes));
    return stage_sizes[stage];

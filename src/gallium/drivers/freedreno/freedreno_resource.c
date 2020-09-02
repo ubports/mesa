@@ -34,6 +34,8 @@
 #include "util/set.h"
 #include "util/u_drm.h"
 
+#include "decode/util.h"
+
 #include "freedreno_resource.h"
 #include "freedreno_batch_cache.h"
 #include "freedreno_blitter.h"
@@ -192,8 +194,7 @@ realloc_bo(struct fd_resource *rsc, uint32_t size)
 	 * around the issue, but any memset value seems to.
 	 */
 	if (rsc->layout.ubwc) {
-		void *buf = fd_bo_map(rsc->bo);
-		memset(buf, 0, rsc->layout.slices[0].offset);
+		rsc->needs_ubwc_clear = true;
 	}
 
 	rsc->seqno = p_atomic_inc_return(&screen->rsc_seqno);
@@ -216,6 +217,9 @@ do_blit(struct fd_context *ctx, const struct pipe_blit_info *blit, bool fallback
 	}
 }
 
+static void
+flush_resource(struct fd_context *ctx, struct fd_resource *rsc, unsigned usage);
+
 /**
  * @rsc: the resource to shadow
  * @level: the level to discard (if box != NULL, otherwise ignored)
@@ -232,6 +236,21 @@ fd_try_shadow_resource(struct fd_context *ctx, struct fd_resource *rsc,
 
 	if (prsc->next)
 		return false;
+
+	/* If you have a sequence where there is a single rsc associated
+	 * with the current render target, and then you end up shadowing
+	 * that same rsc on the 3d pipe (u_blitter), because of how we
+	 * swap the new shadow and rsc before the back-blit, you could end
+	 * up confusing things into thinking that u_blitter's framebuffer
+	 * state is the same as the current framebuffer state, which has
+	 * the result of blitting to rsc rather than shadow.
+	 *
+	 * Normally we wouldn't want to unconditionally trigger a flush,
+	 * since that defeats the purpose of shadowing, but this is a
+	 * case where we'd have to flush anyways.
+	 */
+	if (rsc->write_batch == ctx->batch)
+		flush_resource(ctx, rsc, 0);
 
 	/* TODO: somehow munge dimensions and format to copy unsupported
 	 * render target format to something that is supported?
@@ -390,6 +409,17 @@ fd_resource_uncompress(struct fd_context *ctx, struct fd_resource *rsc)
 
 	/* shadow should not fail in any cases where we need to uncompress: */
 	debug_assert(success);
+}
+
+/**
+ * Debug helper to hexdump a resource.
+ */
+void
+fd_resource_dump(struct fd_resource *rsc, const char *name)
+{
+	fd_bo_cpu_prep(rsc->bo, NULL, DRM_FREEDRENO_PREP_READ);
+	printf("%s: \n", name);
+	dump_hex(fd_bo_map(rsc->bo), fd_bo_size(rsc->bo));
 }
 
 static struct fd_resource *
@@ -833,50 +863,22 @@ fd_resource_layout_init(struct pipe_resource *prsc)
 }
 
 /**
- * Create a new texture object, using the given template info.
+ * Helper that allocates a resource and resolves its layout (but doesn't
+ * allocate its bo).
+ *
+ * It returns a pipe_resource (as fd_resource_create_with_modifiers()
+ * would do), and also bo's minimum required size as an output argument.
  */
 static struct pipe_resource *
-fd_resource_create_with_modifiers(struct pipe_screen *pscreen,
+fd_resource_allocate_and_resolve(struct pipe_screen *pscreen,
 		const struct pipe_resource *tmpl,
-		const uint64_t *modifiers, int count)
+		const uint64_t *modifiers, int count, uint32_t *psize)
 {
 	struct fd_screen *screen = fd_screen(pscreen);
 	struct fd_resource *rsc;
 	struct pipe_resource *prsc;
 	enum pipe_format format = tmpl->format;
 	uint32_t size;
-
-	/* when using kmsro, scanout buffers are allocated on the display device
-	 * create_with_modifiers() doesn't give us usage flags, so we have to
-	 * assume that all calls with modifiers are scanout-possible
-	 */
-	if (screen->ro &&
-		((tmpl->bind & PIPE_BIND_SCANOUT) ||
-		 !(count == 1 && modifiers[0] == DRM_FORMAT_MOD_INVALID))) {
-		struct pipe_resource scanout_templat = *tmpl;
-		struct renderonly_scanout *scanout;
-		struct winsys_handle handle;
-
-		/* note: alignment is wrong for a6xx */
-		scanout_templat.width0 = align(tmpl->width0, screen->gmem_alignw);
-
-		scanout = renderonly_scanout_for_resource(&scanout_templat,
-												  screen->ro, &handle);
-		if (!scanout)
-			return NULL;
-
-		renderonly_scanout_destroy(scanout, screen->ro);
-
-		assert(handle.type == WINSYS_HANDLE_TYPE_FD);
-		rsc = fd_resource(pscreen->resource_from_handle(pscreen, tmpl,
-														&handle,
-														PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE));
-		close(handle.handle);
-		if (!rsc)
-			return NULL;
-
-		return &rsc->base;
-	}
 
 	rsc = CALLOC_STRUCT(fd_resource);
 	prsc = &rsc->base;
@@ -963,6 +965,63 @@ fd_resource_create_with_modifiers(struct pipe_screen *pscreen,
 
 	if (fd_mesa_debug & FD_DBG_LAYOUT)
 		fdl_dump_layout(&rsc->layout);
+
+	/* Hand out the resolved size. */
+	if (psize)
+		*psize = size;
+
+	return prsc;
+}
+
+/**
+ * Create a new texture object, using the given template info.
+ */
+static struct pipe_resource *
+fd_resource_create_with_modifiers(struct pipe_screen *pscreen,
+		const struct pipe_resource *tmpl,
+		const uint64_t *modifiers, int count)
+{
+	struct fd_screen *screen = fd_screen(pscreen);
+	struct fd_resource *rsc;
+	struct pipe_resource *prsc;
+	uint32_t size;
+
+	/* when using kmsro, scanout buffers are allocated on the display device
+	 * create_with_modifiers() doesn't give us usage flags, so we have to
+	 * assume that all calls with modifiers are scanout-possible
+	 */
+	if (screen->ro &&
+		((tmpl->bind & PIPE_BIND_SCANOUT) ||
+		 !(count == 1 && modifiers[0] == DRM_FORMAT_MOD_INVALID))) {
+		struct pipe_resource scanout_templat = *tmpl;
+		struct renderonly_scanout *scanout;
+		struct winsys_handle handle;
+
+		/* note: alignment is wrong for a6xx */
+		scanout_templat.width0 = align(tmpl->width0, screen->gmem_alignw);
+
+		scanout = renderonly_scanout_for_resource(&scanout_templat,
+												  screen->ro, &handle);
+		if (!scanout)
+			return NULL;
+
+		renderonly_scanout_destroy(scanout, screen->ro);
+
+		assert(handle.type == WINSYS_HANDLE_TYPE_FD);
+		rsc = fd_resource(pscreen->resource_from_handle(pscreen, tmpl,
+														&handle,
+														PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE));
+		close(handle.handle);
+		if (!rsc)
+			return NULL;
+
+		return &rsc->base;
+	}
+
+	prsc = fd_resource_allocate_and_resolve(pscreen, tmpl, modifiers, count, &size);
+	if (!prsc)
+		return NULL;
+	rsc = fd_resource(prsc);
 
 	realloc_bo(rsc, size);
 	if (!rsc->bo)
@@ -1173,6 +1232,82 @@ fd_layout_resource_for_modifier(struct fd_resource *rsc, uint64_t modifier)
 	}
 }
 
+static struct pipe_resource *
+fd_resource_from_memobj(struct pipe_screen *pscreen,
+						const struct pipe_resource *tmpl,
+						struct pipe_memory_object *pmemobj,
+						uint64_t offset)
+{
+	struct fd_screen *screen = fd_screen(pscreen);
+	struct fd_memory_object *memobj = fd_memory_object(pmemobj);
+	struct pipe_resource *prsc;
+	struct fd_resource *rsc;
+	uint32_t size;
+	assert(memobj->bo);
+
+	/* We shouldn't get a scanout buffer here. */
+	assert(!(tmpl->bind & PIPE_BIND_SCANOUT));
+
+	uint64_t modifiers = DRM_FORMAT_MOD_INVALID;
+	if (tmpl->bind & PIPE_BIND_LINEAR) {
+		modifiers = DRM_FORMAT_MOD_LINEAR;
+	} else if (is_a6xx(screen) && tmpl->width0 >= FDL_MIN_UBWC_WIDTH) {
+		modifiers = DRM_FORMAT_MOD_QCOM_COMPRESSED;
+	}
+
+	/* Allocate new pipe resource. */
+	prsc = fd_resource_allocate_and_resolve(pscreen, tmpl, &modifiers, 1, &size);
+	if (!prsc)
+		return NULL;
+	rsc = fd_resource(prsc);
+
+	/* bo's size has to be large enough, otherwise cleanup resource and fail
+	 * gracefully.
+	 */
+	if (fd_bo_size(memobj->bo) < size) {
+		fd_resource_destroy(pscreen, prsc);
+		return NULL;
+	}
+
+	/* Share the bo with the memory object. */
+	rsc->bo = fd_bo_ref(memobj->bo);
+
+	return prsc;
+}
+
+static struct pipe_memory_object *
+fd_memobj_create_from_handle(struct pipe_screen *pscreen,
+							 struct winsys_handle *whandle,
+							 bool dedicated)
+{
+	struct fd_memory_object *memobj = CALLOC_STRUCT(fd_memory_object);
+	if (!memobj)
+		return NULL;
+
+	struct fd_bo *bo = fd_screen_bo_from_handle(pscreen, whandle);
+	if (!bo) {
+		free(memobj);
+		return NULL;
+	}
+
+	memobj->b.dedicated = dedicated;
+	memobj->bo = bo;
+
+	return &memobj->b;
+}
+
+static void
+fd_memobj_destroy(struct pipe_screen *pscreen,
+		struct pipe_memory_object *pmemobj)
+{
+	struct fd_memory_object *memobj = fd_memory_object(pmemobj);
+
+	assert(memobj->bo);
+	fd_bo_del(memobj->bo);
+
+	free(pmemobj);
+}
+
 void
 fd_resource_screen_init(struct pipe_screen *pscreen)
 {
@@ -1197,6 +1332,11 @@ fd_resource_screen_init(struct pipe_screen *pscreen)
 		screen->supported_modifiers = supported_modifiers;
 		screen->num_supported_modifiers = ARRAY_SIZE(supported_modifiers);
 	}
+
+	/* GL_EXT_memory_object */
+	pscreen->memobj_create_from_handle = fd_memobj_create_from_handle;
+	pscreen->memobj_destroy = fd_memobj_destroy;
+	pscreen->resource_from_memobj = fd_resource_from_memobj;
 }
 
 static void

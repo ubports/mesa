@@ -51,17 +51,14 @@ static nir_variable *
 create_input(nir_shader *shader, gl_varying_slot slot,
              enum glsl_interp_mode interpolation)
 {
-   nir_variable *var = rzalloc(shader, nir_variable);
+   nir_variable *var = nir_variable_create(shader, nir_var_shader_in,
+                                           glsl_vec4_type(), NULL);
 
    var->data.driver_location = shader->num_inputs++;
-   var->type = glsl_vec4_type();
-   var->data.mode = nir_var_shader_in;
    var->name = ralloc_asprintf(var, "in_%d", var->data.driver_location);
    var->data.index = 0;
    var->data.location = slot;
    var->data.interpolation = interpolation;
-
-   exec_list_push_tail(&shader->inputs, &var->node);
 
    return var;
 }
@@ -69,22 +66,19 @@ create_input(nir_shader *shader, gl_varying_slot slot,
 static nir_variable *
 create_face_input(nir_shader *shader)
 {
-   nir_foreach_variable(var, &shader->inputs) {
-      if (var->data.location == VARYING_SLOT_FACE)
-         return var;
+   nir_variable *var =
+      nir_find_variable_with_location(shader, nir_var_shader_in,
+                                      VARYING_SLOT_FACE);
+
+   if (var == NULL) {
+      var = nir_variable_create(shader, nir_var_shader_in,
+                                glsl_bool_type(), "gl_FrontFacing");
+
+      var->data.driver_location = shader->num_inputs++;
+      var->data.index = 0;
+      var->data.location = VARYING_SLOT_FACE;
+      var->data.interpolation = INTERP_MODE_FLAT;
    }
-
-   nir_variable *var = rzalloc(shader, nir_variable);
-
-   var->data.driver_location = shader->num_inputs++;
-   var->type = glsl_bool_type();
-   var->data.mode = nir_var_shader_in;
-   var->name = "gl_FrontFacing";
-   var->data.index = 0;
-   var->data.location = VARYING_SLOT_FACE;
-   var->data.interpolation = INTERP_MODE_FLAT;
-
-   exec_list_push_tail(&shader->inputs, &var->node);
 
    return var;
 }
@@ -108,7 +102,7 @@ static int
 setup_inputs(lower_2side_state *state)
 {
    /* find color inputs: */
-   nir_foreach_variable(var, &state->shader->inputs) {
+   nir_foreach_shader_in_variable(var, state->shader) {
       switch (var->data.location) {
       case VARYING_SLOT_COL0:
       case VARYING_SLOT_COL1:

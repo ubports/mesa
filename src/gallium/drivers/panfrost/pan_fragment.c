@@ -69,7 +69,7 @@ panfrost_fragment_job(struct panfrost_batch *batch, bool has_draws)
                 panfrost_initialize_surface(batch, fb->zsbuf);
 
         struct mali_job_descriptor_header header = {
-                .job_type = JOB_TYPE_FRAGMENT,
+                .job_type = MALI_JOB_TYPE_FRAGMENT,
                 .job_index = 1,
                 .job_descriptor_size = 1
         };
@@ -100,7 +100,7 @@ panfrost_fragment_job(struct panfrost_batch *batch, bool has_draws)
                 .framebuffer = framebuffer,
         };
 
-        struct panfrost_transfer transfer = panfrost_pool_alloc(&batch->pool, sizeof(header) + sizeof(payload));
+        struct panfrost_transfer transfer = panfrost_pool_alloc_aligned(&batch->pool, sizeof(header) + sizeof(payload), 64);
         memcpy(transfer.cpu, &header, sizeof(header));
         memcpy(transfer.cpu + sizeof(header), &payload, sizeof(payload));
         return transfer.gpu;

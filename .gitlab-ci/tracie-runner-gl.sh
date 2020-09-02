@@ -31,9 +31,6 @@ export PAGER=cat
 RESULTS=`pwd`/results
 mkdir -p $RESULTS
 
-# For artifact uploads to MinIO
-cp install/.minio_credentials .
-
 # Perform a self-test to ensure tracie is working properly.
 if [ -z "$TRACIE_NO_UNIT_TESTS" ]; then
     TRACIE_UPLOAD_TO_MINIO=0 python3 -m pytest -v --pyargs $INSTALL/tracie/tests/test.py
@@ -57,4 +54,4 @@ fi
 MESA_VERSION=$(cat "$INSTALL/VERSION" | sed 's/\./\\./g')
 wflinfo --platform surfaceless_egl --api gles2 | grep "Mesa $MESA_VERSION\(\s\|$\)"
 
-python3 "$INSTALL/tracie/tracie.py" --file "$INSTALL/traces.yml" --device-name "$DEVICE_NAME"
+python3 "$INSTALL/tracie/tracie.py" --file "$INSTALL/traces-$DRIVER_NAME.yml" --device-name "$DEVICE_NAME"

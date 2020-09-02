@@ -4,6 +4,7 @@
 #include "zink_fence.h"
 #include "zink_framebuffer.h"
 #include "zink_query.h"
+#include "zink_program.h"
 #include "zink_render_pass.h"
 #include "zink_resource.h"
 #include "zink_screen.h"
@@ -26,6 +27,11 @@ reset_batch(struct zink_context *ctx, struct zink_batch *batch)
 
    zink_render_pass_reference(screen, &batch->rp, NULL);
    zink_framebuffer_reference(screen, &batch->fb, NULL);
+   set_foreach(batch->programs, entry) {
+      struct zink_gfx_program *prog = (struct zink_gfx_program*)entry->key;
+      zink_gfx_program_reference(screen, &prog, NULL);
+   }
+   _mesa_set_clear(batch->programs, NULL);
 
    /* unref all used resources */
    set_foreach(batch->resources, entry) {
@@ -105,6 +111,15 @@ zink_batch_reference_resoure(struct zink_batch *batch,
    if (!entry) {
       entry = _mesa_set_add(batch->resources, res);
       pipe_reference(NULL, &res->base.reference);
+
+      /* u_transfer_helper unrefs the stencil buffer when the depth buffer is unrefed,
+       * so we add an extra ref here to the stencil buffer to compensate
+       */
+      struct zink_resource *stencil;
+
+      zink_get_depth_stencil_resources((struct pipe_resource*)res, NULL, &stencil);
+      if (stencil)
+         pipe_reference(NULL, &stencil->base.reference);
    }
 }
 
@@ -116,5 +131,16 @@ zink_batch_reference_sampler_view(struct zink_batch *batch,
    if (!entry) {
       entry = _mesa_set_add(batch->sampler_views, sv);
       pipe_reference(NULL, &sv->base.reference);
+   }
+}
+
+void
+zink_batch_reference_program(struct zink_batch *batch,
+                             struct zink_gfx_program *prog)
+{
+   struct set_entry *entry = _mesa_set_search(batch->programs, prog);
+   if (!entry) {
+      entry = _mesa_set_add(batch->programs, prog);
+      pipe_reference(NULL, &prog->reference);
    }
 }

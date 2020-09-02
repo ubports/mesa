@@ -254,7 +254,8 @@ use_hw_binning(struct fd_batch *batch)
 {
 	const struct fd_gmem_stateobj *gmem = batch->gmem_state;
 
-	// TODO figure out hw limits for binning
+	if ((gmem->maxpw * gmem->maxph) > 32)
+		return false;
 
 	return fd_binning_enabled && ((gmem->nbins_x * gmem->nbins_y) >= 2) &&
 			(batch->num_draws > 0);
@@ -676,10 +677,10 @@ fd6_emit_tile_init(struct fd_batch *batch)
 
 	fd6_emit_lrz_flush(ring);
 
-	if (batch->lrz_clear) {
-		fd_log(batch, "START LRZ CLEAR");
-		fd6_emit_ib(ring, batch->lrz_clear);
-		fd_log(batch, "END LRZ CLEAR");
+	if (batch->prologue) {
+		fd_log(batch, "START PROLOGUE");
+		fd6_emit_ib(ring, batch->prologue);
+		fd_log(batch, "END PROLOGUE");
 	}
 
 	fd6_cache_inv(batch, ring);
@@ -1226,6 +1227,9 @@ fd6_emit_tile(struct fd_batch *batch, const struct fd_tile *tile)
 	} else {
 		emit_conditional_ib(batch, tile, batch->draw);
 	}
+
+	if (batch->epilogue)
+		fd6_emit_ib(batch->gmem, batch->epilogue);
 }
 
 static void
@@ -1266,9 +1270,6 @@ static void
 fd6_emit_tile_fini(struct fd_batch *batch)
 {
 	struct fd_ringbuffer *ring = batch->gmem;
-
-	if (batch->epilogue)
-		fd6_emit_ib(batch->gmem, batch->epilogue);
 
 	OUT_PKT4(ring, REG_A6XX_GRAS_LRZ_CNTL, 1);
 	OUT_RING(ring, A6XX_GRAS_LRZ_CNTL_ENABLE);
@@ -1359,10 +1360,22 @@ setup_tess_buffers(struct fd_batch *batch, struct fd_ringbuffer *ring)
 static void
 fd6_emit_sysmem_prep(struct fd_batch *batch)
 {
-	struct pipe_framebuffer_state *pfb = &batch->framebuffer;
 	struct fd_ringbuffer *ring = batch->gmem;
 
 	fd6_emit_restore(batch, ring);
+	fd6_emit_lrz_flush(ring);
+
+	if (batch->prologue) {
+		fd_log(batch, "START PROLOGUE");
+		fd6_emit_ib(ring, batch->prologue);
+		fd_log(batch, "END PROLOGUE");
+	}
+
+	/* remaining setup below here does not apply to blit/compute: */
+	if (batch->nondraw)
+		return;
+
+	struct pipe_framebuffer_state *pfb = &batch->framebuffer;
 
 	if (pfb->width > 0 && pfb->height > 0)
 		set_scissor(ring, 0, 0, pfb->width - 1, pfb->height - 1);
@@ -1374,11 +1387,6 @@ fd6_emit_sysmem_prep(struct fd_batch *batch)
 	set_bin_size(ring, 0, 0, 0xc00000); /* 0xc00000 = BYPASS? */
 
 	emit_sysmem_clears(batch, ring);
-
-	fd6_emit_lrz_flush(ring);
-
-	if (batch->lrz_clear)
-		fd6_emit_ib(ring, batch->lrz_clear);
 
 	emit_marker6(ring, 7);
 	OUT_PKT7(ring, CP_SET_MARKER, 1);

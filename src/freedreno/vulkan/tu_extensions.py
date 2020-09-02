@@ -87,6 +87,13 @@ EXTENSIONS = [
     Extension('VK_KHR_variable_pointers',                 1, True),
     Extension('VK_EXT_private_data',                      1, True),
     Extension('VK_EXT_shader_stencil_export',             1, True),
+    Extension('VK_EXT_depth_clip_enable',                 1, True),
+    Extension('VK_KHR_draw_indirect_count',               1, True),
+    Extension('VK_EXT_4444_formats',                      1, True),
+    Extension('VK_EXT_conditional_rendering',             1, True),
+    Extension('VK_EXT_custom_border_color',              12, True),
+    Extension('VK_KHR_multiview',                         1, True),
+    Extension('VK_EXT_host_query_reset',                  1, True),
 ]
 
 MAX_API_VERSION = VkVersion(MAX_API_VERSION)

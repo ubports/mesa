@@ -51,6 +51,7 @@ libtu_files = files(
   'tu_fence.c',
   'tu_formats.c',
   'tu_image.c',
+  'tu_nir_lower_multiview.c',
   'tu_pass.c',
   'tu_pipeline.c',
   'tu_pipeline_cache.c',
@@ -131,7 +132,7 @@ libvulkan_freedreno = shared_library(
   ],
   c_args : [no_override_init_args, tu_flags],
   gnu_symbol_visibility : 'hidden',
-  link_args : [ld_args_bsymbolic, ld_args_gc_sections],
+  link_args : [ld_args_bsymbolic, ld_args_gc_sections, ld_args_build_id],
   install : true,
 )
 

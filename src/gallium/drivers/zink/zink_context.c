@@ -28,6 +28,7 @@
 #include "zink_fence.h"
 #include "zink_framebuffer.h"
 #include "zink_helpers.h"
+#include "zink_program.h"
 #include "zink_pipeline.h"
 #include "zink_query.h"
 #include "zink_render_pass.h"
@@ -292,69 +293,6 @@ zink_sampler_view_destroy(struct pipe_context *pctx,
    FREE(view);
 }
 
-static void *
-zink_create_vs_state(struct pipe_context *pctx,
-                     const struct pipe_shader_state *shader)
-{
-   struct nir_shader *nir;
-   if (shader->type != PIPE_SHADER_IR_NIR)
-      nir = zink_tgsi_to_nir(pctx->screen, shader->tokens);
-   else
-      nir = (struct nir_shader *)shader->ir.nir;
-
-   return zink_compile_nir(zink_screen(pctx->screen), nir, &shader->stream_output);
-}
-
-static void
-bind_stage(struct zink_context *ctx, enum pipe_shader_type stage,
-           struct zink_shader *shader)
-{
-   assert(stage < PIPE_SHADER_COMPUTE);
-   ctx->gfx_stages[stage] = shader;
-   ctx->dirty_program = true;
-}
-
-static void
-zink_bind_vs_state(struct pipe_context *pctx,
-                   void *cso)
-{
-   bind_stage(zink_context(pctx), PIPE_SHADER_VERTEX, cso);
-}
-
-static void
-zink_delete_vs_state(struct pipe_context *pctx,
-                     void *cso)
-{
-   zink_shader_free(zink_context(pctx), cso);
-}
-
-static void *
-zink_create_fs_state(struct pipe_context *pctx,
-                     const struct pipe_shader_state *shader)
-{
-   struct nir_shader *nir;
-   if (shader->type != PIPE_SHADER_IR_NIR)
-      nir = zink_tgsi_to_nir(pctx->screen, shader->tokens);
-   else
-      nir = (struct nir_shader *)shader->ir.nir;
-
-   return zink_compile_nir(zink_screen(pctx->screen), nir, NULL);
-}
-
-static void
-zink_bind_fs_state(struct pipe_context *pctx,
-                   void *cso)
-{
-   bind_stage(zink_context(pctx), PIPE_SHADER_FRAGMENT, cso);
-}
-
-static void
-zink_delete_fs_state(struct pipe_context *pctx,
-                     void *cso)
-{
-   zink_shader_free(zink_context(pctx), cso);
-}
-
 static void
 zink_set_polygon_stipple(struct pipe_context *pctx,
                          const struct pipe_poly_stipple *ps)
@@ -383,6 +321,7 @@ zink_set_vertex_buffers(struct pipe_context *pctx,
             res->needs_xfb_barrier = false;
          }
       }
+      ctx->gfx_pipeline_state.hash = 0;
    }
 
    util_set_vertex_buffers_mask(ctx->buffers, &ctx->buffers_enabled_mask,
@@ -674,6 +613,7 @@ zink_set_framebuffer_state(struct pipe_context *pctx,
 
    ctx->gfx_pipeline_state.rast_samples = MAX2(state->samples, 1);
    ctx->gfx_pipeline_state.num_attachments = state->nr_cbufs;
+   ctx->gfx_pipeline_state.hash = 0;
 
    struct zink_batch *batch = zink_batch_no_rp(ctx);
 
@@ -693,6 +633,7 @@ zink_set_sample_mask(struct pipe_context *pctx, unsigned sample_mask)
 {
    struct zink_context *ctx = zink_context(pctx);
    ctx->gfx_pipeline_state.sample_mask = sample_mask;
+   ctx->gfx_pipeline_state.hash = 0;
 }
 
 static VkAccessFlags
@@ -901,13 +842,13 @@ zink_shader_stage(enum pipe_shader_type type)
 static uint32_t
 hash_gfx_program(const void *key)
 {
-   return _mesa_hash_data(key, sizeof(struct zink_shader *) * (PIPE_SHADER_TYPES - 1));
+   return _mesa_hash_data(key, sizeof(struct zink_shader *) * (ZINK_SHADER_COUNT));
 }
 
 static bool
 equals_gfx_program(const void *a, const void *b)
 {
-   return memcmp(a, b, sizeof(struct zink_shader *) * (PIPE_SHADER_TYPES - 1)) == 0;
+   return memcmp(a, b, sizeof(struct zink_shader *) * (ZINK_SHADER_COUNT)) == 0;
 }
 
 static uint32_t
@@ -1112,6 +1053,8 @@ zink_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
    if (!ctx)
       goto fail;
 
+   ctx->gfx_pipeline_state.hash = 0;
+
    ctx->base.screen = pscreen;
    ctx->base.priv = priv;
 
@@ -1127,13 +1070,7 @@ zink_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
    ctx->base.set_sampler_views = zink_set_sampler_views;
    ctx->base.sampler_view_destroy = zink_sampler_view_destroy;
 
-   ctx->base.create_vs_state = zink_create_vs_state;
-   ctx->base.bind_vs_state = zink_bind_vs_state;
-   ctx->base.delete_vs_state = zink_delete_vs_state;
-
-   ctx->base.create_fs_state = zink_create_fs_state;
-   ctx->base.bind_fs_state = zink_bind_fs_state;
-   ctx->base.delete_fs_state = zink_delete_fs_state;
+   zink_program_init(ctx);
 
    ctx->base.set_polygon_stipple = zink_set_polygon_stipple;
    ctx->base.set_vertex_buffers = zink_set_vertex_buffers;
@@ -1215,6 +1152,9 @@ zink_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
       ctx->batches[i].sampler_views = _mesa_set_create(NULL,
                                                        _mesa_hash_pointer,
                                                        _mesa_key_pointer_equal);
+      ctx->batches[i].programs = _mesa_set_create(NULL,
+                                                  _mesa_hash_pointer,
+                                                  _mesa_key_pointer_equal);
 
       if (!ctx->batches[i].resources || !ctx->batches[i].sampler_views)
          goto fail;
@@ -1242,8 +1182,6 @@ zink_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
       PIPE_BIND_VERTEX_BUFFER, PIPE_USAGE_IMMUTABLE, sizeof(data), data);
    if (!ctx->dummy_buffer)
       goto fail;
-
-   ctx->dirty_program = true;
 
    /* start the first batch */
    zink_start_batch(ctx, zink_curr_batch(ctx));

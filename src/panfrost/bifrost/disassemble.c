@@ -32,7 +32,7 @@
 
 #include "bifrost.h"
 #include "disassemble.h"
-#include "bi_print.h"
+#include "bi_print_common.h"
 #include "util/macros.h"
 
 // return bits (high, lo]
@@ -342,8 +342,7 @@ static uint64_t get_const(uint64_t *consts, struct bifrost_regs srcs)
                 imm = consts[5];
                 break;
         default:
-                assert(0);
-                break;
+                unreachable("bad imm");
         }
         return imm | low_bits;
 }
@@ -1013,6 +1012,7 @@ static const struct add_op_info add_op_infos[] = {
         { 0x07ba5, "FSQRT_FREXPE", ADD_ONE_SRC },
         { 0x07bad, "FRSQ_FREXPE", ADD_ONE_SRC },
         { 0x07bc5, "FLOG_FREXPE", ADD_ONE_SRC },
+        { 0x07bd4, "IABS.i32", ADD_ONE_SRC },
         { 0x07d42, "CEIL.v2f16", ADD_ONE_SRC },
         { 0x07d45, "CEIL.f32", ADD_ONE_SRC },
         { 0x07d82, "FLOOR.v2f16", ADD_ONE_SRC },

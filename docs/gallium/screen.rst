@@ -589,6 +589,8 @@ The integer capabilities:
 * ``PIPE_CAP_MAP_UNSYNCHRONIZED_THREAD_SAFE``: Whether mapping a buffer as unsynchronized from any thread is safe.
 * ``PIPE_CAP_GLSL_ZERO_INIT``: Choose a default zero initialization some glsl variables. If `1`, then all glsl shader variables and gl_FragColor are initialized to zero. If `2`, then shader out variables are not initialized but function out variables are.
 * ``PIPE_CAP_BLEND_EQUATION_ADVANCED``: Driver supports blend equation advanced without necessarily supporting FBFETCH.
+* ``PIPE_CAP_NIR_ATOMICS_AS_DEREF``: Whether NIR atomics instructions should reference atomics as NIR derefs instead of by indices.
+* ``PIPE_CAP_NO_CLIP_ON_COPY_TEX``: Driver doesn't want x/y/width/height clipped based on src size when doing a copy texture operation (eg: may want out-of-bounds reads that produce 0 instead of leaving the texture content undefined)
 
 .. _pipe_capf:
 
@@ -663,8 +665,8 @@ MOV OUT[0], CONST[0][3]  # copy vector 3 of constbuf 0
   DDX and DDY opcodes are supported.
 * ``PIPE_SHADER_CAP_INT16``: Whether 16-bit signed and unsigned integer types
   are supported.
-* ``PIPE_SHADER_CAP_GLSL_16BIT_TEMPS``: Lower mediump temporaries to 16-bit.
-  This generates 16-bit phis in NIR, 16-bit loop counters, and 16-bit indirect arrays.
+* ``PIPE_SHADER_CAP_GLSL_16BIT_CONSTS``: Lower mediump constants to 16-bit.
+  Note that 16-bit constants are not lowered to uniforms in GLSL.
 * ``PIPE_SHADER_CAP_MAX_TEXTURE_SAMPLERS``: The maximum number of texture
   samplers.
 * ``PIPE_SHADER_CAP_PREFERRED_IR``: Preferred representation of the

@@ -419,9 +419,8 @@ function_always_returns_mediump_or_lowp(const char *name)
           !strcmp(name, "unpackSnorm4x8");
 }
 
-static bool
-is_lowerable_builtin(ir_call *ir,
-                     const struct set *lowerable_rvalues)
+static unsigned
+handle_call(ir_call *ir, const struct set *lowerable_rvalues)
 {
    /* The intrinsic call is inside the wrapper imageLoad function that will
     * be inlined. We have to handle both of them.
@@ -445,15 +444,24 @@ is_lowerable_builtin(ir_call *ir,
        */
       const struct util_format_description *desc =
          util_format_description(resource->data.image_format);
-      unsigned i =
+      int i =
          util_format_get_first_non_void_channel(resource->data.image_format);
+      bool mediump;
+
+      assert(i >= 0);
 
       if (desc->channel[i].pure_integer ||
           desc->channel[i].type == UTIL_FORMAT_TYPE_FLOAT)
-         return desc->channel[i].size <= 16;
+         mediump = desc->channel[i].size <= 16;
       else
-         return desc->channel[i].size <= 10; /* unorm/snorm */
+         mediump = desc->channel[i].size <= 10; /* unorm/snorm */
+
+      return mediump ? GLSL_PRECISION_MEDIUM : GLSL_PRECISION_HIGH;
    }
+
+   /* Return the declared precision for user-defined functions. */
+   if (!ir->callee->is_builtin())
+      return ir->callee->return_precision;
 
    /* Handle special calls. */
    if (ir->callee->is_builtin() && ir->actual_parameters.length()) {
@@ -470,15 +478,13 @@ is_lowerable_builtin(ir_call *ir,
       if (var && var->type->without_array()->is_sampler()) {
          /* textureSize always returns highp. */
          if (!strcmp(ir->callee_name(), "textureSize"))
-            return false;
+            return GLSL_PRECISION_HIGH;
 
-         return var->data.precision == GLSL_PRECISION_MEDIUM ||
-                var->data.precision == GLSL_PRECISION_LOW;
+         return var->data.precision;
       }
    }
 
-   if (!ir->callee->is_builtin() ||
-       /* Parameters are always highp: */
+   if (/* Parameters are always highp: */
        !strcmp(ir->callee_name(), "floatBitsToInt") ||
        !strcmp(ir->callee_name(), "floatBitsToUint") ||
        !strcmp(ir->callee_name(), "intBitsToFloat") ||
@@ -505,8 +511,10 @@ is_lowerable_builtin(ir_call *ir,
         */
        !strcmp(ir->callee_name(), "packHalf2x16") ||
        !strcmp(ir->callee_name(), "packUnorm4x8") ||
-       !strcmp(ir->callee_name(), "packSnorm4x8"))
-      return false;
+       !strcmp(ir->callee_name(), "packSnorm4x8") ||
+       /* Atomic functions are not lowered. */
+       strstr(ir->callee_name(), "atomic") == ir->callee_name())
+      return GLSL_PRECISION_HIGH;
 
    assert(ir->callee->return_precision == GLSL_PRECISION_NONE);
 
@@ -528,18 +536,21 @@ is_lowerable_builtin(ir_call *ir,
       check_parameters = 0;
    }
 
+   /* If the call is to a builtin, then the function won’t have a return
+    * precision and we should determine it from the precision of the arguments.
+    */
    foreach_in_list(ir_rvalue, param, &ir->actual_parameters) {
       if (!check_parameters)
          break;
 
       if (!param->as_constant() &&
           _mesa_set_search(lowerable_rvalues, param) == NULL)
-         return false;
+         return GLSL_PRECISION_HIGH;
 
       --check_parameters;
    }
 
-   return true;
+   return GLSL_PRECISION_MEDIUM;
 }
 
 ir_visitor_status
@@ -561,13 +572,7 @@ find_lowerable_rvalues_visitor::visit_leave(ir_call *ir)
 
    assert(var->data.mode == ir_var_temporary);
 
-   unsigned return_precision = ir->callee->return_precision;
-
-   /* If the call is to a builtin, then the function won’t have a return
-    * precision and we should determine it from the precision of the arguments.
-    */
-   if (is_lowerable_builtin(ir, lowerable_rvalues))
-      return_precision = GLSL_PRECISION_MEDIUM;
+   unsigned return_precision = handle_call(ir, lowerable_rvalues);
 
    can_lower_state lower_state =
       handle_precision(var->type, return_precision);
@@ -687,7 +692,7 @@ convert_precision(bool up, ir_rvalue *ir)
    unsigned op;
 
    if (up) {
-      switch (ir->type->without_array()->base_type) {
+      switch (ir->type->base_type) {
       case GLSL_TYPE_FLOAT16:
          op = ir_unop_f162f;
          break;
@@ -702,7 +707,7 @@ convert_precision(bool up, ir_rvalue *ir)
          return NULL;
       }
    } else {
-      switch (ir->type->without_array()->base_type) {
+      switch (ir->type->base_type) {
       case GLSL_TYPE_FLOAT:
          op = ir_unop_f2fmp;
          break;
@@ -882,6 +887,7 @@ find_precision_visitor::visit_enter(ir_call *ir)
     */
 
    if (!ir->callee->is_builtin() ||
+       ir->callee->is_intrinsic() ||
        return_var == NULL ||
        (return_var->data.precision != GLSL_PRECISION_MEDIUM &&
         return_var->data.precision != GLSL_PRECISION_LOW))
@@ -1027,6 +1033,8 @@ lower_variables_visitor::visit(ir_variable *var)
    /* Lower constant initializers. */
    if (var->constant_value &&
        var->type == var->constant_value->type) {
+      if (!options->LowerPrecisionConstants)
+         return visit_continue;
       var->constant_value =
          var->constant_value->clone(ralloc_parent(var), NULL);
       lower_constant(var->constant_value);
@@ -1034,6 +1042,8 @@ lower_variables_visitor::visit(ir_variable *var)
 
    if (var->constant_initializer &&
        var->type == var->constant_initializer->type) {
+      if (!options->LowerPrecisionConstants)
+         return visit_continue;
       var->constant_initializer =
          var->constant_initializer->clone(ralloc_parent(var), NULL);
       lower_constant(var->constant_initializer);
@@ -1109,10 +1119,12 @@ lower_variables_visitor::visit_enter(ir_assignment *ir)
    if (lhs->type->is_array() &&
        (rhs_var || rhs_const) &&
        (!rhs_var ||
-        var->type->without_array()->is_16bit() !=
-        rhs_var->type->without_array()->is_16bit()) &&
+        (var &&
+         var->type->without_array()->is_16bit() !=
+         rhs_var->type->without_array()->is_16bit())) &&
        (!rhs_const ||
-        (var->type->without_array()->is_16bit() &&
+        (var &&
+         var->type->without_array()->is_16bit() &&
          rhs_const->type->without_array()->is_32bit()))) {
       assert(ir->rhs->type->is_array());
 
@@ -1126,7 +1138,8 @@ lower_variables_visitor::visit_enter(ir_assignment *ir)
       }
 
       /* Fix array assignments from non-lowered to lowered. */
-      if (_mesa_set_search(lower_vars, var) &&
+      if (var &&
+          _mesa_set_search(lower_vars, var) &&
           ir->rhs->type->without_array()->is_32bit()) {
          fix_types_in_deref_chain(lhs);
          /* Convert to 16 bits for LHS. */
@@ -1137,7 +1150,8 @@ lower_variables_visitor::visit_enter(ir_assignment *ir)
    }
 
    /* Fix assignment types. */
-   if (_mesa_set_search(lower_vars, var)) {
+   if (var &&
+       _mesa_set_search(lower_vars, var)) {
       /* Fix the LHS type. */
       if (lhs->type->without_array()->is_32bit())
          fix_types_in_deref_chain(lhs);
@@ -1183,7 +1197,8 @@ lower_variables_visitor::visit_enter(ir_return *ir)
       ir_variable *var = deref->variable_referenced();
 
       /* Fix the type of the return value. */
-      if (_mesa_set_search(lower_vars, var) &&
+      if (var &&
+          _mesa_set_search(lower_vars, var) &&
           deref->type->without_array()->is_32bit()) {
          /* Create a 32-bit temporary variable. */
          ir_variable *new_var =
@@ -1224,6 +1239,7 @@ void lower_variables_visitor::handle_rvalue(ir_rvalue **rvalue)
         expr->operation == ir_unop_u2u) &&
        expr->type->without_array()->is_16bit() &&
        expr_op0_deref->type->without_array()->is_32bit() &&
+       expr_op0_deref->variable_referenced() &&
        _mesa_set_search(lower_vars, expr_op0_deref->variable_referenced())) {
       fix_types_in_deref_chain(expr_op0_deref);
 
@@ -1236,14 +1252,25 @@ void lower_variables_visitor::handle_rvalue(ir_rvalue **rvalue)
 
    if (deref) {
       ir_variable *var = deref->variable_referenced();
-      assert(var);
 
-      if (_mesa_set_search(lower_vars, var) &&
+      /* var can be NULL if we are dereferencing ir_constant. */
+      if (var &&
+          _mesa_set_search(lower_vars, var) &&
           deref->type->without_array()->is_32bit()) {
+         void *mem_ctx = ralloc_parent(ir);
+
+         /* Create a 32-bit temporary variable. */
+         ir_variable *new_var =
+            new(mem_ctx) ir_variable(deref->type, "lowerp", ir_var_temporary);
+         base_ir->insert_before(new_var);
+
+         /* Fix types in dereferences. */
          fix_types_in_deref_chain(deref);
 
-         /* Then convert the type up. Optimizations should eliminate this. */
-         *rvalue = convert_precision(true, deref);
+         /* Convert to 32 bits for the rvalue. */
+         convert_split_assignment(new(mem_ctx) ir_dereference_variable(new_var),
+                                  deref, true);
+         *rvalue = new(mem_ctx) ir_dereference_variable(new_var);
       }
    }
 }
@@ -1265,7 +1292,9 @@ lower_variables_visitor::visit_enter(ir_call *ir)
 
       ir_variable *var = param_deref->variable_referenced();
 
-      if (_mesa_set_search(lower_vars, var) &&
+      /* var can be NULL if we are dereferencing ir_constant. */
+      if (var &&
+          _mesa_set_search(lower_vars, var) &&
           param->type->without_array()->is_32bit()) {
          fix_types_in_deref_chain(param_deref);
 
@@ -1328,8 +1357,6 @@ lower_precision(const struct gl_shader_compiler_options *options,
    find_lowerable_rvalues(options, instructions, v.lowerable_rvalues);
    visit_list_elements(&v, instructions);
 
-   if (options->LowerPrecisionTemporaries) {
-      lower_variables_visitor vars(options);
-      visit_list_elements(&vars, instructions);
-   }
+   lower_variables_visitor vars(options);
+   visit_list_elements(&vars, instructions);
 }

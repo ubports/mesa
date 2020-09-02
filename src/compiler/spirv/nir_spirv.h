@@ -64,6 +64,10 @@ struct spirv_to_nir_options {
     */
    bool frag_coord_is_sysval;
 
+   /* Whether to keep ViewIndex as an input instead of rewriting to a sysval.
+    */
+   bool view_index_is_input;
+
    struct spirv_supported_capabilities caps;
 
    /* Address format for various kinds of pointers. */
@@ -74,12 +78,7 @@ struct spirv_to_nir_options {
    nir_address_format shared_addr_format;
    nir_address_format global_addr_format;
    nir_address_format temp_addr_format;
-
-   /* Whether UniformConstant memory should be treated as normal global memory.
-    * This is usefull for CL 2.0 implementations with fine grain system SVM
-    * support.
-    */
-   bool constant_as_global;
+   nir_address_format constant_addr_format;
 
    struct {
       void (*func)(void *private_data,

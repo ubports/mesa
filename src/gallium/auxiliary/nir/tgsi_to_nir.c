@@ -243,13 +243,11 @@ ttn_emit_declaration(struct ttn_compile *c)
    if (file == TGSI_FILE_TEMPORARY) {
       if (decl->Declaration.Array) {
          /* for arrays, we create variables instead of registers: */
-         nir_variable *var = rzalloc(b->shader, nir_variable);
-
-         var->type = glsl_array_type(glsl_vec4_type(), array_size, 0);
-         var->data.mode = nir_var_shader_temp;
-         var->name = ralloc_asprintf(var, "arr_%d", decl->Array.ArrayID);
-
-         exec_list_push_tail(&b->shader->globals, &var->node);
+         nir_variable *var =
+            nir_variable_create(b->shader, nir_var_shader_temp,
+                                glsl_array_type(glsl_vec4_type(), array_size, 0),
+                                ralloc_asprintf(b->shader, "arr_%d",
+                                                decl->Array.ArrayID));
 
          for (i = 0; i < array_size; i++) {
             /* point all the matching slots to the same var,
@@ -380,7 +378,6 @@ ttn_emit_declaration(struct ttn_compile *c)
             var->data.interpolation =
                ttn_translate_interp_mode(decl->Interp.Interpolate);
 
-            exec_list_push_tail(&b->shader->inputs, &var->node);
             c->inputs[idx] = var;
 
             for (int i = 0; i < array_size; i++)
@@ -461,7 +458,6 @@ ttn_emit_declaration(struct ttn_compile *c)
                c->output_regs[idx].reg = reg;
             }
 
-            exec_list_push_tail(&b->shader->outputs, &var->node);
             c->outputs[idx] = var;
 
             for (int i = 0; i < array_size; i++)
@@ -472,13 +468,13 @@ ttn_emit_declaration(struct ttn_compile *c)
             var->data.mode = nir_var_uniform;
             var->name = ralloc_asprintf(var, "uniform_%d", idx);
             var->data.location = idx;
-
-            exec_list_push_tail(&b->shader->uniforms, &var->node);
             break;
          default:
             unreachable("bad declaration file");
             return;
          }
+
+         nir_shader_add_variable(b->shader, var);
 
          if (is_array)
             break;
@@ -648,7 +644,7 @@ ttn_src_for_file_and_index(struct ttn_compile *c, unsigned file, unsigned index,
          break;
       case TGSI_SEMANTIC_BLOCK_ID:
          op = nir_intrinsic_load_work_group_id;
-         load = nir_load_work_group_id(b);
+         load = nir_load_work_group_id(b, 32);
          break;
       case TGSI_SEMANTIC_BLOCK_SIZE:
          op = nir_intrinsic_load_local_group_size;
@@ -1159,7 +1155,7 @@ ttn_if(struct ttn_compile *c, nir_ssa_def *src, bool is_uint)
       if_stmt->condition = nir_src_for_ssa(nir_ine(b, src_x, nir_imm_int(b, 0)));
    } else {
       /* equivalent to TGSI IF, src is interpreted as float */
-      if_stmt->condition = nir_src_for_ssa(nir_fne(b, src_x, nir_imm_float(b, 0.0)));
+      if_stmt->condition = nir_src_for_ssa(nir_fneu(b, src_x, nir_imm_float(b, 0.0)));
    }
    nir_builder_cf_insert(b, &if_stmt->cf_node);
 
@@ -1970,7 +1966,7 @@ static const nir_op op_trans[TGSI_OPCODE_LAST] = {
    [TGSI_OPCODE_FSEQ] = nir_op_feq,
    [TGSI_OPCODE_FSGE] = nir_op_fge,
    [TGSI_OPCODE_FSLT] = nir_op_flt,
-   [TGSI_OPCODE_FSNE] = nir_op_fne,
+   [TGSI_OPCODE_FSNE] = nir_op_fneu,
 
    [TGSI_OPCODE_KILL_IF] = 0,
 
@@ -2563,6 +2559,7 @@ ttn_finalize_nir(struct ttn_compile *c, struct pipe_screen *screen)
    NIR_PASS_V(nir, nir_split_var_copies);
    NIR_PASS_V(nir, nir_lower_var_copies);
    NIR_PASS_V(nir, nir_lower_system_values);
+   NIR_PASS_V(nir, nir_lower_compute_system_values, NULL);
 
    if (c->cap_packed_uniforms)
       NIR_PASS_V(nir, nir_lower_uniforms_to_ubo, 16);

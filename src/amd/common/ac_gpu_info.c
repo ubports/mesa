@@ -93,6 +93,14 @@ static bool has_syncobj(int fd)
 	return value ? true : false;
 }
 
+static bool has_timeline_syncobj(int fd)
+{
+	uint64_t value;
+	if (drmGetCap(fd, DRM_CAP_SYNCOBJ_TIMELINE, &value))
+		return false;
+	return value ? true : false;
+}
+
 static uint64_t fix_vram_size(uint64_t size)
 {
 	/* The VRAM size is underreported, so we need to fix it, because
@@ -401,7 +409,8 @@ bool ac_query_gpu_info(int fd, void *dev_p,
 		identify_chip(NAVI10);
 		identify_chip(NAVI12);
 		identify_chip(NAVI14);
-		identify_chip(SIENNA);
+		identify_chip(SIENNA_CICHLID);
+		identify_chip(NAVY_FLOUNDER);
 		break;
 	}
 
@@ -411,7 +420,7 @@ bool ac_query_gpu_info(int fd, void *dev_p,
 		return false;
 	}
 
-	if (info->family >= CHIP_SIENNA)
+	if (info->family >= CHIP_SIENNA_CICHLID)
 		info->chip_class = GFX10_3;
 	else if (info->family >= CHIP_NAVI10)
 		info->chip_class = GFX10;
@@ -478,6 +487,7 @@ bool ac_query_gpu_info(int fd, void *dev_p,
 		uvd_enc.available_rings ? true : false;
 	info->has_userptr = true;
 	info->has_syncobj = has_syncobj(fd);
+	info->has_timeline_syncobj = has_timeline_syncobj(fd);
 	info->has_syncobj_wait_for_submit = info->has_syncobj && info->drm_minor >= 20;
 	info->has_fence_to_handle = info->has_syncobj && info->drm_minor >= 21;
 	info->has_ctx_priority = info->drm_minor >= 22;
@@ -530,7 +540,7 @@ bool ac_query_gpu_info(int fd, void *dev_p,
 		info->tcc_cache_line_size = 64;
 	}
 	info->gb_addr_config = amdinfo->gb_addr_cfg;
-	if (info->chip_class == GFX9) {
+	if (info->chip_class >= GFX9) {
 		info->num_tile_pipes = 1 << G_0098F8_NUM_PIPES(amdinfo->gb_addr_cfg);
 		info->pipe_interleave_bytes =
 			256 << G_0098F8_PIPE_INTERLEAVE_SIZE_GFX9(amdinfo->gb_addr_cfg);
@@ -708,7 +718,8 @@ bool ac_query_gpu_info(int fd, void *dev_p,
               info->family == CHIP_RENOIR)) ||
             (info->drm_minor >= 34 &&
              (info->family == CHIP_NAVI12 ||
-              info->family == CHIP_NAVI14))) {
+              info->family == CHIP_NAVI14)) ||
+            info->chip_class >= GFX10_3) {
 		if (info->num_render_backends == 1)
 			info->use_display_dcc_unaligned = true;
 		else
@@ -732,7 +743,8 @@ bool ac_query_gpu_info(int fd, void *dev_p,
 		case CHIP_RENOIR:
 		case CHIP_NAVI10:
 		case CHIP_NAVI12:
-		case CHIP_SIENNA:
+		case CHIP_SIENNA_CICHLID:
+		case CHIP_NAVY_FLOUNDER:
 			pc_lines = 1024;
 			break;
 		case CHIP_NAVI14:
@@ -923,6 +935,7 @@ void ac_print_gpu_info(struct radeon_info *info)
 	printf("    has_userptr = %i\n", info->has_userptr);
 	printf("    has_syncobj = %u\n", info->has_syncobj);
 	printf("    has_syncobj_wait_for_submit = %u\n", info->has_syncobj_wait_for_submit);
+	printf("    has_timeline_syncobj = %u\n", info->has_timeline_syncobj);
 	printf("    has_fence_to_handle = %u\n", info->has_fence_to_handle);
 	printf("    has_ctx_priority = %u\n", info->has_ctx_priority);
 	printf("    has_local_buffers = %u\n", info->has_local_buffers);
@@ -1292,7 +1305,7 @@ unsigned ac_get_compute_resource_limits(struct radeon_info *info,
 		/* GFX6 */
 		if (max_waves_per_sh) {
 			unsigned limit_div16 = DIV_ROUND_UP(max_waves_per_sh, 16);
-			compute_resource_limits |= S_00B854_WAVES_PER_SH_SI(limit_div16);
+			compute_resource_limits |= S_00B854_WAVES_PER_SH_GFX6(limit_div16);
 		}
 	}
 	return compute_resource_limits;

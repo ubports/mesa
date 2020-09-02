@@ -300,6 +300,10 @@ namespace {
          compat::add_link_bitcode_file(c.getCodeGenOpts(),
                                        LIBCLC_LIBEXECDIR + dev.ir_target() + ".bc");
 
+      // undefine __IMAGE_SUPPORT__ for device without image support
+      if (!dev.image_support())
+         c.getPreprocessorOpts().addMacroUndef("__IMAGE_SUPPORT__");
+
       // Compile the code
       clang::EmitLLVMOnlyAction act(&ctx);
       if (!c.ExecuteAction(act))
@@ -307,6 +311,25 @@ namespace {
 
       return act.takeModule();
    }
+
+#ifdef HAVE_CLOVER_SPIRV
+   SPIRV::TranslatorOpts
+   get_spirv_translator_options(const device &dev) {
+      const auto supported_versions = spirv::supported_versions();
+      const auto maximum_spirv_version =
+         std::min(static_cast<SPIRV::VersionNumber>(supported_versions.back()),
+                  SPIRV::VersionNumber::MaximumVersion);
+
+      SPIRV::TranslatorOpts::ExtensionsStatusMap spirv_extensions;
+      for (auto &ext : spirv::supported_extensions()) {
+         #define EXT(X) if (ext == #X) spirv_extensions.insert({ SPIRV::ExtensionID::X, true });
+         #include <LLVMSPIRVLib/LLVMSPIRVExtensions.inc>
+         #undef EXT
+      }
+
+      return SPIRV::TranslatorOpts(maximum_spirv_version, spirv_extensions);
+   }
+#endif
 }
 
 module
@@ -431,21 +454,18 @@ clover::llvm::compile_to_spirv(const std::string &source,
       "-spir-unknown-unknown" :
       "-spir64-unknown-unknown";
    auto c = create_compiler_instance(dev, target,
-                                     tokenize(opts + " input.cl"), r_log);
+                                     tokenize(opts + " -O0 input.cl"), r_log);
    auto mod = compile(*ctx, *c, "input.cl", source, headers, dev, opts, false,
                       r_log);
 
    if (has_flag(debug::llvm))
       debug::log(".ll", print_module_bitcode(*mod));
 
-   std::string error_msg;
-   if (!::llvm::regularizeLlvmForSpirv(mod.get(), error_msg)) {
-      r_log += "Failed to regularize LLVM IR for SPIR-V: " + error_msg + ".\n";
-      throw error(CL_INVALID_VALUE);
-   }
+   const auto spirv_options = get_spirv_translator_options(dev);
 
+   std::string error_msg;
    std::ostringstream os;
-   if (!::llvm::writeSpirv(mod.get(), os, error_msg)) {
+   if (!::llvm::writeSpirv(mod.get(), spirv_options, os, error_msg)) {
       r_log += "Translation from LLVM IR to SPIR-V failed: " + error_msg + ".\n";
       throw error(CL_INVALID_VALUE);
    }

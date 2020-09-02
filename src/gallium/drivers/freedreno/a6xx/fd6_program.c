@@ -434,8 +434,8 @@ setup_stateobj(struct fd_ringbuffer *ring, struct fd_screen *screen,
 	OUT_PKT4(ring, REG_A6XX_SP_UNKNOWN_A9A8, 1);
 	OUT_RING(ring, 0);
 
-	OUT_PKT4(ring, REG_A6XX_SP_UNKNOWN_AB00, 1);
-	OUT_RING(ring, 0x5);
+	OUT_PKT4(ring, REG_A6XX_SP_MODE_CONTROL, 1);
+	OUT_RING(ring, A6XX_SP_MODE_CONTROL_CONSTANT_DEMOTION_ENABLE | 4);
 
 	OUT_PKT4(ring, REG_A6XX_SP_FS_OUTPUT_CNTL0, 1);
 	OUT_RING(ring, A6XX_SP_FS_OUTPUT_CNTL0_DEPTH_REGID(posz_regid) |
@@ -462,7 +462,17 @@ setup_stateobj(struct fd_ringbuffer *ring, struct fd_screen *screen,
 
 	struct ir3_shader_linkage l = {0};
 	const struct ir3_shader_variant *last_shader = fd6_last_shader(state);
-	ir3_link_shaders(&l, last_shader, fs, true);
+
+	bool do_streamout = (last_shader->shader->stream_output.num_outputs > 0);
+
+	/* If we have streamout, link against the real FS, rather than the
+	 * dummy FS used for binning pass state, to ensure the OUTLOC's
+	 * match.  Depending on whether we end up doing sysmem or gmem,
+	 * the actual streamout could happen with either the binning pass
+	 * or draw pass program, but the same streamout stateobj is used
+	 * in either case:
+	 */
+	ir3_link_shaders(&l, last_shader, do_streamout ? state->fs : fs, true);
 
 	bool primid_passthru = l.primid_loc != 0xff;
 
@@ -473,8 +483,7 @@ setup_stateobj(struct fd_ringbuffer *ring, struct fd_screen *screen,
 	OUT_RING(ring, ~l.varmask[3]);  /* VPC_VAR[3].DISABLE */
 
 	/* Add stream out outputs after computing the VPC_VAR_DISABLE bitmask. */
-	if (last_shader->shader->stream_output.num_outputs > 0)
-		link_stream_out(&l, last_shader);
+	link_stream_out(&l, last_shader);
 
 	if (VALIDREG(layer_regid)) {
 		layer_loc = l.max_loc;
@@ -491,7 +500,13 @@ setup_stateobj(struct fd_ringbuffer *ring, struct fd_screen *screen,
 		ir3_link_add(&l, psize_regid, 0x1, l.max_loc);
 	}
 
-	if (last_shader->shader->stream_output.num_outputs > 0) {
+	/* If we have stream-out, we use the full shader for binning
+	 * pass, rather than the optimized binning pass one, so that we
+	 * have all the varying outputs available for xfb.  So streamout
+	 * state should always be derived from the non-binning pass
+	 * program:
+	 */
+	if (do_streamout && !binning_pass) {
 		setup_stream_out(state, last_shader, &l);
 	}
 
@@ -565,7 +580,7 @@ setup_stateobj(struct fd_ringbuffer *ring, struct fd_screen *screen,
 		OUT_RING(ring, hs_info->tess.tcs_vertices_out);
 
 		/* Total attribute slots in HS incoming patch. */
-		OUT_PKT4(ring, REG_A6XX_PC_UNKNOWN_9801, 1);
+		OUT_PKT4(ring, REG_A6XX_PC_HS_INPUT_SIZE, 1);
 		OUT_RING(ring, hs_info->tess.tcs_vertices_out * vs->output_size / 4);
 
 		OUT_PKT4(ring, REG_A6XX_SP_HS_UNKNOWN_A831, 1);
@@ -629,7 +644,7 @@ setup_stateobj(struct fd_ringbuffer *ring, struct fd_screen *screen,
 	OUT_RING(ring, A6XX_VPC_CNTL_0_NUMNONPOSVAR(fs->total_in) |
 			 COND(enable_varyings, A6XX_VPC_CNTL_0_VARYING) |
 			 A6XX_VPC_CNTL_0_PRIMIDLOC(l.primid_loc) |
-			 A6XX_VPC_CNTL_0_UNKLOC(0xff));
+			 A6XX_VPC_CNTL_0_VIEWIDLOC(0xff));
 
 	OUT_PKT4(ring, REG_A6XX_PC_VS_OUT_CNTL, 1);
 	OUT_RING(ring, A6XX_PC_VS_OUT_CNTL_STRIDE_IN_VPC(l.max_loc) |
@@ -810,7 +825,7 @@ setup_stateobj(struct fd_ringbuffer *ring, struct fd_screen *screen,
 		OUT_PKT4(ring, REG_A6XX_PC_PRIMITIVE_CNTL_6, 1);
 		OUT_RING(ring, A6XX_PC_PRIMITIVE_CNTL_6_STRIDE_IN_VPC(vec4_size));
 
-		OUT_PKT4(ring, REG_A6XX_PC_UNKNOWN_9B07, 1);
+		OUT_PKT4(ring, REG_A6XX_PC_MULTIVIEW_CNTL, 1);
 		OUT_RING(ring, 0);
 
 		OUT_PKT4(ring, REG_A6XX_SP_GS_PRIM_SIZE, 1);
@@ -925,7 +940,7 @@ emit_interp_state(struct fd_ringbuffer *ring, struct ir3_shader_variant *fs,
 
 		uint32_t inloc = fs->inputs[j].inloc;
 
-		if ((fs->inputs[j].interpolate == INTERP_MODE_FLAT) ||
+		if (fs->inputs[j].flat ||
 				(fs->inputs[j].rasterflat && rasterflat)) {
 			uint32_t loc = inloc;
 

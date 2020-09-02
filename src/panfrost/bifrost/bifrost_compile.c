@@ -90,7 +90,7 @@ bi_load(enum bi_class T, nir_intrinsic_instr *instr)
         if (info->has_dest)
                 load.dest = pan_dest_index(&instr->dest);
 
-        if (info->has_dest && info->index_map[NIR_INTRINSIC_TYPE] > 0)
+        if (info->has_dest && nir_intrinsic_has_type(instr))
                 load.dest_type = nir_intrinsic_type(instr);
 
         nir_src *offset = nir_get_io_offset_src(instr);
@@ -169,7 +169,7 @@ bi_emit_frag_out(bi_context *ctx, nir_intrinsic_instr *instr)
                 .vector_channels = 4
         };
 
-        assert(blend.blend_location < BIFROST_MAX_RENDER_TARGET_COUNT);
+        assert(blend.blend_location < 8);
         assert(ctx->blend_types);
         assert(blend.src_types[0]);
         ctx->blend_types[blend.blend_location] = blend.src_types[0];
@@ -512,19 +512,25 @@ bi_class_for_nir_alu(nir_op op)
         case nir_op_isub:
                 return BI_IMATH;
 
+        case nir_op_imul:
+                return BI_IMUL;
+
         case nir_op_iand:
         case nir_op_ior:
         case nir_op_ixor:
+        case nir_op_inot:
+        case nir_op_ishl:
                 return BI_BITWISE;
 
         BI_CASE_CMP(nir_op_flt)
         BI_CASE_CMP(nir_op_fge)
         BI_CASE_CMP(nir_op_feq)
-        BI_CASE_CMP(nir_op_fne)
+        BI_CASE_CMP(nir_op_fneu)
         BI_CASE_CMP(nir_op_ilt)
         BI_CASE_CMP(nir_op_ige)
         BI_CASE_CMP(nir_op_ieq)
         BI_CASE_CMP(nir_op_ine)
+        BI_CASE_CMP(nir_op_uge)
                 return BI_CMP;
 
         case nir_op_b8csel:
@@ -594,6 +600,7 @@ bi_class_for_nir_alu(nir_op op)
 
         case nir_op_frcp:
         case nir_op_frsq:
+        case nir_op_iabs:
                 return BI_SPECIAL;
 
         default:
@@ -616,13 +623,14 @@ bi_cond_for_nir(nir_op op, bool soft)
 
         BI_CASE_CMP(nir_op_fge)
         BI_CASE_CMP(nir_op_ige)
+        BI_CASE_CMP(nir_op_uge)
                 return BI_COND_GE;
 
         BI_CASE_CMP(nir_op_feq)
         BI_CASE_CMP(nir_op_ieq)
                 return BI_COND_EQ;
 
-        BI_CASE_CMP(nir_op_fne)
+        BI_CASE_CMP(nir_op_fneu)
         BI_CASE_CMP(nir_op_ine)
                 return BI_COND_NE;
         default:
@@ -801,6 +809,28 @@ emit_alu(bi_context *ctx, nir_alu_instr *instr)
         case nir_op_isub:
                 alu.op.imath = BI_IMATH_SUB;
                 break;
+        case nir_op_iabs:
+                alu.op.special = BI_SPECIAL_IABS;
+                break;
+        case nir_op_inot:
+                /* no dedicated bitwise not, but we can invert sources. convert to ~a | 0 */
+                alu.op.bitwise = BI_BITWISE_OR;
+                alu.bitwise.src_invert[0] = true;
+                alu.src[1] = BIR_INDEX_ZERO;
+                /* zero shift */
+                alu.src[2] = BIR_INDEX_ZERO;
+                alu.src_types[2] = alu.src_types[1];
+                break;
+        case nir_op_ishl:
+                alu.op.bitwise = BI_BITWISE_OR;
+                /* move src1 to src2 and replace with zero. underlying op is (src0 << src2) | src1 */
+                alu.src[2] = alu.src[1];
+                alu.src_types[2] = alu.src_types[1];
+                alu.src[1] = BIR_INDEX_ZERO;
+                break;
+        case nir_op_imul:
+                alu.op.imul = BI_IMUL_IMUL;
+                break;
         case nir_op_fmax:
         case nir_op_imax:
         case nir_op_umax:
@@ -818,8 +848,9 @@ emit_alu(bi_context *ctx, nir_alu_instr *instr)
         BI_CASE_CMP(nir_op_ige)
         BI_CASE_CMP(nir_op_feq)
         BI_CASE_CMP(nir_op_ieq)
-        BI_CASE_CMP(nir_op_fne)
+        BI_CASE_CMP(nir_op_fneu)
         BI_CASE_CMP(nir_op_ine)
+        BI_CASE_CMP(nir_op_uge)
                 alu.cond = bi_cond_for_nir(instr->op, false);
                 break;
         case nir_op_fround_even:
@@ -836,12 +867,21 @@ emit_alu(bi_context *ctx, nir_alu_instr *instr)
                 break;
         case nir_op_iand:
                 alu.op.bitwise = BI_BITWISE_AND;
+                /* zero shift */
+                alu.src[2] = BIR_INDEX_ZERO;
+                alu.src_types[2] = alu.src_types[1];
                 break;
         case nir_op_ior:
                 alu.op.bitwise = BI_BITWISE_OR;
+                /* zero shift */
+                alu.src[2] = BIR_INDEX_ZERO;
+                alu.src_types[2] = alu.src_types[1];
                 break;
         case nir_op_ixor:
                 alu.op.bitwise = BI_BITWISE_XOR;
+                /* zero shift */
+                alu.src[2] = BIR_INDEX_ZERO;
+                alu.src_types[2] = alu.src_types[1];
                 break;
         case nir_op_f2i32:
                 alu.roundmode = BIFROST_RTZ;
@@ -882,10 +922,6 @@ emit_alu(bi_context *ctx, nir_alu_instr *instr)
                 bi_fuse_cond(&alu, instr->src[0],
                                 &constants_left, &constant_shift, comps, false);
 #endif
-        } else if (alu.type == BI_BITWISE) {
-                /* Implicit shift argument... at some point we should fold */
-                alu.src[2] = BIR_INDEX_ZERO;
-                alu.src_types[2] = alu.src_types[1];
         }
 
         bi_emit(ctx, alu);
@@ -1306,7 +1342,7 @@ bifrost_compile_shader_nir(nir_shader *nir, panfrost_program *program, unsigned 
                 nir_print_shader(nir, stdout);
         }
 
-        panfrost_nir_assign_sysvals(&ctx->sysvals, nir);
+        panfrost_nir_assign_sysvals(&ctx->sysvals, ctx, nir);
         program->sysval_count = ctx->sysvals.sysval_count;
         memcpy(program->sysvals, ctx->sysvals.sysvals, sizeof(ctx->sysvals.sysvals[0]) * ctx->sysvals.sysval_count);
         ctx->blend_types = program->blend_types;

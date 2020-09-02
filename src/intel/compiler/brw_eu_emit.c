@@ -237,7 +237,7 @@ brw_set_src0(struct brw_codegen *p, brw_inst *inst, struct brw_reg reg)
       assert(reg.file != BRW_IMMEDIATE_VALUE);
       assert(reg.address_mode == BRW_ADDRESS_DIRECT);
       assert(reg.subnr == 0);
-      assert(brw_inst_exec_size(devinfo, inst) == BRW_EXECUTE_1 ||
+      assert(has_scalar_region(reg) ||
              (reg.hstride == BRW_HORIZONTAL_STRIDE_1 &&
               reg.vstride == reg.width + 1));
       assert(!reg.negate && !reg.abs);
@@ -249,8 +249,9 @@ brw_set_src0(struct brw_codegen *p, brw_inst *inst, struct brw_reg reg)
       assert(reg.file == BRW_GENERAL_REGISTER_FILE);
       assert(reg.address_mode == BRW_ADDRESS_DIRECT);
       assert(reg.subnr % 16 == 0);
-      assert(reg.hstride == BRW_HORIZONTAL_STRIDE_1 &&
-             reg.vstride == reg.width + 1);
+      assert(has_scalar_region(reg) ||
+             (reg.hstride == BRW_HORIZONTAL_STRIDE_1 &&
+              reg.vstride == reg.width + 1));
       assert(!reg.negate && !reg.abs);
       brw_inst_set_src0_da_reg_nr(devinfo, inst, reg.nr);
       brw_inst_set_src0_da16_subreg_nr(devinfo, inst, reg.subnr / 16);
@@ -357,7 +358,7 @@ brw_set_src1(struct brw_codegen *p, brw_inst *inst, struct brw_reg reg)
              reg.file == BRW_ARCHITECTURE_REGISTER_FILE);
       assert(reg.address_mode == BRW_ADDRESS_DIRECT);
       assert(reg.subnr == 0);
-      assert(brw_inst_exec_size(devinfo, inst) == BRW_EXECUTE_1 ||
+      assert(has_scalar_region(reg) ||
              (reg.hstride == BRW_HORIZONTAL_STRIDE_1 &&
               reg.vstride == reg.width + 1));
       assert(!reg.negate && !reg.abs);
@@ -3360,9 +3361,18 @@ brw_broadcast(struct brw_codegen *p,
        * asserting would be mean.
        */
       const unsigned i = idx.file == BRW_IMMEDIATE_VALUE ? idx.ud : 0;
-      brw_MOV(p, dst,
-              (align1 ? stride(suboffset(src, i), 0, 1, 0) :
-               stride(suboffset(src, 4 * i), 0, 4, 1)));
+      src = align1 ? stride(suboffset(src, i), 0, 1, 0) :
+                     stride(suboffset(src, 4 * i), 0, 4, 1);
+
+      if (type_sz(src.type) > 4 && !devinfo->has_64bit_float) {
+         brw_MOV(p, subscript(dst, BRW_REGISTER_TYPE_D, 0),
+                    subscript(src, BRW_REGISTER_TYPE_D, 0));
+         brw_set_default_swsb(p, tgl_swsb_null());
+         brw_MOV(p, subscript(dst, BRW_REGISTER_TYPE_D, 1),
+                    subscript(src, BRW_REGISTER_TYPE_D, 1));
+      } else {
+         brw_MOV(p, dst, src);
+      }
    } else {
       /* From the Haswell PRM section "Register Region Restrictions":
        *
@@ -3411,7 +3421,8 @@ brw_broadcast(struct brw_codegen *p,
 
          /* Use indirect addressing to fetch the specified component. */
          if (type_sz(src.type) > 4 &&
-             (devinfo->is_cherryview || gen_device_info_is_9lp(devinfo))) {
+             (devinfo->is_cherryview || gen_device_info_is_9lp(devinfo) ||
+              !devinfo->has_64bit_float)) {
             /* From the Cherryview PRM Vol 7. "Register Region Restrictions":
              *
              *    "When source or destination datatype is 64b or operation is
