@@ -78,7 +78,7 @@ si_write_harvested_raster_configs(struct radv_physical_device *physical_device,
 }
 
 void
-si_emit_compute(struct radv_physical_device *physical_device,
+si_emit_compute(struct radv_device *device,
                 struct radeon_cmdbuf *cs)
 {
 	radeon_set_sh_reg_seq(cs, R_00B810_COMPUTE_START_X, 3);
@@ -92,7 +92,7 @@ si_emit_compute(struct radv_physical_device *physical_device,
 	radeon_emit(cs, S_00B858_SH0_CU_EN(0xffff) | S_00B858_SH1_CU_EN(0xffff));
 	radeon_emit(cs, S_00B858_SH0_CU_EN(0xffff) | S_00B858_SH1_CU_EN(0xffff));
 
-	if (physical_device->rad_info.chip_class >= GFX7) {
+	if (device->physical_device->rad_info.chip_class >= GFX7) {
 		/* Also set R_00B858_COMPUTE_STATIC_THREAD_MGMT_SE2 / SE3 */
 		radeon_set_sh_reg_seq(cs,
 				      R_00B864_COMPUTE_STATIC_THREAD_MGMT_SE2, 2);
@@ -100,22 +100,46 @@ si_emit_compute(struct radv_physical_device *physical_device,
 			    S_00B858_SH1_CU_EN(0xffff));
 		radeon_emit(cs, S_00B858_SH0_CU_EN(0xffff) |
 			    S_00B858_SH1_CU_EN(0xffff));
+
+		if (device->border_color_data.bo) {
+			uint64_t bc_va = radv_buffer_get_va(device->border_color_data.bo);
+
+			radeon_set_uconfig_reg_seq(cs, R_030E00_TA_CS_BC_BASE_ADDR, 2);
+			radeon_emit(cs, bc_va >> 8);
+			radeon_emit(cs, S_030E04_ADDRESS(bc_va >> 40));
+		}
 	}
 
-	if (physical_device->rad_info.chip_class >= GFX10)
+	if (device->physical_device->rad_info.chip_class >= GFX9) {
+		radeon_set_uconfig_reg(cs, R_0301EC_CP_COHER_START_DELAY,
+				       device->physical_device->rad_info.chip_class >= GFX10 ? 0x20 : 0);
+	}
+
+	if (device->physical_device->rad_info.chip_class >= GFX10) {
+		radeon_set_sh_reg(cs, R_00B890_COMPUTE_USER_ACCUM_0, 0);
+		radeon_set_sh_reg(cs, R_00B894_COMPUTE_USER_ACCUM_1, 0);
+		radeon_set_sh_reg(cs, R_00B898_COMPUTE_USER_ACCUM_2, 0);
+		radeon_set_sh_reg(cs, R_00B89C_COMPUTE_USER_ACCUM_3, 0);
 		radeon_set_sh_reg(cs, R_00B8A0_COMPUTE_PGM_RSRC3, 0);
+		radeon_set_sh_reg(cs, R_00B9F4_COMPUTE_DISPATCH_TUNNEL, 0);
+	}
 
 	/* This register has been moved to R_00CD20_COMPUTE_MAX_WAVE_ID
 	 * and is now per pipe, so it should be handled in the
 	 * kernel if we want to use something other than the default value,
 	 * which is now 0x22f.
 	 */
-	if (physical_device->rad_info.chip_class <= GFX6) {
+	if (device->physical_device->rad_info.chip_class <= GFX6) {
 		/* XXX: This should be:
 		 * (number of compute units) * 4 * (waves per simd) - 1 */
 
 		radeon_set_sh_reg(cs, R_00B82C_COMPUTE_MAX_WAVE_ID,
 		                  0x190 /* Default value */);
+
+		if (device->border_color_data.bo) {
+			uint64_t bc_va = radv_buffer_get_va(device->border_color_data.bo);
+			radeon_set_config_reg(cs, R_00950C_TA_CS_BC_BASE_ADDR, bc_va >> 8);
+		}
 	}
 }
 
@@ -325,6 +349,10 @@ si_emit_graphics(struct radv_device *device,
 				late_alloc_wave64_gs = 0;
 				cu_mask_gs = 0xffff;
 			}
+
+			/* Limit LATE_ALLOC_GS for prevent a hang (hw bug). */
+			if (physical_device->rad_info.chip_class == GFX10)
+				late_alloc_wave64_gs = MIN2(late_alloc_wave64_gs, 64);
 		} else {
 			if (!physical_device->rad_info.use_late_alloc) {
 				late_alloc_wave64 = 0;
@@ -413,6 +441,23 @@ si_emit_graphics(struct radv_device *device,
 				       S_028410_COLOR_RD_POLICY(V_028410_CACHE_NOA_RD));
 		radeon_set_context_reg(cs, R_028428_CB_COVERAGE_OUT_CONTROL, 0);
 
+		radeon_set_sh_reg(cs, R_00B0C8_SPI_SHADER_USER_ACCUM_PS_0, 0);
+		radeon_set_sh_reg(cs, R_00B0CC_SPI_SHADER_USER_ACCUM_PS_1, 0);
+		radeon_set_sh_reg(cs, R_00B0D0_SPI_SHADER_USER_ACCUM_PS_2, 0);
+		radeon_set_sh_reg(cs, R_00B0D4_SPI_SHADER_USER_ACCUM_PS_3, 0);
+		radeon_set_sh_reg(cs, R_00B1C8_SPI_SHADER_USER_ACCUM_VS_0, 0);
+		radeon_set_sh_reg(cs, R_00B1CC_SPI_SHADER_USER_ACCUM_VS_1, 0);
+		radeon_set_sh_reg(cs, R_00B1D0_SPI_SHADER_USER_ACCUM_VS_2, 0);
+		radeon_set_sh_reg(cs, R_00B1D4_SPI_SHADER_USER_ACCUM_VS_3, 0);
+		radeon_set_sh_reg(cs, R_00B2C8_SPI_SHADER_USER_ACCUM_ESGS_0, 0);
+		radeon_set_sh_reg(cs, R_00B2CC_SPI_SHADER_USER_ACCUM_ESGS_1, 0);
+		radeon_set_sh_reg(cs, R_00B2D0_SPI_SHADER_USER_ACCUM_ESGS_2, 0);
+		radeon_set_sh_reg(cs, R_00B2D4_SPI_SHADER_USER_ACCUM_ESGS_3, 0);
+		radeon_set_sh_reg(cs, R_00B4C8_SPI_SHADER_USER_ACCUM_LSHS_0, 0);
+		radeon_set_sh_reg(cs, R_00B4CC_SPI_SHADER_USER_ACCUM_LSHS_1, 0);
+		radeon_set_sh_reg(cs, R_00B4D0_SPI_SHADER_USER_ACCUM_LSHS_2, 0);
+		radeon_set_sh_reg(cs, R_00B4D4_SPI_SHADER_USER_ACCUM_LSHS_3, 0);
+
 		radeon_set_sh_reg(cs, R_00B0C0_SPI_SHADER_REQ_CTRL_PS,
 				  S_00B0C0_SOFT_GROUPING_EN(1) |
 				  S_00B0C0_NUMBER_OF_REQUESTS_PER_CU(4 - 1));
@@ -420,6 +465,7 @@ si_emit_graphics(struct radv_device *device,
 
 		if (physical_device->rad_info.chip_class >= GFX10_3) {
 			radeon_set_context_reg(cs, R_028750_SX_PS_DOWNCONVERT_CONTROL_GFX103, 0xff);
+			radeon_set_context_reg(cs, 0x28848, 1 << 9); /* This fixes sample shading. */
 		}
 
 		if (physical_device->rad_info.chip_class == GFX10) {
@@ -506,7 +552,27 @@ si_emit_graphics(struct radv_device *device,
 				       small_prim_filter_cntl);
 	}
 
-	si_emit_compute(physical_device, cs);
+	radeon_set_context_reg(cs, R_0286D4_SPI_INTERP_CONTROL_0,
+	                       S_0286D4_FLAT_SHADE_ENA(1) |
+	                       S_0286D4_PNT_SPRITE_ENA(1) |
+	                       S_0286D4_PNT_SPRITE_OVRD_X(V_0286D4_SPI_PNT_SPRITE_SEL_S) |
+	                       S_0286D4_PNT_SPRITE_OVRD_Y(V_0286D4_SPI_PNT_SPRITE_SEL_T) |
+	                       S_0286D4_PNT_SPRITE_OVRD_Z(V_0286D4_SPI_PNT_SPRITE_SEL_0) |
+	                       S_0286D4_PNT_SPRITE_OVRD_W(V_0286D4_SPI_PNT_SPRITE_SEL_1) |
+	                       S_0286D4_PNT_SPRITE_TOP_1(0)); /* vulkan is top to bottom - 1.0 at bottom */
+
+	radeon_set_context_reg(cs, R_028BE4_PA_SU_VTX_CNTL,
+	                       S_028BE4_PIX_CENTER(1) |
+	                       S_028BE4_ROUND_MODE(V_028BE4_X_ROUND_TO_EVEN) |
+	                       S_028BE4_QUANT_MODE(V_028BE4_X_16_8_FIXED_POINT_1_256TH));
+
+	radeon_set_context_reg(cs, R_028818_PA_CL_VTE_CNTL,
+			       S_028818_VTX_W0_FMT(1) |
+			       S_028818_VPORT_X_SCALE_ENA(1) | S_028818_VPORT_X_OFFSET_ENA(1) |
+			       S_028818_VPORT_Y_SCALE_ENA(1) | S_028818_VPORT_Y_OFFSET_ENA(1) |
+			       S_028818_VPORT_Z_SCALE_ENA(1) | S_028818_VPORT_Z_OFFSET_ENA(1));
+
+	si_emit_compute(device, cs);
 }
 
 void

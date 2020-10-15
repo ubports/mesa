@@ -738,6 +738,19 @@ emit_fragment_input(struct v3d_compile *c, int attr, nir_variable *var,
 }
 
 static void
+emit_compact_fragment_input(struct v3d_compile *c, int attr, nir_variable *var,
+                            int array_index)
+{
+        /* Compact variables are scalar arrays where each set of 4 elements
+         * consumes a single location.
+         */
+        int loc_offset = array_index / 4;
+        int chan = var->data.location_frac + array_index % 4;
+        c->inputs[(attr + loc_offset) * 4  + chan] =
+              emit_fragment_varying(c, var, chan, loc_offset);
+}
+
+static void
 add_output(struct v3d_compile *c,
            uint32_t decl_offset,
            uint8_t slot,
@@ -1504,7 +1517,7 @@ ntq_setup_vs_inputs(struct v3d_compile *c)
          * from the start of the attribute to the number of components we
          * declare we need in c->vattr_sizes[].
          */
-        nir_foreach_variable(var, &c->s->inputs) {
+        nir_foreach_shader_in_variable(var, c->s) {
                 /* No VS attribute array support. */
                 assert(MAX2(glsl_get_length(var->type), 1) == 1);
 
@@ -1569,7 +1582,7 @@ ntq_setup_vs_inputs(struct v3d_compile *c)
 static bool
 program_reads_point_coord(struct v3d_compile *c)
 {
-        nir_foreach_variable(var, &c->s->inputs) {
+        nir_foreach_shader_in_variable(var, c->s) {
                 if (util_varying_is_point_coord(var->data.location,
                                                 c->fs_key->point_sprite_mask)) {
                         return true;
@@ -1585,13 +1598,13 @@ get_sorted_input_variables(struct v3d_compile *c,
                            nir_variable ***vars)
 {
         *num_entries = 0;
-        nir_foreach_variable(var, &c->s->inputs)
+        nir_foreach_shader_in_variable(var, c->s)
                 (*num_entries)++;
 
         *vars = ralloc_array(c, nir_variable *, *num_entries);
 
         unsigned i = 0;
-        nir_foreach_variable(var, &c->s->inputs)
+        nir_foreach_shader_in_variable(var, c->s)
                 (*vars)[i++] = var;
 
         /* Sort the variables so that we emit the input setup in
@@ -1658,6 +1671,9 @@ ntq_setup_fs_inputs(struct v3d_compile *c)
                                                        c->fs_key->point_sprite_mask)) {
                         c->inputs[loc * 4 + 0] = c->point_x;
                         c->inputs[loc * 4 + 1] = c->point_y;
+                } else if (var->data.compact) {
+                        for (int j = 0; j < array_len; j++)
+                                emit_compact_fragment_input(c, loc, var, j);
                 } else {
                         for (int j = 0; j < array_len; j++)
                                 emit_fragment_input(c, loc + j, var, j);
@@ -1671,7 +1687,7 @@ ntq_setup_outputs(struct v3d_compile *c)
         if (c->s->info.stage != MESA_SHADER_FRAGMENT)
                 return;
 
-        nir_foreach_variable(var, &c->s->outputs) {
+        nir_foreach_shader_out_variable(var, c->s) {
                 unsigned array_len = MAX2(glsl_get_length(var->type), 1);
                 unsigned loc = var->data.driver_location * 4;
 
@@ -3015,10 +3031,15 @@ v3d_nir_to_vir(struct v3d_compile *c)
                         break;
 
                 if (c->threads == min_threads) {
-                        fprintf(stderr, "Failed to register allocate at %d threads:\n",
-                                c->threads);
-                        vir_dump(c);
-                        c->failed = true;
+                        if (c->fallback_scheduler) {
+                                fprintf(stderr,
+                                        "Failed to register allocate at %d "
+                                        "threads:\n",
+                                        c->threads);
+                                vir_dump(c);
+                        }
+                        c->compilation_result =
+                                V3D_COMPILATION_FAILED_REGISTER_ALLOCATION;
                         return;
                 }
 

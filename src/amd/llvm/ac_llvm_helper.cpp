@@ -25,12 +25,6 @@
 
 #include <cstring>
 
-#include "ac_binary.h"
-#include "ac_llvm_util.h"
-#include "ac_llvm_build.h"
-
-#include "util/macros.h"
-
 #include <llvm-c/Core.h>
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/IR/IRBuilder.h>
@@ -38,6 +32,18 @@
 #include <llvm/Transforms/IPO.h>
 
 #include <llvm/IR/LegacyPassManager.h>
+
+/* DO NOT REORDER THE HEADERS
+ * The LLVM headers need to all be included before any Mesa header,
+ * as they use the `restrict` keyword in ways that are incompatible
+ * with our #define in include/c99_compat.h
+ */
+
+#include "ac_binary.h"
+#include "ac_llvm_util.h"
+#include "ac_llvm_build.h"
+
+#include "util/macros.h"
 
 void ac_add_attr_dereferenceable(LLVMValueRef val, uint64_t bytes)
 {
@@ -108,42 +114,11 @@ LLVMBuilderRef ac_create_builder(LLVMContextRef ctx,
 		 */
 		flags.setAllowReciprocal(); /* arcp */
 
-		/* Allow floating-point contraction (e.g. fusing a multiply
-		 * followed by an addition into a fused multiply-and-add).
-		 */
-		flags.setAllowContract(); /* contract */
-
 		llvm::unwrap(builder)->setFastMathFlags(flags);
 		break;
 	}
 
 	return builder;
-}
-
-/* Return the original state of inexact math. */
-bool ac_disable_inexact_math(LLVMBuilderRef builder)
-{
-	auto *b = llvm::unwrap(builder);
-	llvm::FastMathFlags flags = b->getFastMathFlags();
-
-	if (!flags.allowContract())
-		return false;
-
-	flags.setAllowContract(false);
-	b->setFastMathFlags(flags);
-	return true;
-}
-
-void ac_restore_inexact_math(LLVMBuilderRef builder, bool value)
-{
-	auto *b = llvm::unwrap(builder);
-	llvm::FastMathFlags flags = b->getFastMathFlags();
-
-	if (flags.allowContract() == value)
-		return;
-
-	flags.setAllowContract(value);
-	b->setFastMathFlags(flags);
 }
 
 LLVMTargetLibraryInfoRef

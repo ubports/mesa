@@ -76,6 +76,7 @@ static const struct nir_shader_compiler_options nir_options_llvm = {
 	.lower_fpow = true,
 	.lower_mul_2x32_64 = true,
 	.lower_rotate = true,
+	.use_scoped_barrier = true,
 	.max_unroll_iterations = 32,
 	.use_interpolated_input_intrinsics = true,
 	/* nir_lower_int64() isn't actually called for the LLVM backend, but
@@ -118,6 +119,7 @@ static const struct nir_shader_compiler_options nir_options_aco = {
 	.lower_fpow = true,
 	.lower_mul_2x32_64 = true,
 	.lower_rotate = true,
+	.use_scoped_barrier = true,
 	.max_unroll_iterations = 32,
 	.use_interpolated_input_intrinsics = true,
 	.lower_int64_options = nir_lower_imul64 |
@@ -282,7 +284,7 @@ radv_optimize_nir(struct nir_shader *shader, bool optimize_conservatively,
         } while (progress && !optimize_conservatively);
 
 	NIR_PASS(progress, shader, nir_opt_conditional_discard);
-        NIR_PASS(progress, shader, nir_opt_shrink_load);
+        NIR_PASS(progress, shader, nir_opt_shrink_vectors);
         NIR_PASS(progress, shader, nir_opt_move, nir_move_load_ubo);
 }
 
@@ -407,6 +409,8 @@ radv_shader_compile_to_nir(struct radv_device *device,
 				.tessellation = true,
 				.transform_feedback = true,
 				.variable_pointers = true,
+				.vk_memory_model = true,
+				.vk_memory_model_device_scope = true,
 			},
 			.ubo_addr_format = nir_address_format_32bit_index_offset,
 			.ssbo_addr_format = nir_address_format_32bit_index_offset,
@@ -431,6 +435,7 @@ radv_shader_compile_to_nir(struct radv_device *device,
 		NIR_PASS_V(nir, nir_lower_variable_initializers, nir_var_function_temp);
 		NIR_PASS_V(nir, nir_lower_returns);
 		NIR_PASS_V(nir, nir_inline_functions);
+		NIR_PASS_V(nir, nir_copy_prop);
 		NIR_PASS_V(nir, nir_opt_deref);
 
 		/* Pick off the single entrypoint that we want */
@@ -472,7 +477,7 @@ radv_shader_compile_to_nir(struct radv_device *device,
 
 		NIR_PASS_V(nir, nir_lower_system_values);
 		NIR_PASS_V(nir, nir_lower_clip_cull_distance_arrays);
-		NIR_PASS_V(nir, radv_nir_lower_ycbcr_textures, layout);
+
 		if (device->instance->debug_flags & RADV_DEBUG_DISCARD_TO_DEMOTE)
 			NIR_PASS_V(nir, nir_lower_discard_to_demote);
 
@@ -540,6 +545,10 @@ radv_shader_compile_to_nir(struct radv_device *device,
 	if (!(flags & VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT))
 		radv_optimize_nir(nir, false, true);
 
+	/* call radv_nir_lower_ycbcr_textures() late as there might still be
+	 * tex with undef texture/sampler before first optimization */
+	NIR_PASS_V(nir, radv_nir_lower_ycbcr_textures, layout);
+
 	/* We call nir_lower_var_copies() after the first radv_optimize_nir()
 	 * to remove any copies introduced by nir_opt_find_array_copies().
 	 */
@@ -580,14 +589,12 @@ type_size_vec4(const struct glsl_type *type, bool bindless)
 static nir_variable *
 find_layer_in_var(nir_shader *nir)
 {
-	nir_foreach_variable(var, &nir->inputs) {
-		if (var->data.location == VARYING_SLOT_LAYER) {
-			return var;
-		}
-	}
-
 	nir_variable *var =
-		nir_variable_create(nir, nir_var_shader_in, glsl_int_type(), "layer id");
+		nir_find_variable_with_location(nir, nir_var_shader_in, VARYING_SLOT_LAYER);
+	if (var != NULL)
+		return var;
+
+	var = nir_variable_create(nir, nir_var_shader_in, glsl_int_type(), "layer id");
 	var->data.location = VARYING_SLOT_LAYER;
 	var->data.interpolation = INTERP_MODE_FLAT;
 	return var;
@@ -642,7 +649,7 @@ void
 radv_lower_fs_io(nir_shader *nir)
 {
 	NIR_PASS_V(nir, lower_view_index);
-	nir_assign_io_var_locations(&nir->inputs, &nir->num_inputs,
+	nir_assign_io_var_locations(nir, nir_var_shader_in, &nir->num_inputs,
 				    MESA_SHADER_FRAGMENT);
 
 	NIR_PASS_V(nir, nir_lower_io, nir_var_shader_in, type_size_vec4, 0);
@@ -812,8 +819,10 @@ static void radv_postprocess_config(const struct radv_physical_device *pdevice,
 			 */
 			if (pdevice->rad_info.chip_class >= GFX10) {
 				vgpr_comp_cnt = info->vs.needs_instance_id ? 3 : 1;
+				config_out->rsrc2 |= S_00B42C_LDS_SIZE_GFX10(info->tcs.num_lds_blocks);
 			} else {
 				vgpr_comp_cnt = info->vs.needs_instance_id ? 2 : 1;
+				config_out->rsrc2 |= S_00B42C_LDS_SIZE_GFX9(info->tcs.num_lds_blocks);
 			}
 		} else {
 			config_out->rsrc2 |= S_00B12C_OC_LDS_EN(1);

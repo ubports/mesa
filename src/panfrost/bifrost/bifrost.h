@@ -117,6 +117,7 @@ struct bifrost_fma_inst {
 
 #define BIFROST_FMA_IADD_32 (0x4ff98 >> 3)
 #define BIFROST_FMA_ISUB_32 (0x4ffd8 >> 3)
+#define BIFROST_FMA_IMUL_32 ((BIFROST_FMA_EXT | 0x7818) >> 3)
 
 struct bifrost_fma_2src {
         unsigned src0 : 3;
@@ -162,7 +163,7 @@ struct bifrost_fma_mscale {
 #define BIFROST_ADD_OP_FRSQ_FAST_F16_X (0x0ce50)
 #define BIFROST_ADD_OP_FRSQ_FAST_F16_Y (0x0ce70)
 #define BIFROST_ADD_OP_LOG2_HELP  (0x0cc68)
-#define BIFROST_ADD_OP_FEXP2_FAST (0x0cd58)
+#define BIFROST_ADD_OP_IABS_32 (0x07bd4)
 
 struct bifrost_add_inst {
         unsigned src0 : 3;
@@ -201,6 +202,7 @@ struct bifrost_add_discard {
 #define BIFROST_ADD_ISUB_8  (0x17a80 >> 3)
 #define BIFROST_ADD_ISUB_16 (0x17b00 >> 3)
 #define BIFROST_ADD_ISUB_32 (0x17ac0 >> 3)
+#define BIFROST_ADD_OP_FEXP2_FAST (0x0cd58 >> 3)
 
 struct bifrost_add_2src {
         unsigned src0 : 3;
@@ -447,6 +449,7 @@ enum bifrost_fcmp_cond {
         BIFROST_OLE = 5,
 };
 
+/* "gl" version produces 0/1. "d3d" version produces 0/~0 */
 #define BIFROST_FMA_OP_FCMP_GL (0x48000 >> 13)
 #define BIFROST_FMA_OP_FCMP_D3D (0x4c000 >> 13)
 
@@ -473,6 +476,7 @@ struct bifrost_add_fcmp {
         unsigned op   : 6;
 } __attribute__((packed));
 
+/* "gl" version produces 0/1. "d3d" version produces 0/~0 */
 #define BIFROST_FMA_OP_FCMP_GL_16 (0xc8000 >> 13)
 #define BIFROST_FMA_OP_FCMP_D3D_16 (0xcc000 >> 13)
 
@@ -521,7 +525,7 @@ struct bifrost_fma_icmp32 {
         unsigned src1 : 3;
         enum bifrost_icmp_cond cond : 3;
         unsigned unk1 : 1; /* set */
-        unsigned d3d : 1;
+        unsigned d3d : 1;  /* if set, true is ~0. otherwise, true is 1 */
         unsigned op : 12;
 } __attribute__((packed));
 
@@ -541,7 +545,7 @@ struct bifrost_add_icmp {
         unsigned src1 : 3;
         enum bifrost_icmp_cond cond : 3;
         unsigned sz : 1; /* 1 for 32, 0 for 8 */
-        unsigned d3d : 1;
+        unsigned d3d : 1; /* if set, true is ~0. otherwise, true is 1 */
         unsigned op : 9;
 } __attribute__((packed));
 
@@ -550,7 +554,7 @@ struct bifrost_add_icmp16 {
         unsigned src1 : 3;
         unsigned src0_swizzle : 2;
         unsigned src1_swizzle : 2;
-        unsigned d3d : 1;
+        unsigned d3d : 1; /* if set, true is ~0. otherwise, true is 1 */
         enum bifrost_icmp_cond cond : 3;
         unsigned op : 6;
 } __attribute__((packed));

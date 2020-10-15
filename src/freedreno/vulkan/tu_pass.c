@@ -29,12 +29,65 @@
 #include "vk_util.h"
 #include "vk_format.h"
 
+/* Return true if we have to fallback to sysmem rendering because the
+ * dependency can't be satisfied with tiled rendering.
+ */
+
+static bool
+dep_invalid_for_gmem(const VkSubpassDependency2 *dep)
+{
+   /* External dependencies don't matter here. */
+   if (dep->srcSubpass == VK_SUBPASS_EXTERNAL ||
+       dep->dstSubpass == VK_SUBPASS_EXTERNAL)
+      return false;
+
+   /* We can conceptually break down the process of rewriting a sysmem
+    * renderpass into a gmem one into two parts:
+    *
+    * 1. Split each draw and multisample resolve into N copies, one for each
+    * bin. (If hardware binning, add one more copy where the FS is disabled
+    * for the binning pass). This is always allowed because the vertex stage
+    * is allowed to run an arbitrary number of times and there are no extra
+    * ordering constraints within a draw.
+    * 2. Take the last copy of the second-to-last draw and slide it down to
+    * before the last copy of the last draw. Repeat for each earlier draw
+    * until the draw pass for the last bin is complete, then repeat for each
+    * earlier bin until we finish with the first bin.
+    *
+    * During this rearranging process, we can't slide draws past each other in
+    * a way that breaks the subpass dependencies. For each draw, we must slide
+    * it past (copies of) the rest of the draws in the renderpass. We can
+    * slide a draw past another if there isn't a dependency between them, or
+    * if the dependenc(ies) are dependencies between framebuffer-space stages
+    * only with the BY_REGION bit set. Note that this includes
+    * self-dependencies, since these may result in pipeline barriers that also
+    * break the rearranging process.
+    */
+
+   /* This is straight from the Vulkan 1.2 spec, section 6.1.4 "Framebuffer
+    * Region Dependencies":
+    */
+   const VkPipelineStageFlags framebuffer_space_stages =
+      VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+      VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+      VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
+      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+
+   return
+      (dep->srcStageMask & ~framebuffer_space_stages) ||
+      (dep->dstStageMask & ~framebuffer_space_stages) ||
+      !(dep->dependencyFlags & VK_DEPENDENCY_BY_REGION_BIT);
+}
+
 static void
 tu_render_pass_add_subpass_dep(struct tu_render_pass *pass,
                                const VkSubpassDependency2 *dep)
 {
    uint32_t src = dep->srcSubpass;
    uint32_t dst = dep->dstSubpass;
+
+   if (dep_invalid_for_gmem(dep))
+      pass->gmem_pixels = 0;
 
    /* Ignore subpass self-dependencies as they allow the app to call
     * vkCmdPipelineBarrier() inside the render pass and the driver should only
@@ -289,7 +342,7 @@ static void
 tu_render_pass_gmem_config(struct tu_render_pass *pass,
                            const struct tu_physical_device *phys_dev)
 {
-   uint32_t block_align_shift = 4; /* log2(gmem_align/(tile_align_w*tile_align_h)) */
+   uint32_t block_align_shift = 3; /* log2(gmem_align/(tile_align_w*tile_align_h)) */
    uint32_t tile_align_w = phys_dev->tile_align_w;
    uint32_t gmem_align = (1 << block_align_shift) * tile_align_w * TILE_ALIGN_H;
 
@@ -297,12 +350,20 @@ tu_render_pass_gmem_config(struct tu_render_pass *pass,
    uint32_t cpp_total = 0;
    for (uint32_t i = 0; i < pass->attachment_count; i++) {
       struct tu_render_pass_attachment *att = &pass->attachments[i];
+      bool cpp1 = (att->cpp == 1);
       if (att->gmem_offset >= 0) {
          cpp_total += att->cpp;
+
+         /* take into account the separate stencil: */
+         if (att->format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+            cpp1 = (att->samples == 1);
+            cpp_total += att->samples;
+         }
+
          /* texture pitch must be aligned to 64, use a tile_align_w that is
           * a multiple of 64 for cpp==1 attachment to work as input attachment
           */
-         if (att->cpp == 1 && tile_align_w % 64 != 0) {
+         if (cpp1 && tile_align_w % 64 != 0) {
             tile_align_w *= 2;
             block_align_shift -= 1;
          }
@@ -326,8 +387,8 @@ tu_render_pass_gmem_config(struct tu_render_pass *pass,
     * optimal: nblocks = {13, 51}, pixels = 208896
     */
    uint32_t gmem_blocks = phys_dev->ccu_offset_gmem / gmem_align;
-   uint32_t offset = 0, pixels = ~0u;
-   for (uint32_t i = 0; i < pass->attachment_count; i++) {
+   uint32_t offset = 0, pixels = ~0u, i;
+   for (i = 0; i < pass->attachment_count; i++) {
       struct tu_render_pass_attachment *att = &pass->attachments[i];
       if (att->gmem_offset < 0)
          continue;
@@ -337,18 +398,33 @@ tu_render_pass_gmem_config(struct tu_render_pass *pass,
       uint32_t align = MAX2(1, att->cpp >> block_align_shift);
       uint32_t nblocks = MAX2((gmem_blocks * att->cpp / cpp_total) & ~(align - 1), align);
 
-      if (nblocks > gmem_blocks) {
-         pixels = 0;
+      if (nblocks > gmem_blocks)
          break;
-      }
 
       gmem_blocks -= nblocks;
       cpp_total -= att->cpp;
       offset += nblocks * gmem_align;
       pixels = MIN2(pixels, nblocks * gmem_align / att->cpp);
+
+      /* repeat the same for separate stencil */
+      if (att->format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+         att->gmem_offset_stencil = offset;
+
+         /* note: for s8_uint, block align is always 1 */
+         uint32_t nblocks = gmem_blocks * att->samples / cpp_total;
+         if (nblocks > gmem_blocks)
+            break;
+
+         gmem_blocks -= nblocks;
+         cpp_total -= att->samples;
+         offset += nblocks * gmem_align;
+         pixels = MIN2(pixels, nblocks * gmem_align / att->samples);
+      }
    }
 
-   pass->gmem_pixels = pixels;
+   /* if the loop didn't complete then the gmem config is impossible */
+   if (i == pass->attachment_count)
+      pass->gmem_pixels = pixels;
 }
 
 static void
@@ -383,6 +459,16 @@ attachment_set_ops(struct tu_render_pass_attachment *att,
       att->clear_mask = stencil_clear ? VK_IMAGE_ASPECT_COLOR_BIT : 0;
       att->load = stencil_load;
       att->store = stencil_store;
+      break;
+   case VK_FORMAT_D32_SFLOAT_S8_UINT: /* separate stencil */
+      if (att->clear_mask)
+         att->clear_mask = VK_IMAGE_ASPECT_DEPTH_BIT;
+      if (stencil_clear)
+         att->clear_mask |= VK_IMAGE_ASPECT_STENCIL_BIT;
+      if (stencil_load)
+         att->load_stencil = true;
+      if (stencil_store)
+         att->store_stencil = true;
       break;
    default:
       break;
@@ -547,7 +633,13 @@ tu_CreateRenderPass2(VkDevice _device,
 
       att->format = pCreateInfo->pAttachments[i].format;
       att->samples = pCreateInfo->pAttachments[i].samples;
-      att->cpp = vk_format_get_blocksize(att->format) * att->samples;
+      /* for d32s8, cpp is for the depth image, and
+       * att->samples will be used as the cpp for the stencil image
+       */
+      if (att->format == VK_FORMAT_D32_SFLOAT_S8_UINT)
+         att->cpp = 4 * att->samples;
+      else
+         att->cpp = vk_format_get_blocksize(att->format) * att->samples;
       att->gmem_offset = -1;
 
       attachment_set_ops(att,

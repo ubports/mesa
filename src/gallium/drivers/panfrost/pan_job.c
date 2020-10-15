@@ -177,6 +177,8 @@ panfrost_free_batch(struct panfrost_batch *batch)
                 panfrost_batch_fence_unreference(*dep);
         }
 
+        util_dynarray_fini(&batch->dependencies);
+
         /* The out_sync fence lifetime is different from the the batch one
          * since other batches might want to wait on a fence of already
          * submitted/signaled batch. All we need to do here is make sure the
@@ -839,11 +841,6 @@ panfrost_load_surface(struct panfrost_batch *batch, struct pipe_surface *surf, u
         enum mali_texture_type type =
                 panfrost_translate_texture_type(rsrc->base.target);
 
-        unsigned nr_samples = surf->nr_samples;
-
-        if (!nr_samples)
-                nr_samples = surf->texture->nr_samples;
-
         struct pan_image img = {
                 .width0 = rsrc->base.width0,
                 .height0 = rsrc->base.height0,
@@ -856,7 +853,7 @@ panfrost_load_surface(struct panfrost_batch *batch, struct pipe_surface *surf, u
                 .last_level = level,
                 .first_layer = surf->u.tex.first_layer,
                 .last_layer = surf->u.tex.last_layer,
-                .nr_samples = nr_samples,
+                .nr_samples = rsrc->base.nr_samples,
                 .cubemap_stride = rsrc->cubemap_stride,
                 .bo = rsrc->bo,
                 .slices = rsrc->slices
@@ -984,7 +981,7 @@ panfrost_batch_submit_ioctl(struct panfrost_batch *batch,
 
         if (!out_sync && dev->debug & (PAN_DBG_TRACE | PAN_DBG_SYNC)) {
                 drmSyncobjCreate(dev->fd, 0, &out_sync);
-                our_sync = false;
+                our_sync = true;
         }
 
         submit.out_sync = out_sync;
@@ -1007,6 +1004,9 @@ panfrost_batch_submit_ioctl(struct panfrost_batch *batch,
         if (ret) {
                 if (dev->debug & PAN_DBG_MSGS)
                         fprintf(stderr, "Error submitting: %m\n");
+
+                if (our_sync)
+                        drmSyncobjDestroy(dev->fd, out_sync);
 
                 return errno;
         }
@@ -1081,8 +1081,11 @@ panfrost_batch_submit(struct panfrost_batch *batch, uint32_t out_sync)
         int ret;
 
         /* Nothing to do! */
-        if (!batch->scoreboard.first_job && !batch->clear)
+        if (!batch->scoreboard.first_job && !batch->clear) {
+                if (out_sync)
+                        drmSyncobjSignal(dev->fd, &out_sync, 1);
                 goto out;
+	}
 
         panfrost_batch_draw_wallpaper(batch);
 

@@ -972,7 +972,7 @@ bool Converter::assignSlots() {
    if (prog->getType() == Program::TYPE_COMPUTE)
       return true;
 
-   nir_foreach_variable(var, &nir->inputs) {
+   nir_foreach_shader_in_variable(var, nir) {
       const glsl_type *type = var->type;
       int slot = var->data.location;
       uint16_t slots = calcSlots(type, prog->getType(), nir->info, true, var);
@@ -1028,7 +1028,7 @@ bool Converter::assignSlots() {
       info->numInputs = std::max<uint8_t>(info->numInputs, vary);
    }
 
-   nir_foreach_variable(var, &nir->outputs) {
+   nir_foreach_shader_out_variable(var, nir) {
       const glsl_type *type = var->type;
       int slot = var->data.location;
       uint16_t slots = calcSlots(type, prog->getType(), nir->info, false, var);
@@ -2090,6 +2090,8 @@ Converter::visit(nir_intrinsic_instr *insn)
       Symbol *sym = mkSymbol(FILE_MEMORY_GLOBAL, 0, dType, offset);
       Instruction *atom =
          mkOp2(OP_ATOM, dType, newDefs[0], sym, getSrc(&insn->src[1], 0));
+      if (op == nir_intrinsic_global_atomic_comp_swap)
+         atom->setSrc(2, getSrc(&insn->src[2], 0));
       atom->setIndirect(0, 0, address);
       atom->subOp = getSubOp(op);
 

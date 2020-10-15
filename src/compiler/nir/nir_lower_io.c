@@ -121,19 +121,13 @@ shared_atomic_for_deref(nir_intrinsic_op deref_op)
 }
 
 void
-nir_assign_var_locations(struct exec_list *var_list, unsigned *size,
+nir_assign_var_locations(nir_shader *shader, nir_variable_mode mode,
+                         unsigned *size,
                          int (*type_size)(const struct glsl_type *, bool))
 {
    unsigned location = 0;
 
-   nir_foreach_variable(var, var_list) {
-      /*
-       * UBOs have their own address spaces, so don't count them towards the
-       * number of global uniforms
-       */
-      if (var->data.mode == nir_var_mem_ubo || var->data.mode == nir_var_mem_ssbo)
-         continue;
-
+   nir_foreach_variable_with_modes(var, shader, mode) {
       var->data.driver_location = location;
       bool bindless_type_size = var->data.mode == nir_var_shader_in ||
                                 var->data.mode == nir_var_shader_out ||
@@ -588,6 +582,37 @@ nir_lower_io_block(nir_block *block,
                                 mode == nir_var_shader_out ||
                                 var->data.bindless;
 
+     if (nir_deref_instr_is_known_out_of_bounds(deref)) {
+        /* Section 5.11 (Out-of-Bounds Accesses) of the GLSL 4.60 spec says:
+         *
+         *    In the subsections described above for array, vector, matrix and
+         *    structure accesses, any out-of-bounds access produced undefined
+         *    behavior....
+         *    Out-of-bounds reads return undefined values, which
+         *    include values from other variables of the active program or zero.
+         *    Out-of-bounds writes may be discarded or overwrite
+         *    other variables of the active program.
+         *
+         * GL_KHR_robustness and GL_ARB_robustness encourage us to return zero
+         * for reads.
+         *
+         * Otherwise get_io_offset would return out-of-bound offset which may
+         * result in out-of-bound loading/storing of inputs/outputs,
+         * that could cause issues in drivers down the line.
+         */
+         if (intrin->intrinsic != nir_intrinsic_store_deref) {
+            nir_ssa_def *zero =
+               nir_imm_zero(b, intrin->dest.ssa.num_components,
+                             intrin->dest.ssa.bit_size);
+            nir_ssa_def_rewrite_uses(&intrin->dest.ssa,
+                                  nir_src_for_ssa(zero));
+         }
+
+         nir_instr_remove(&intrin->instr);
+         progress = true;
+         continue;
+      }
+
       offset = get_io_offset(b, deref, per_vertex ? &vertex_index : NULL,
                              state->type_size, &component_offset,
                              bindless_type_size);
@@ -845,7 +870,7 @@ build_explicit_io_load(nir_builder *b, nir_intrinsic_instr *intrin,
       op = nir_intrinsic_load_global;
       break;
    case nir_var_shader_in:
-      assert(addr_format_is_global(addr_format));
+      assert(addr_format_is_offset(addr_format));
       op = nir_intrinsic_load_kernel_input;
       break;
    case nir_var_mem_shared:
@@ -1183,7 +1208,7 @@ nir_lower_explicit_io_instr(nir_builder *b,
    if (intrin->intrinsic == nir_intrinsic_load_deref) {
       nir_ssa_def *value;
       if (vec_stride > scalar_size) {
-         nir_ssa_def *comps[4] = { NULL, };
+         nir_ssa_def *comps[NIR_MAX_VEC_COMPONENTS] = { NULL, };
          for (unsigned i = 0; i < intrin->num_components; i++) {
             nir_ssa_def *comp_addr = build_addr_iadd_imm(b, addr, addr_format,
                                                          vec_stride * i);
@@ -1476,7 +1501,10 @@ lower_vars_to_explicit(nir_shader *shader,
    default:
       unreachable("Unsupported mode");
    }
-   nir_foreach_variable(var, vars) {
+   nir_foreach_variable_in_list(var, vars) {
+      if (var->data.mode != mode)
+         continue;
+
       unsigned size, align;
       const struct glsl_type *explicit_type =
          glsl_get_explicit_type_for_size_align(var->type, type_info, &size, &align);
@@ -1523,9 +1551,9 @@ nir_lower_vars_to_explicit_types(nir_shader *shader,
    bool progress = false;
 
    if (modes & nir_var_mem_shared)
-      progress |= lower_vars_to_explicit(shader, &shader->shared, nir_var_mem_shared, type_info);
+      progress |= lower_vars_to_explicit(shader, &shader->variables, nir_var_mem_shared, type_info);
    if (modes & nir_var_shader_temp)
-      progress |= lower_vars_to_explicit(shader, &shader->globals, nir_var_shader_temp, type_info);
+      progress |= lower_vars_to_explicit(shader, &shader->variables, nir_var_shader_temp, type_info);
 
    nir_foreach_function(function, shader) {
       if (function->impl) {

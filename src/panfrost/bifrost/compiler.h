@@ -70,13 +70,13 @@ enum bi_class {
         BI_MOV,
         BI_REDUCE_FMA,
         BI_SELECT,
-        BI_SHIFT,
         BI_STORE,
         BI_STORE_VAR,
         BI_SPECIAL, /* _FAST on supported GPUs */
         BI_TABLE,
         BI_TEX,
         BI_ROUND,
+        BI_IMUL,
         BI_NUM_CLASSES
 };
 
@@ -172,6 +172,10 @@ enum bi_imath_op {
         BI_IMATH_SUB,
 };
 
+enum bi_imul_op {
+        BI_IMUL_IMUL,
+};
+
 enum bi_table_op {
         /* fp32 log2() with low precision, suitable for GL or half_log2() in
          * CL. In the first argument, takes x. Letting u be such that x =
@@ -200,6 +204,7 @@ enum bi_special_op {
          * exp2() in GL. In the first argument, it takes f2i_rte(x * 2^24). In
          * the second, it takes x itself. */
         BI_SPECIAL_EXP2_LOW,
+        BI_SPECIAL_IABS,
 };
 
 enum bi_tex_op {
@@ -282,6 +287,7 @@ typedef struct {
                 enum bi_frexp_op frexp;
                 enum bi_tex_op texture;
                 enum bi_imath_op imath;
+                enum bi_imul_op imul;
 
                 /* For FMA/ADD, should we add a biased exponent? */
                 bool mscale;

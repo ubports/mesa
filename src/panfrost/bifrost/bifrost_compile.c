@@ -512,9 +512,14 @@ bi_class_for_nir_alu(nir_op op)
         case nir_op_isub:
                 return BI_IMATH;
 
+        case nir_op_imul:
+                return BI_IMUL;
+
         case nir_op_iand:
         case nir_op_ior:
         case nir_op_ixor:
+        case nir_op_inot:
+        case nir_op_ishl:
                 return BI_BITWISE;
 
         BI_CASE_CMP(nir_op_flt)
@@ -525,6 +530,7 @@ bi_class_for_nir_alu(nir_op op)
         BI_CASE_CMP(nir_op_ige)
         BI_CASE_CMP(nir_op_ieq)
         BI_CASE_CMP(nir_op_ine)
+        BI_CASE_CMP(nir_op_uge)
                 return BI_CMP;
 
         case nir_op_b8csel:
@@ -594,6 +600,7 @@ bi_class_for_nir_alu(nir_op op)
 
         case nir_op_frcp:
         case nir_op_frsq:
+        case nir_op_iabs:
                 return BI_SPECIAL;
 
         default:
@@ -616,6 +623,7 @@ bi_cond_for_nir(nir_op op, bool soft)
 
         BI_CASE_CMP(nir_op_fge)
         BI_CASE_CMP(nir_op_ige)
+        BI_CASE_CMP(nir_op_uge)
                 return BI_COND_GE;
 
         BI_CASE_CMP(nir_op_feq)
@@ -743,9 +751,8 @@ emit_alu(bi_context *ctx, nir_alu_instr *instr)
         assert((alu.type != BI_SPECIAL) || !(ctx->quirks & BIFROST_NO_FAST_OP));
 
         unsigned comps = nir_dest_num_components(instr->dest.dest);
-
-        if (alu.type != BI_COMBINE)
-                assert(comps <= MAX2(1, 32 / comps));
+        bool vector = comps > MAX2(1, 32 / nir_dest_bit_size(instr->dest.dest));
+        assert(!vector || alu.type == BI_COMBINE || alu.type == BI_MOV);
 
         if (!instr->dest.dest.is_ssa) {
                 for (unsigned i = 0; i < comps; ++i)
@@ -801,6 +808,28 @@ emit_alu(bi_context *ctx, nir_alu_instr *instr)
         case nir_op_isub:
                 alu.op.imath = BI_IMATH_SUB;
                 break;
+        case nir_op_iabs:
+                alu.op.special = BI_SPECIAL_IABS;
+                break;
+        case nir_op_inot:
+                /* no dedicated bitwise not, but we can invert sources. convert to ~a | 0 */
+                alu.op.bitwise = BI_BITWISE_OR;
+                alu.bitwise.src_invert[0] = true;
+                alu.src[1] = BIR_INDEX_ZERO;
+                /* zero shift */
+                alu.src[2] = BIR_INDEX_ZERO;
+                alu.src_types[2] = alu.src_types[1];
+                break;
+        case nir_op_ishl:
+                alu.op.bitwise = BI_BITWISE_OR;
+                /* move src1 to src2 and replace with zero. underlying op is (src0 << src2) | src1 */
+                alu.src[2] = alu.src[1];
+                alu.src_types[2] = alu.src_types[1];
+                alu.src[1] = BIR_INDEX_ZERO;
+                break;
+        case nir_op_imul:
+                alu.op.imul = BI_IMUL_IMUL;
+                break;
         case nir_op_fmax:
         case nir_op_imax:
         case nir_op_umax:
@@ -820,6 +849,7 @@ emit_alu(bi_context *ctx, nir_alu_instr *instr)
         BI_CASE_CMP(nir_op_ieq)
         BI_CASE_CMP(nir_op_fne)
         BI_CASE_CMP(nir_op_ine)
+        BI_CASE_CMP(nir_op_uge)
                 alu.cond = bi_cond_for_nir(instr->op, false);
                 break;
         case nir_op_fround_even:
@@ -836,12 +866,21 @@ emit_alu(bi_context *ctx, nir_alu_instr *instr)
                 break;
         case nir_op_iand:
                 alu.op.bitwise = BI_BITWISE_AND;
+                /* zero shift */
+                alu.src[2] = BIR_INDEX_ZERO;
+                alu.src_types[2] = alu.src_types[1];
                 break;
         case nir_op_ior:
                 alu.op.bitwise = BI_BITWISE_OR;
+                /* zero shift */
+                alu.src[2] = BIR_INDEX_ZERO;
+                alu.src_types[2] = alu.src_types[1];
                 break;
         case nir_op_ixor:
                 alu.op.bitwise = BI_BITWISE_XOR;
+                /* zero shift */
+                alu.src[2] = BIR_INDEX_ZERO;
+                alu.src_types[2] = alu.src_types[1];
                 break;
         case nir_op_f2i32:
                 alu.roundmode = BIFROST_RTZ;
@@ -870,6 +909,15 @@ emit_alu(bi_context *ctx, nir_alu_instr *instr)
                 break;
         }
 
+        if (alu.type == BI_MOV && vector) {
+                alu.type = BI_COMBINE;
+
+                for (unsigned i = 0; i < comps; ++i) {
+                        alu.src[i] = alu.src[0];
+                        alu.swizzle[i][0] = instr->src[0].swizzle[i];
+                }
+        }
+
         if (alu.type == BI_CSEL) {
                 /* Default to csel3 */
                 alu.cond = BI_COND_NE;
@@ -882,10 +930,6 @@ emit_alu(bi_context *ctx, nir_alu_instr *instr)
                 bi_fuse_cond(&alu, instr->src[0],
                                 &constants_left, &constant_shift, comps, false);
 #endif
-        } else if (alu.type == BI_BITWISE) {
-                /* Implicit shift argument... at some point we should fold */
-                alu.src[2] = BIR_INDEX_ZERO;
-                alu.src_types[2] = alu.src_types[1];
         }
 
         bi_emit(ctx, alu);
@@ -934,32 +978,24 @@ emit_tex_full(bi_context *ctx, nir_tex_instr *instr)
         unreachable("stub");
 }
 
-/* Normal textures ops are tex for frag shaders and txl for vertex shaders with
- * lod a constant 0. Anything else needs a full texture op. */
+/* Simple textures ops correspond to NIR tex or txl with LOD = 0. Anything else
+ * needs a complete texture op. */
 
 static bool
 bi_is_normal_tex(gl_shader_stage stage, nir_tex_instr *instr)
 {
-        if (stage == MESA_SHADER_FRAGMENT)
-                return instr->op == nir_texop_tex;
+        if (instr->op == nir_texop_tex)
+                return true;
 
         if (instr->op != nir_texop_txl)
                 return false;
 
-        for (unsigned i = 0; i < instr->num_srcs; ++i) {
-                if (instr->src[i].src_type != nir_tex_src_lod)
-                        continue;
+        int lod_idx = nir_tex_instr_src_index(instr, nir_tex_src_lod);
+        if (lod_idx < 0)
+                return true;
 
-                nir_src src = instr->src[i].src;
-
-                if (!nir_src_is_const(src))
-                        continue;
-
-                if (nir_src_as_uint(src) != 0)
-                        continue;
-        }
-
-        return true;
+        nir_src lod = instr->src[lod_idx].src;
+        return nir_src_is_const(lod) && nir_src_as_uint(lod) == 0;
 }
 
 static void
@@ -1306,7 +1342,7 @@ bifrost_compile_shader_nir(nir_shader *nir, panfrost_program *program, unsigned 
                 nir_print_shader(nir, stdout);
         }
 
-        panfrost_nir_assign_sysvals(&ctx->sysvals, nir);
+        panfrost_nir_assign_sysvals(&ctx->sysvals, ctx, nir);
         program->sysval_count = ctx->sysvals.sysval_count;
         memcpy(program->sysvals, ctx->sysvals.sysvals, sizeof(ctx->sysvals.sysvals[0]) * ctx->sysvals.sysval_count);
         ctx->blend_types = program->blend_types;

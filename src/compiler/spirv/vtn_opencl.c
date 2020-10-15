@@ -39,21 +39,18 @@ static void
 handle_instr(struct vtn_builder *b, enum OpenCLstd_Entrypoints opcode,
              const uint32_t *w, unsigned count, nir_handler handler)
 {
-   const struct glsl_type *dest_type =
-      vtn_value(b, w[1], vtn_value_type_type)->type->type;
+   const struct glsl_type *dest_type = vtn_get_type(b, w[1])->type;
 
    unsigned num_srcs = count - 5;
    nir_ssa_def *srcs[3] = { NULL };
    vtn_assert(num_srcs <= ARRAY_SIZE(srcs));
    for (unsigned i = 0; i < num_srcs; i++) {
-      srcs[i] = vtn_ssa_value(b, w[i + 5])->def;
+      srcs[i] = vtn_get_nir_ssa(b, w[i + 5]);
    }
 
    nir_ssa_def *result = handler(b, opcode, num_srcs, srcs, dest_type);
    if (result) {
-      struct vtn_value *val = vtn_push_value(b, w[2], vtn_value_type_ssa);
-      val->ssa = vtn_create_ssa_value(b, dest_type);
-      val->ssa->def = result;
+      vtn_push_nir_ssa(b, w[2], result);
    } else {
       vtn_assert(dest_type == glsl_void_type());
    }
@@ -225,15 +222,15 @@ _handle_v_load_store(struct vtn_builder *b, enum OpenCLstd_Entrypoints opcode,
 {
    struct vtn_type *type;
    if (load)
-      type = vtn_value(b, w[1], vtn_value_type_type)->type;
+      type = vtn_get_type(b, w[1]);
    else
-      type = vtn_untyped_value(b, w[5])->type;
+      type = vtn_get_value_type(b, w[5]);
    unsigned a = load ? 0 : 1;
 
    const struct glsl_type *dest_type = type->type;
    unsigned components = glsl_get_vector_elements(dest_type);
 
-   nir_ssa_def *offset = vtn_ssa_value(b, w[5 + a])->def;
+   nir_ssa_def *offset = vtn_get_nir_ssa(b, w[5 + a]);
    struct vtn_value *p = vtn_value(b, w[6 + a], vtn_value_type_pointer);
 
    struct vtn_ssa_value *comps[NIR_MAX_VEC_COMPONENTS];
@@ -257,9 +254,7 @@ _handle_v_load_store(struct vtn_builder *b, enum OpenCLstd_Entrypoints opcode,
       }
    }
    if (load) {
-      struct vtn_ssa_value *ssa = vtn_create_ssa_value(b, dest_type);
-      ssa->def = nir_vec(&b->nb, ncomps, components);
-      vtn_push_ssa(b, w[2], type, ssa);
+      vtn_push_nir_ssa(b, w[2], nir_vec(&b->nb, ncomps, components));
    }
 }
 

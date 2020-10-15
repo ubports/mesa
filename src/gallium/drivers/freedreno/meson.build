@@ -19,7 +19,6 @@
 # SOFTWARE.
 
 files_libfreedreno = files(
-  'disasm.h',
   'freedreno_batch.c',
   'freedreno_batch.h',
   'freedreno_batch_cache.c',
@@ -58,7 +57,6 @@ files_libfreedreno = files(
   'freedreno_texture.h',
   'freedreno_util.c',
   'freedreno_util.h',
-  'a2xx/disasm-a2xx.c',
   'a2xx/fd2_blend.c',
   'a2xx/fd2_blend.h',
   'a2xx/fd2_context.c',
@@ -85,7 +83,6 @@ files_libfreedreno = files(
   'a2xx/fd2_util.h',
   'a2xx/fd2_zsa.c',
   'a2xx/fd2_zsa.h',
-  'a2xx/instr-a2xx.h',
   'a2xx/ir2.c',
   'a2xx/ir2.h',
   'a2xx/ir2_assemble.c',
@@ -252,6 +249,7 @@ driver_freedreno = declare_dependency(
     libfreedrenowinsys,
     libfreedreno,
     libfreedreno_drm,
+    libfreedreno_ir2,
     libfreedreno_ir3,
     libfreedreno_layout,
     libfreedreno_perfcntrs
@@ -290,6 +288,7 @@ gmemtool = executable(
   link_with : [
     libfreedreno,
     libfreedreno_drm,
+    libfreedreno_ir2,
     libfreedreno_ir3,
     libfreedreno_layout,
     libgallium,

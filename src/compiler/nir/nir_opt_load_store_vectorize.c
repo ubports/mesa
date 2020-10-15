@@ -709,11 +709,11 @@ new_bitsize_acceptable(struct vectorize_ctx *ctx, unsigned new_bit_size,
          return false;
 
       unsigned write_mask = nir_intrinsic_write_mask(low->intrin);
-      if (!writemask_representable(write_mask, low_size, new_bit_size))
+      if (!writemask_representable(write_mask, get_bit_size(low), new_bit_size))
          return false;
 
       write_mask = nir_intrinsic_write_mask(high->intrin);
-      if (!writemask_representable(write_mask, high_size, new_bit_size))
+      if (!writemask_representable(write_mask, get_bit_size(high), new_bit_size))
          return false;
    }
 
@@ -1226,10 +1226,12 @@ handle_barrier(struct vectorize_ctx *ctx, bool *progress, nir_function_impl *imp
          modes = nir_var_mem_shared;
          break;
       case nir_intrinsic_scoped_barrier:
-	 if (nir_intrinsic_memory_scope(intrin) == NIR_SCOPE_NONE)
+         if (nir_intrinsic_memory_scope(intrin) == NIR_SCOPE_NONE)
             break;
 
-         modes = nir_intrinsic_memory_modes(intrin);
+         modes = nir_intrinsic_memory_modes(intrin) & (nir_var_mem_ssbo |
+                                                       nir_var_mem_shared |
+                                                       nir_var_mem_global);
          acquire = nir_intrinsic_memory_semantics(intrin) & NIR_MEMORY_ACQUIRE;
          release = nir_intrinsic_memory_semantics(intrin) & NIR_MEMORY_RELEASE;
          switch (nir_intrinsic_memory_scope(intrin)) {
@@ -1359,12 +1361,12 @@ nir_opt_load_store_vectorize(nir_shader *shader, nir_variable_mode modes,
    ctx->callback = callback;
    ctx->robust_modes = robust_modes;
 
-   nir_index_vars(shader, NULL, modes);
+   nir_shader_index_vars(shader, modes);
 
    nir_foreach_function(function, shader) {
       if (function->impl) {
          if (modes & nir_var_function_temp)
-            nir_index_vars(shader, function->impl, nir_var_function_temp);
+            nir_function_impl_index_vars(function->impl);
 
          nir_foreach_block(block, function->impl)
             progress |= process_block(function->impl, ctx, block);

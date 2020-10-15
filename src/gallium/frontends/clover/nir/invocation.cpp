@@ -101,7 +101,7 @@ module clover::nir::spirv_to_nir(const module &mod, const device &dev,
 
       // Calculate input offsets.
       unsigned offset = 0;
-      nir_foreach_variable_safe(var, &nir->inputs) {
+      nir_foreach_shader_in_variable_safe(var, nir) {
          offset = align(offset, glsl_get_cl_alignment(var->type));
          var->data.driver_location = offset;
          offset += glsl_get_cl_size(var->type);
@@ -112,6 +112,7 @@ module clover::nir::spirv_to_nir(const module &mod, const device &dev,
       NIR_PASS_V(nir, nir_lower_variable_initializers, nir_var_function_temp);
       NIR_PASS_V(nir, nir_lower_returns);
       NIR_PASS_V(nir, nir_inline_functions);
+      NIR_PASS_V(nir, nir_copy_prop);
       NIR_PASS_V(nir, nir_opt_deref);
 
       // Pick off the single entrypoint that we want.
@@ -133,8 +134,8 @@ module clover::nir::spirv_to_nir(const module &mod, const device &dev,
       NIR_PASS_V(nir, nir_lower_vars_to_ssa);
       NIR_PASS_V(nir, nir_opt_dce);
 
+      NIR_PASS_V(nir, nir_lower_explicit_io, nir_var_shader_in, nir_address_format_32bit_offset);
       nir_variable_mode modes = (nir_variable_mode)(
-         nir_var_shader_in |
          nir_var_mem_global |
          nir_var_mem_shared);
       nir_address_format format = nir->info.cs.ptr_size == 64 ?
@@ -143,8 +144,7 @@ module clover::nir::spirv_to_nir(const module &mod, const device &dev,
 
       NIR_PASS_V(nir, nir_lower_system_values);
       if (compiler_options->lower_int64_options)
-         NIR_PASS_V(nir, nir_lower_int64,
-                    compiler_options->lower_int64_options);
+         NIR_PASS_V(nir, nir_lower_int64);
 
       NIR_PASS_V(nir, nir_opt_dce);
 

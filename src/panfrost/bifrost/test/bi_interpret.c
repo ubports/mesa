@@ -434,18 +434,18 @@ bit_step(struct bit_state *s, bi_instruction *ins, bool FMA)
                 unsigned sz = nir_alu_type_get_type_size(T);
 
                 if (sz == 32 || sz == 64) {
-                        dest.u32 = bit_cmp(ins->cond, srcs[0], srcs[1], T, 0, 0, false);
+                        dest.u32 = bit_cmp(ins->cond, srcs[0], srcs[1], T, 0, 0, true);
                 } else if (sz == 16) {
                         for (unsigned c = 0; c < 2; ++c) {
                                 dest.u16[c] = bit_cmp(ins->cond, srcs[0], srcs[1],
                                                 T, ins->swizzle[0][c], ins->swizzle[1][c],
-                                                false);
+                                                true);
                         }
                 } else if (sz == 8) {
                         for (unsigned c = 0; c < 4; ++c) {
                                 dest.u8[c] = bit_cmp(ins->cond, srcs[0], srcs[1],
                                                 T, ins->swizzle[0][c], ins->swizzle[1][c],
-                                                false);
+                                                true);
                         }
                 } else {
                         unreachable("Invalid");
@@ -489,13 +489,7 @@ bit_step(struct bit_state *s, bi_instruction *ins, bool FMA)
                         dest.i32 = bit_as_int32(ins->src_types[0], srcs[0], comp, ins->roundmode);
                 else if (ins->dest_type == nir_type_float16) {
                         dest.u16[0] = bit_as_float16(ins->src_types[0], srcs[0], ins->swizzle[0][0]);
-
-                        if (ins->src_types[0] == nir_type_float32) {
-                                /* TODO: Second argument */
-                                dest.u16[1] = 0;
-                        } else {
-                                dest.u16[1] = bit_as_float16(ins->src_types[0], srcs[0], ins->swizzle[0][1]);
-                        }
+                        dest.u16[1] = bit_as_float16(ins->src_types[0], srcs[0], ins->swizzle[0][1]);
                 } else if (ins->dest_type == nir_type_uint16) {
                         dest.u16[0] = bit_as_uint16(ins->src_types[0], srcs[0], ins->swizzle[0][0], ins->roundmode);
                         dest.u16[1] = bit_as_uint16(ins->src_types[0], srcs[0], ins->swizzle[0][1], ins->roundmode);
@@ -642,9 +636,6 @@ bit_step(struct bit_state *s, bi_instruction *ins, bool FMA)
                 }
                 break;
         }
-
-        case BI_SHIFT:
-                unreachable("Unsupported op");
 
         case BI_ROUND: {
                 if (ins->roundmode == BIFROST_RTP) {

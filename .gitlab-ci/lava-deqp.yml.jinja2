@@ -1,5 +1,7 @@
 job_name: mesa-deqp-{{ deqp_version }}-{{ gpu_version }} {{ pipeline_info }}
 device_type: {{ device_type }}
+context:
+  extra_nfsroot_args: " init=/init rootwait"
 timeouts:
   job:
     minutes: 40
@@ -27,11 +29,13 @@ actions:
 {% if kernel_image_type %}
       {{ kernel_image_type }}
 {% endif %}
-    ramdisk:
-      url: {{ base_artifacts_url }}/lava-rootfs.cpio.gz
+    nfsrootfs:
+      url: {{ base_artifacts_url }}/lava-rootfs.tgz
       compression: gz
+{% if dtb %}
     dtb:
-      url: {{ base_artifacts_url }}/{{ device_type }}.dtb
+      url: {{ base_artifacts_url }}/{{ dtb }}.dtb
+{% endif %}
     os: oe
 - boot:
     timeout:
@@ -46,7 +50,7 @@ actions:
       download_command: wget -S --progress=dot:giga
       unpack_command: tar -C / -xzf
 {% else %}
-    commands: ramdisk
+    commands: nfs
 {% endif %}
     prompts:
       - 'lava-shell:'
@@ -71,7 +75,7 @@ actions:
           - mkdir -p /dev/pts
           - mount -t devpts devpts /dev/pts
           - echo "nameserver 8.8.8.8" > /etc/resolv.conf
-          - date "+%Y%m%d %H%M" -s "{{ date }}"
+          - for i in 1 2 3; do sntp -sS pool.ntp.org && break || sleep 2; done
 
 
 {% if env_vars %}

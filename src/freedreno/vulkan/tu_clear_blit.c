@@ -229,6 +229,17 @@ r2d_dst(struct tu_cs *cs, const struct tu_image_view *iview, uint32_t layer)
 }
 
 static void
+r2d_dst_stencil(struct tu_cs *cs, const struct tu_image_view *iview, uint32_t layer)
+{
+   assert(iview->image->samples == 1);
+
+   tu_cs_emit_pkt4(cs, REG_A6XX_RB_2D_DST_INFO, 4);
+   tu_cs_emit(cs, tu_image_view_stencil(iview, RB_2D_DST_INFO) & ~A6XX_RB_2D_DST_INFO_FLAGS);
+   tu_cs_emit_qw(cs, iview->stencil_base_addr + iview->stencil_layer_size * layer);
+   tu_cs_emit(cs, iview->stencil_PITCH);
+}
+
+static void
 r2d_dst_buffer(struct tu_cs *cs, VkFormat vk_format, uint64_t va, uint32_t pitch)
 {
    struct tu_native_format format = tu6_format_color(vk_format, TILE6_LINEAR);
@@ -250,11 +261,17 @@ r2d_setup_common(struct tu_cmd_buffer *cmd,
                  VkImageAspectFlags aspect_mask,
                  enum a6xx_rotation rotation,
                  bool clear,
+                 bool ubwc,
                  bool scissor)
 {
    enum a6xx_format format = tu6_base_format(vk_format);
    enum a6xx_2d_ifmt ifmt = format_to_ifmt(format);
    uint32_t unknown_8c01 = 0;
+
+   if ((vk_format == VK_FORMAT_D24_UNORM_S8_UINT ||
+        vk_format == VK_FORMAT_X8_D24_UNORM_PACK32) && ubwc) {
+      format = FMT6_Z24_UNORM_S8_UINT_AS_R8G8B8A8;
+   }
 
    /* note: the only format with partial clearing is D24S8 */
    if (vk_format == VK_FORMAT_D24_UNORM_S8_UINT) {
@@ -302,11 +319,19 @@ r2d_setup(struct tu_cmd_buffer *cmd,
           VkFormat vk_format,
           VkImageAspectFlags aspect_mask,
           enum a6xx_rotation rotation,
-          bool clear)
+          bool clear,
+          bool ubwc)
 {
    tu_emit_cache_flush_ccu(cmd, cs, TU_CMD_CCU_SYSMEM);
 
-   r2d_setup_common(cmd, cs, vk_format, aspect_mask, rotation, clear, false);
+   r2d_setup_common(cmd, cs, vk_format, aspect_mask, rotation, clear, ubwc, false);
+}
+
+static void
+r2d_teardown(struct tu_cmd_buffer *cmd,
+             struct tu_cs *cs)
+{
+   /* nothing to do here */
 }
 
 static void
@@ -451,7 +476,7 @@ r3d_common(struct tu_cmd_buffer *cmd, struct tu_cs *cs, bool blit, uint32_t num_
    tu_cs_emit_regs(cs, A6XX_PC_PRIMITIVE_CNTL_0());
    tu_cs_emit_regs(cs, A6XX_VFD_CONTROL_0());
 
-   tu6_emit_vpc(cs, &vs, NULL, NULL, NULL, &fs);
+   tu6_emit_vpc(cs, &vs, NULL, NULL, NULL, &fs, 0, false);
 
    /* REPL_MODE for varying with RECTLIST (2 vertices only) */
    tu_cs_emit_regs(cs, A6XX_VPC_VARYING_INTERP_MODE(0, 0));
@@ -675,6 +700,19 @@ r3d_dst(struct tu_cs *cs, const struct tu_image_view *iview, uint32_t layer)
 }
 
 static void
+r3d_dst_stencil(struct tu_cs *cs, const struct tu_image_view *iview, uint32_t layer)
+{
+   tu6_emit_msaa(cs, iview->image->samples); /* TODO: move to setup */
+
+   tu_cs_emit_pkt4(cs, REG_A6XX_RB_MRT_BUF_INFO(0), 6);
+   tu_cs_emit(cs, tu_image_view_stencil(iview, RB_MRT_BUF_INFO));
+   tu_cs_image_stencil_ref(cs, iview, layer);
+   tu_cs_emit(cs, 0);
+
+   tu_cs_emit_regs(cs, A6XX_RB_RENDER_CNTL());
+}
+
+static void
 r3d_dst_buffer(struct tu_cs *cs, VkFormat vk_format, uint64_t va, uint32_t pitch)
 {
    struct tu_native_format format = tu6_format_color(vk_format, TILE6_LINEAR);
@@ -715,8 +753,16 @@ r3d_setup(struct tu_cmd_buffer *cmd,
           VkFormat vk_format,
           VkImageAspectFlags aspect_mask,
           enum a6xx_rotation rotation,
-          bool clear)
+          bool clear,
+          bool ubwc)
 {
+   enum a6xx_format format = tu6_base_format(vk_format);
+
+   if ((vk_format == VK_FORMAT_D24_UNORM_S8_UINT ||
+        vk_format == VK_FORMAT_X8_D24_UNORM_PACK32) && ubwc) {
+      format = FMT6_Z24_UNORM_S8_UINT_AS_R8G8B8A8;
+   }
+
    if (!cmd->state.pass) {
       tu_emit_cache_flush_ccu(cmd, cs, TU_CMD_CCU_SYSMEM);
       tu6_emit_window_scissor(cs, 0, 0, 0x3fff, 0x3fff);
@@ -756,7 +802,7 @@ r3d_setup(struct tu_cmd_buffer *cmd,
    tu_cs_emit_regs(cs, A6XX_SP_FS_RENDER_COMPONENTS(.rt0 = 0xf));
 
    tu_cs_emit_regs(cs, A6XX_SP_FS_MRT_REG(0,
-                        .color_format = tu6_base_format(vk_format),
+                        .color_format = format,
                         .color_sint = vk_format_is_sint(vk_format),
                         .color_uint = vk_format_is_uint(vk_format)));
 
@@ -764,6 +810,11 @@ r3d_setup(struct tu_cmd_buffer *cmd,
       .component_enable = aspect_write_mask(vk_format, aspect_mask)));
    tu_cs_emit_regs(cs, A6XX_RB_SRGB_CNTL(vk_format_is_srgb(vk_format)));
    tu_cs_emit_regs(cs, A6XX_SP_SRGB_CNTL(vk_format_is_srgb(vk_format)));
+
+   if (cmd->state.predication_active) {
+      tu_cs_emit_pkt7(cs, CP_DRAW_PRED_ENABLE_LOCAL, 1);
+      tu_cs_emit(cs, 0);
+   }
 }
 
 static void
@@ -775,6 +826,15 @@ r3d_run(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
                   CP_DRAW_INDX_OFFSET_0_VIS_CULL(IGNORE_VISIBILITY));
    tu_cs_emit(cs, 1); /* instance count */
    tu_cs_emit(cs, 2); /* vertex count */
+}
+
+static void
+r3d_teardown(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
+{
+   if (cmd->state.predication_active) {
+      tu_cs_emit_pkt7(cs, CP_DRAW_PRED_ENABLE_LOCAL, 1);
+      tu_cs_emit(cs, 1);
+   }
 }
 
 /* blit ops - common interface for 2d/shader paths */
@@ -802,8 +862,11 @@ struct blit_ops {
                  VkFormat vk_format,
                  VkImageAspectFlags aspect_mask,
                  enum a6xx_rotation rotation,
-                 bool clear);
+                 bool clear,
+                 bool ubwc);
    void (*run)(struct tu_cmd_buffer *cmd, struct tu_cs *cs);
+   void (*teardown)(struct tu_cmd_buffer *cmd,
+                    struct tu_cs *cs);
 };
 
 static const struct blit_ops r2d_ops = {
@@ -815,6 +878,7 @@ static const struct blit_ops r2d_ops = {
    .dst_buffer = r2d_dst_buffer,
    .setup = r2d_setup,
    .run = r2d_run,
+   .teardown = r2d_teardown,
 };
 
 static const struct blit_ops r3d_ops = {
@@ -826,6 +890,7 @@ static const struct blit_ops r3d_ops = {
    .dst_buffer = r3d_dst_buffer,
    .setup = r3d_setup,
    .run = r3d_run,
+   .teardown = r3d_teardown,
 };
 
 /* passthrough set coords from 3D extents */
@@ -869,6 +934,11 @@ copy_format(VkFormat format, VkImageAspectFlags aspect_mask, bool copy_buffer)
       return format;
    case VK_FORMAT_E5B9G9R9_UFLOAT_PACK32:
       return VK_FORMAT_R32_UINT;
+   case VK_FORMAT_D32_SFLOAT_S8_UINT:
+      if (aspect_mask == VK_IMAGE_ASPECT_STENCIL_BIT)
+         return VK_FORMAT_S8_UINT;
+      assert(aspect_mask == VK_IMAGE_ASPECT_DEPTH_BIT);
+      return VK_FORMAT_D32_SFLOAT;
    }
 }
 
@@ -901,7 +971,7 @@ tu_image_view_copy_blit(struct tu_image_view *iview,
          .baseArrayLayer = subres->baseArrayLayer + layer,
          .layerCount = 1,
       },
-   });
+   }, false);
 }
 
 static void
@@ -985,7 +1055,7 @@ tu6_blit_image(struct tu_cmd_buffer *cmd,
     */
 
    ops->setup(cmd, cs, dst_image->vk_format, info->dstSubresource.aspectMask,
-              rotate[mirror_y][mirror_x], false);
+              rotate[mirror_y][mirror_x], false, dst_image->layout[0].ubwc);
 
    if (ops == &r3d_ops) {
       r3d_coords_raw(cs, (float[]) {
@@ -1016,6 +1086,8 @@ tu6_blit_image(struct tu_cmd_buffer *cmd,
       ops->src(cmd, cs, &src, i, filter);
       ops->run(cmd, cs);
    }
+
+   ops->teardown(cmd, cs);
 }
 
 void
@@ -1100,7 +1172,7 @@ tu_copy_buffer_to_image(struct tu_cmd_buffer *cmd,
 
    ops->setup(cmd, cs,
               copy_format(dst_image->vk_format, info->imageSubresource.aspectMask, false),
-              info->imageSubresource.aspectMask, ROTATE_0, false);
+              info->imageSubresource.aspectMask, ROTATE_0, false, dst_image->layout[0].ubwc);
 
    struct tu_image_view dst;
    tu_image_view_copy(&dst, dst_image, dst_image->vk_format, &info->imageSubresource, offset.z, false);
@@ -1125,6 +1197,8 @@ tu_copy_buffer_to_image(struct tu_cmd_buffer *cmd,
          ops->run(cmd, cs);
       }
    }
+
+   ops->teardown(cmd, cs);
 }
 
 void
@@ -1174,7 +1248,7 @@ tu_copy_image_to_buffer(struct tu_cmd_buffer *cmd,
    uint32_t pitch = dst_width * vk_format_get_blocksize(dst_format);
    uint32_t layer_size = pitch * dst_height;
 
-   ops->setup(cmd, cs, dst_format, VK_IMAGE_ASPECT_COLOR_BIT, ROTATE_0, false);
+   ops->setup(cmd, cs, dst_format, VK_IMAGE_ASPECT_COLOR_BIT, ROTATE_0, false, false);
 
    struct tu_image_view src;
    tu_image_view_copy(&src, src_image, src_image->vk_format, &info->imageSubresource, offset.z, stencil_read);
@@ -1198,6 +1272,8 @@ tu_copy_image_to_buffer(struct tu_cmd_buffer *cmd,
          ops->run(cmd, cs);
       }
    }
+
+   ops->teardown(cmd, cs);
 }
 
 void
@@ -1378,7 +1454,7 @@ tu_copy_image_to_image(struct tu_cmd_buffer *cmd,
       tu_image_view_copy(&staging, &staging_image, src_format,
                          &staging_subresource, 0, false);
 
-      ops->setup(cmd, cs, src_format, VK_IMAGE_ASPECT_COLOR_BIT, ROTATE_0, false);
+      ops->setup(cmd, cs, src_format, VK_IMAGE_ASPECT_COLOR_BIT, ROTATE_0, false, false);
       coords(ops, cs, &staging_offset, &src_offset, &extent);
 
       for (uint32_t i = 0; i < info->extent.depth; i++) {
@@ -1396,7 +1472,8 @@ tu_copy_image_to_image(struct tu_cmd_buffer *cmd,
       tu_image_view_copy(&staging, &staging_image, dst_format,
                          &staging_subresource, 0, false);
 
-      ops->setup(cmd, cs, dst_format, info->dstSubresource.aspectMask, ROTATE_0, false);
+      ops->setup(cmd, cs, dst_format, info->dstSubresource.aspectMask,
+                 ROTATE_0, false, dst_image->layout[0].ubwc);
       coords(ops, cs, &dst_offset, &staging_offset, &extent);
 
       for (uint32_t i = 0; i < info->extent.depth; i++) {
@@ -1408,7 +1485,8 @@ tu_copy_image_to_image(struct tu_cmd_buffer *cmd,
       tu_image_view_copy(&dst, dst_image, format, &info->dstSubresource, dst_offset.z, false);
       tu_image_view_copy(&src, src_image, format, &info->srcSubresource, src_offset.z, false);
 
-      ops->setup(cmd, cs, format, info->dstSubresource.aspectMask, ROTATE_0, false);
+      ops->setup(cmd, cs, format, info->dstSubresource.aspectMask,
+                 ROTATE_0, false, dst_image->layout[0].ubwc);
       coords(ops, cs, &dst_offset, &src_offset, &extent);
 
       for (uint32_t i = 0; i < info->extent.depth; i++) {
@@ -1417,6 +1495,8 @@ tu_copy_image_to_image(struct tu_cmd_buffer *cmd,
          ops->run(cmd, cs);
       }
    }
+
+   ops->teardown(cmd, cs);
 }
 
 void
@@ -1451,7 +1531,7 @@ copy_buffer(struct tu_cmd_buffer *cmd,
    VkFormat format = block_size == 4 ? VK_FORMAT_R32_UINT : VK_FORMAT_R8_UNORM;
    uint64_t blocks = size / block_size;
 
-   ops->setup(cmd, cs, format, VK_IMAGE_ASPECT_COLOR_BIT, ROTATE_0, false);
+   ops->setup(cmd, cs, format, VK_IMAGE_ASPECT_COLOR_BIT, ROTATE_0, false, false);
 
    while (blocks) {
       uint32_t src_x = (src_va & 63) / block_size;
@@ -1467,6 +1547,8 @@ copy_buffer(struct tu_cmd_buffer *cmd,
       dst_va += width * block_size;
       blocks -= width;
    }
+
+   ops->teardown(cmd, cs);
 }
 
 void
@@ -1534,7 +1616,7 @@ tu_CmdFillBuffer(VkCommandBuffer commandBuffer,
    uint64_t dst_va = tu_buffer_iova(buffer) + dstOffset;
    uint32_t blocks = fillSize / 4;
 
-   ops->setup(cmd, cs, VK_FORMAT_R32_UINT, VK_IMAGE_ASPECT_COLOR_BIT, ROTATE_0, true);
+   ops->setup(cmd, cs, VK_FORMAT_R32_UINT, VK_IMAGE_ASPECT_COLOR_BIT, ROTATE_0, true, false);
    ops->clear_value(cs, VK_FORMAT_R32_UINT, &(VkClearValue){.color = {.uint32[0] = data}});
 
    while (blocks) {
@@ -1548,6 +1630,8 @@ tu_CmdFillBuffer(VkCommandBuffer commandBuffer,
       dst_va += width * 4;
       blocks -= width;
    }
+
+   ops->teardown(cmd, cs);
 }
 
 void
@@ -1568,7 +1652,8 @@ tu_CmdResolveImage(VkCommandBuffer commandBuffer,
    tu_bo_list_add(&cmd->bo_list, src_image->bo, MSM_SUBMIT_BO_READ);
    tu_bo_list_add(&cmd->bo_list, dst_image->bo, MSM_SUBMIT_BO_WRITE);
 
-   ops->setup(cmd, cs, dst_image->vk_format, VK_IMAGE_ASPECT_COLOR_BIT, ROTATE_0, false);
+   ops->setup(cmd, cs, dst_image->vk_format, VK_IMAGE_ASPECT_COLOR_BIT,
+              ROTATE_0, false, dst_image->layout[0].ubwc);
 
    for (uint32_t i = 0; i < regionCount; ++i) {
       const VkImageResolve *info = &pRegions[i];
@@ -1589,6 +1674,8 @@ tu_CmdResolveImage(VkCommandBuffer commandBuffer,
          ops->run(cmd, cs);
       }
    }
+
+   ops->teardown(cmd, cs);
 }
 
 void
@@ -1606,7 +1693,8 @@ tu_resolve_sysmem(struct tu_cmd_buffer *cmd,
 
    assert(src->image->vk_format == dst->image->vk_format);
 
-   ops->setup(cmd, cs, dst->image->vk_format, VK_IMAGE_ASPECT_COLOR_BIT, ROTATE_0, false);
+   ops->setup(cmd, cs, dst->image->vk_format, VK_IMAGE_ASPECT_COLOR_BIT,
+              ROTATE_0, false, dst->ubwc_enabled);
    ops->coords(cs, &rect->offset, &rect->offset, &rect->extent);
 
    for (uint32_t i = 0; i < layers; i++) {
@@ -1614,20 +1702,23 @@ tu_resolve_sysmem(struct tu_cmd_buffer *cmd,
       ops->dst(cs, dst, i);
       ops->run(cmd, cs);
    }
+
+   ops->teardown(cmd, cs);
 }
 
 static void
 clear_image(struct tu_cmd_buffer *cmd,
             struct tu_image *image,
             const VkClearValue *clear_value,
-            const VkImageSubresourceRange *range)
+            const VkImageSubresourceRange *range,
+            VkImageAspectFlags aspect_mask)
 {
    uint32_t level_count = tu_get_levelCount(image, range);
    uint32_t layer_count = tu_get_layerCount(image, range);
    struct tu_cs *cs = &cmd->cs;
    VkFormat format = image->vk_format;
-   if (format == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32)
-      format = VK_FORMAT_R32_UINT;
+   if (format == VK_FORMAT_D32_SFLOAT_S8_UINT || format == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32)
+      format = copy_format(format, aspect_mask, false);
 
    if (image->type == VK_IMAGE_TYPE_3D) {
       assert(layer_count == 1);
@@ -1636,8 +1727,11 @@ clear_image(struct tu_cmd_buffer *cmd,
 
    const struct blit_ops *ops = image->samples > 1 ? &r3d_ops : &r2d_ops;
 
-   ops->setup(cmd, cs, format, range->aspectMask, ROTATE_0, true);
-   ops->clear_value(cs, image->vk_format, clear_value);
+   ops->setup(cmd, cs, format, aspect_mask, ROTATE_0, true, image->layout[0].ubwc);
+   if (image->vk_format == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32)
+      ops->clear_value(cs, VK_FORMAT_E5B9G9R9_UFLOAT_PACK32, clear_value);
+   else
+      ops->clear_value(cs, format, clear_value);
 
    for (unsigned j = 0; j < level_count; j++) {
       if (image->type == VK_IMAGE_TYPE_3D)
@@ -1650,7 +1744,7 @@ clear_image(struct tu_cmd_buffer *cmd,
 
       struct tu_image_view dst;
       tu_image_view_copy_blit(&dst, image, format, &(VkImageSubresourceLayers) {
-         .aspectMask = range->aspectMask,
+         .aspectMask = aspect_mask,
          .mipLevel = range->baseMipLevel + j,
          .baseArrayLayer = range->baseArrayLayer,
          .layerCount = 1,
@@ -1661,6 +1755,8 @@ clear_image(struct tu_cmd_buffer *cmd,
          ops->run(cmd, cs);
       }
    }
+
+   ops->teardown(cmd, cs);
 }
 
 void
@@ -1677,7 +1773,7 @@ tu_CmdClearColorImage(VkCommandBuffer commandBuffer,
    tu_bo_list_add(&cmd->bo_list, image->bo, MSM_SUBMIT_BO_WRITE);
 
    for (unsigned i = 0; i < rangeCount; i++)
-      clear_image(cmd, image, (const VkClearValue*) pColor, pRanges + i);
+      clear_image(cmd, image, (const VkClearValue*) pColor, pRanges + i, VK_IMAGE_ASPECT_COLOR_BIT);
 }
 
 void
@@ -1693,89 +1789,18 @@ tu_CmdClearDepthStencilImage(VkCommandBuffer commandBuffer,
 
    tu_bo_list_add(&cmd->bo_list, image->bo, MSM_SUBMIT_BO_WRITE);
 
-   for (unsigned i = 0; i < rangeCount; i++)
-      clear_image(cmd, image, (const VkClearValue*) pDepthStencil, pRanges + i);
-}
+   for (unsigned i = 0; i < rangeCount; i++) {
+      const VkImageSubresourceRange *range = &pRanges[i];
 
-static void
-tu_clear_sysmem_attachments_2d(struct tu_cmd_buffer *cmd,
-                               uint32_t attachment_count,
-                               const VkClearAttachment *attachments,
-                               uint32_t rect_count,
-                               const VkClearRect *rects)
-{
-   const struct tu_subpass *subpass = cmd->state.subpass;
-   /* note: cannot use shader path here.. there is a special shader path
-    * in tu_clear_sysmem_attachments()
-    */
-   const struct blit_ops *ops = &r2d_ops;
-   struct tu_cs *cs = &cmd->draw_cs;
+      if (image->vk_format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+         /* can't clear both depth and stencil at once, split up the aspect mask */
+         uint32_t b;
+         for_each_bit(b, range->aspectMask)
+            clear_image(cmd, image, (const VkClearValue*) pDepthStencil, range, BIT(b));
+         continue;
+      }
 
-   for (uint32_t j = 0; j < attachment_count; j++) {
-         /* The vulkan spec, section 17.2 "Clearing Images Inside a Render
-          * Pass Instance" says that:
-          *
-          *     Unlike other clear commands, vkCmdClearAttachments executes as
-          *     a drawing command, rather than a transfer command, with writes
-          *     performed by it executing in rasterization order. Clears to
-          *     color attachments are executed as color attachment writes, by
-          *     the VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT stage.
-          *     Clears to depth/stencil attachments are executed as depth
-          *     writes and writes by the
-          *     VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT and
-          *     VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT stages.
-          *
-          * However, the 2d path here is executed the same way as a
-          * transfer command, using the CCU color cache exclusively with
-          * a special depth-as-color format for depth clears. This means that
-          * we can't rely on the normal pipeline barrier mechanism here, and
-          * have to manually flush whenever using a different cache domain
-          * from what the 3d path would've used. This happens when we clear
-          * depth/stencil, since normally depth attachments use CCU depth, but
-          * we clear it using a special depth-as-color format. Since the clear
-          * potentially uses a different attachment state we also need to
-          * invalidate color beforehand and flush it afterwards.
-          */
-
-         uint32_t a;
-         if (attachments[j].aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) {
-            a = subpass->color_attachments[attachments[j].colorAttachment].attachment;
-            tu6_emit_event_write(cmd, cs, PC_CCU_FLUSH_COLOR_TS);
-         } else {
-            a = subpass->depth_stencil_attachment.attachment;
-            tu6_emit_event_write(cmd, cs, PC_CCU_FLUSH_DEPTH_TS);
-            tu6_emit_event_write(cmd, cs, PC_CCU_FLUSH_COLOR_TS);
-            tu6_emit_event_write(cmd, cs, PC_CCU_INVALIDATE_COLOR);
-         }
-
-         if (a == VK_ATTACHMENT_UNUSED)
-               continue;
-
-         const struct tu_image_view *iview =
-            cmd->state.framebuffer->attachments[a].attachment;
-
-         ops->setup(cmd, cs, iview->image->vk_format, attachments[j].aspectMask, ROTATE_0, true);
-         ops->clear_value(cs, iview->image->vk_format, &attachments[j].clearValue);
-
-         /* Wait for the flushes we triggered manually to complete */
-         tu_cs_emit_wfi(cs);
-
-         for (uint32_t i = 0; i < rect_count; i++) {
-            ops->coords(cs, &rects[i].rect.offset, NULL, &rects[i].rect.extent);
-            for (uint32_t layer = 0; layer < rects[i].layerCount; layer++) {
-               ops->dst(cs, iview, rects[i].baseArrayLayer + layer);
-               ops->run(cmd, cs);
-            }
-         }
-
-         if (attachments[j].aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) {
-            tu6_emit_event_write(cmd, cs, PC_CCU_FLUSH_COLOR_TS);
-            tu6_emit_event_write(cmd, cs, PC_CCU_INVALIDATE_COLOR);
-         } else {
-            /* sync color into depth */
-            tu6_emit_event_write(cmd, cs, PC_CCU_FLUSH_COLOR_TS);
-            tu6_emit_event_write(cmd, cs, PC_CCU_INVALIDATE_DEPTH);
-         }
+      clear_image(cmd, image, (const VkClearValue*) pDepthStencil, range, range->aspectMask);
    }
 }
 
@@ -1830,19 +1855,8 @@ tu_clear_sysmem_attachments(struct tu_cmd_buffer *cmd,
       max_samples = MAX2(max_samples, pass->attachments[a].samples);
    }
 
-   /* prefer to use 2D path for clears
-    * 2D can't clear separate depth/stencil and msaa, needs known framebuffer
-    */
-   if (max_samples == 1 && cmd->state.framebuffer) {
-      tu_clear_sysmem_attachments_2d(cmd, attachment_count, attachments, rect_count, rects);
-      return;
-   }
-
-   /* This clear path behaves like a draw, needs the same flush as tu_draw */
-   tu_emit_cache_flush_renderpass(cmd, cs);
-
    /* disable all draw states so they don't interfere
-    * TODO: use and re-use draw states for this path
+    * TODO: use and re-use draw states
     * we have to disable draw states individually to preserve
     * input attachment states, because a secondary command buffer
     * won't be able to restore them
@@ -1979,34 +1993,52 @@ pack_gmem_clear_value(const VkClearValue *val, VkFormat format, uint32_t clear_v
 }
 
 static void
+clear_gmem_attachment(struct tu_cmd_buffer *cmd,
+                      struct tu_cs *cs,
+                      VkFormat format,
+                      uint8_t clear_mask,
+                      uint32_t gmem_offset,
+                      const VkClearValue *value)
+{
+   tu_cs_emit_pkt4(cs, REG_A6XX_RB_BLIT_DST_INFO, 1);
+   tu_cs_emit(cs, A6XX_RB_BLIT_DST_INFO_COLOR_FORMAT(tu6_base_format(format)));
+
+   tu_cs_emit_regs(cs, A6XX_RB_BLIT_INFO(.gmem = 1, .clear_mask = clear_mask));
+
+   tu_cs_emit_pkt4(cs, REG_A6XX_RB_BLIT_BASE_GMEM, 1);
+   tu_cs_emit(cs, gmem_offset);
+
+   tu_cs_emit_pkt4(cs, REG_A6XX_RB_UNKNOWN_88D0, 1);
+   tu_cs_emit(cs, 0);
+
+   uint32_t clear_vals[4] = {};
+   pack_gmem_clear_value(value, format, clear_vals);
+
+   tu_cs_emit_pkt4(cs, REG_A6XX_RB_BLIT_CLEAR_COLOR_DW0, 4);
+   tu_cs_emit_array(cs, clear_vals, 4);
+
+   tu6_emit_event_write(cmd, cs, BLIT);
+}
+
+static void
 tu_emit_clear_gmem_attachment(struct tu_cmd_buffer *cmd,
                               struct tu_cs *cs,
                               uint32_t attachment,
                               VkImageAspectFlags mask,
                               const VkClearValue *value)
 {
-   VkFormat vk_format = cmd->state.pass->attachments[attachment].format;
+   const struct tu_render_pass_attachment *att =
+      &cmd->state.pass->attachments[attachment];
 
+   if (att->format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+      if (mask & VK_IMAGE_ASPECT_DEPTH_BIT)
+         clear_gmem_attachment(cmd, cs, VK_FORMAT_D32_SFLOAT, 0xf, att->gmem_offset, value);
+      if (mask & VK_IMAGE_ASPECT_STENCIL_BIT)
+         clear_gmem_attachment(cmd, cs, VK_FORMAT_S8_UINT, 0xf, att->gmem_offset_stencil, value);
+      return;
+   }
 
-   tu_cs_emit_pkt4(cs, REG_A6XX_RB_BLIT_DST_INFO, 1);
-   tu_cs_emit(cs, A6XX_RB_BLIT_DST_INFO_COLOR_FORMAT(tu6_base_format(vk_format)));
-
-   tu_cs_emit_regs(cs, A6XX_RB_BLIT_INFO(.gmem = 1,
-      .clear_mask = aspect_write_mask(vk_format, mask)));
-
-   tu_cs_emit_pkt4(cs, REG_A6XX_RB_BLIT_BASE_GMEM, 1);
-   tu_cs_emit(cs, cmd->state.pass->attachments[attachment].gmem_offset);
-
-   tu_cs_emit_pkt4(cs, REG_A6XX_RB_UNKNOWN_88D0, 1);
-   tu_cs_emit(cs, 0);
-
-   uint32_t clear_vals[4] = {};
-   pack_gmem_clear_value(value, vk_format, clear_vals);
-
-   tu_cs_emit_pkt4(cs, REG_A6XX_RB_BLIT_CLEAR_COLOR_DW0, 4);
-   tu_cs_emit_array(cs, clear_vals, 4);
-
-   tu6_emit_event_write(cmd, cs, BLIT);
+   clear_gmem_attachment(cmd, cs, att->format, aspect_write_mask(att->format, mask), att->gmem_offset, value);
 }
 
 static void
@@ -2056,6 +2088,27 @@ tu_CmdClearAttachments(VkCommandBuffer commandBuffer,
    TU_FROM_HANDLE(tu_cmd_buffer, cmd, commandBuffer);
    struct tu_cs *cs = &cmd->draw_cs;
 
+   /* sysmem path behaves like a draw, note we don't have a way of using different
+    * flushes for sysmem/gmem, so this needs to be outside of the cond_exec
+    */
+   tu_emit_cache_flush_renderpass(cmd, cs);
+
+   /* vkCmdClearAttachments is supposed to respect the predicate if active.
+    * The easiest way to do this is to always use the 3d path, which always
+    * works even with GMEM because it's just a simple draw using the existing
+    * attachment state. However it seems that IGNORE_VISIBILITY draws must be
+    * skipped in the binning pass, since otherwise they produce binning data
+    * which isn't consumed and leads to the wrong binning data being read, so
+    * condition on GMEM | SYSMEM.
+    */
+   if (cmd->state.predication_active) {
+      tu_cond_exec_start(cs, CP_COND_EXEC_0_RENDER_MODE_GMEM |
+                             CP_COND_EXEC_0_RENDER_MODE_SYSMEM);
+      tu_clear_sysmem_attachments(cmd, attachmentCount, pAttachments, rectCount, pRects);
+      tu_cond_exec_end(cs);
+      return;
+   }
+
    tu_cond_exec_start(cs, CP_COND_EXEC_0_RENDER_MODE_GMEM);
    tu_clear_gmem_attachments(cmd, attachmentCount, pAttachments, rectCount, pRects);
    tu_cond_exec_end(cs);
@@ -2065,34 +2118,67 @@ tu_CmdClearAttachments(VkCommandBuffer commandBuffer,
    tu_cond_exec_end(cs);
 }
 
+static void
+clear_sysmem_attachment(struct tu_cmd_buffer *cmd,
+                        struct tu_cs *cs,
+                        VkFormat format,
+                        VkImageAspectFlags clear_mask,
+                        const VkRenderPassBeginInfo *info,
+                        uint32_t a,
+                        bool separate_stencil)
+{
+   const struct tu_framebuffer *fb = cmd->state.framebuffer;
+   const struct tu_image_view *iview = fb->attachments[a].attachment;
+   const struct blit_ops *ops = &r2d_ops;
+   if (cmd->state.pass->attachments[a].samples > 1)
+      ops = &r3d_ops;
+
+   ops->setup(cmd, cs, format, clear_mask, ROTATE_0, true, iview->ubwc_enabled);
+   ops->coords(cs, &info->renderArea.offset, NULL, &info->renderArea.extent);
+   ops->clear_value(cs, format, &info->pClearValues[a]);
+
+   for (uint32_t i = 0; i < fb->layers; i++) {
+      if (separate_stencil) {
+         if (ops == &r3d_ops)
+            r3d_dst_stencil(cs, iview, i);
+         else
+            r2d_dst_stencil(cs, iview, i);
+      } else {
+         ops->dst(cs, iview, i);
+      }
+      ops->run(cmd, cs);
+   }
+
+   ops->teardown(cmd, cs);
+}
+
 void
 tu_clear_sysmem_attachment(struct tu_cmd_buffer *cmd,
                            struct tu_cs *cs,
                            uint32_t a,
                            const VkRenderPassBeginInfo *info)
 {
-   const struct tu_framebuffer *fb = cmd->state.framebuffer;
-   const struct tu_image_view *iview = fb->attachments[a].attachment;
    const struct tu_render_pass_attachment *attachment =
       &cmd->state.pass->attachments[a];
 
    if (!attachment->clear_mask)
       return;
 
-   const struct blit_ops *ops = &r2d_ops;
-   if (attachment->samples > 1)
-      ops = &r3d_ops;
-
-   ops->setup(cmd, cs, attachment->format, attachment->clear_mask, ROTATE_0, true);
-   ops->coords(cs, &info->renderArea.offset, NULL, &info->renderArea.extent);
-   ops->clear_value(cs, attachment->format, &info->pClearValues[a]);
-
    /* Wait for any flushes at the beginning of the renderpass to complete */
    tu_cs_emit_wfi(cs);
 
-   for (uint32_t i = 0; i < fb->layers; i++) {
-      ops->dst(cs, iview, i);
-      ops->run(cmd, cs);
+   if (attachment->format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+      if (attachment->clear_mask & VK_IMAGE_ASPECT_DEPTH_BIT) {
+         clear_sysmem_attachment(cmd, cs, VK_FORMAT_D32_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT,
+                                 info, a, false);
+      }
+      if (attachment->clear_mask & VK_IMAGE_ASPECT_STENCIL_BIT) {
+         clear_sysmem_attachment(cmd, cs, VK_FORMAT_S8_UINT, VK_IMAGE_ASPECT_COLOR_BIT,
+                                 info, a, true);
+      }
+   } else {
+      clear_sysmem_attachment(cmd, cs, attachment->format, attachment->clear_mask,
+                              info, a, false);
    }
 
    /* The spec doesn't explicitly say, but presumably the initial renderpass
@@ -2136,7 +2222,8 @@ tu_emit_blit(struct tu_cmd_buffer *cmd,
              struct tu_cs *cs,
              const struct tu_image_view *iview,
              const struct tu_render_pass_attachment *attachment,
-             bool resolve)
+             bool resolve,
+             bool separate_stencil)
 {
    tu_cs_emit_regs(cs,
                    A6XX_RB_MSAA_CNTL(tu_msaa_samples(attachment->samples)));
@@ -2148,14 +2235,23 @@ tu_emit_blit(struct tu_cmd_buffer *cmd,
       .integer = vk_format_is_int(attachment->format)));
 
    tu_cs_emit_pkt4(cs, REG_A6XX_RB_BLIT_DST_INFO, 4);
-   tu_cs_emit(cs, iview->RB_BLIT_DST_INFO);
-   tu_cs_image_ref_2d(cs, iview, 0, false);
+   if (separate_stencil) {
+      tu_cs_emit(cs, tu_image_view_stencil(iview, RB_BLIT_DST_INFO) & ~A6XX_RB_BLIT_DST_INFO_FLAGS);
+      tu_cs_emit_qw(cs, iview->stencil_base_addr);
+      tu_cs_emit(cs, iview->stencil_PITCH);
 
-   tu_cs_emit_pkt4(cs, REG_A6XX_RB_BLIT_FLAG_DST_LO, 3);
-   tu_cs_image_flag_ref(cs, iview, 0);
+      tu_cs_emit_regs(cs,
+                      A6XX_RB_BLIT_BASE_GMEM(attachment->gmem_offset_stencil));
+   } else {
+      tu_cs_emit(cs, iview->RB_BLIT_DST_INFO);
+      tu_cs_image_ref_2d(cs, iview, 0, false);
 
-   tu_cs_emit_regs(cs,
-                   A6XX_RB_BLIT_BASE_GMEM(attachment->gmem_offset));
+      tu_cs_emit_pkt4(cs, REG_A6XX_RB_BLIT_FLAG_DST_LO, 3);
+      tu_cs_image_flag_ref(cs, iview, 0);
+
+      tu_cs_emit_regs(cs,
+                      A6XX_RB_BLIT_BASE_GMEM(attachment->gmem_offset));
+   }
 
    tu6_emit_event_write(cmd, cs, BLIT);
 }
@@ -2207,7 +2303,58 @@ tu_load_gmem_attachment(struct tu_cmd_buffer *cmd,
       &cmd->state.pass->attachments[a];
 
    if (attachment->load || force_load)
-      tu_emit_blit(cmd, cs, iview, attachment, false);
+      tu_emit_blit(cmd, cs, iview, attachment, false, false);
+
+   if (attachment->load_stencil || (attachment->format == VK_FORMAT_D32_SFLOAT_S8_UINT && force_load))
+      tu_emit_blit(cmd, cs, iview, attachment, false, true);
+}
+
+static void
+store_cp_blit(struct tu_cmd_buffer *cmd,
+              struct tu_cs *cs,
+              struct tu_image_view *iview,
+              uint32_t samples,
+              bool separate_stencil,
+              VkFormat format,
+              uint32_t gmem_offset,
+              uint32_t cpp)
+{
+   r2d_setup_common(cmd, cs, format, VK_IMAGE_ASPECT_COLOR_BIT, ROTATE_0, false,
+                    iview->ubwc_enabled, true);
+   if (separate_stencil)
+      r2d_dst_stencil(cs, iview, 0);
+   else
+      r2d_dst(cs, iview, 0);
+
+   tu_cs_emit_regs(cs,
+                   A6XX_SP_PS_2D_SRC_INFO(
+                      .color_format = tu6_format_texture(format, TILE6_2).fmt,
+                      .tile_mode = TILE6_2,
+                      .srgb = vk_format_is_srgb(format),
+                      .samples = tu_msaa_samples(samples),
+                      .samples_average = !vk_format_is_int(format),
+                      .unk20 = 1,
+                      .unk22 = 1),
+                   /* note: src size does not matter when not scaling */
+                   A6XX_SP_PS_2D_SRC_SIZE( .width = 0x3fff, .height = 0x3fff),
+                   A6XX_SP_PS_2D_SRC_LO(cmd->device->physical_device->gmem_base + gmem_offset),
+                   A6XX_SP_PS_2D_SRC_HI(),
+                   A6XX_SP_PS_2D_SRC_PITCH(.pitch = cmd->state.framebuffer->tile0.width * cpp));
+
+   /* sync GMEM writes with CACHE. */
+   tu6_emit_event_write(cmd, cs, CACHE_INVALIDATE);
+
+   /* Wait for CACHE_INVALIDATE to land */
+   tu_cs_emit_wfi(cs);
+
+   tu_cs_emit_pkt7(cs, CP_BLIT, 1);
+   tu_cs_emit(cs, CP_BLIT_0_OP(BLIT_OP_SCALE));
+
+   /* CP_BLIT writes to the CCU, unlike CP_EVENT_WRITE::BLIT which writes to
+    * sysmem, and we generally assume that GMEM renderpasses leave their
+    * results in sysmem, so we need to flush manually here.
+    */
+   tu6_emit_event_write(cmd, cs, PC_CCU_FLUSH_COLOR_TS);
 }
 
 void
@@ -2216,13 +2363,12 @@ tu_store_gmem_attachment(struct tu_cmd_buffer *cmd,
                          uint32_t a,
                          uint32_t gmem_a)
 {
-   const struct tu_framebuffer *fb = cmd->state.framebuffer;
    const VkRect2D *render_area = &cmd->state.render_area;
    struct tu_render_pass_attachment *dst = &cmd->state.pass->attachments[a];
-   struct tu_image_view *iview = fb->attachments[a].attachment;
+   struct tu_image_view *iview = cmd->state.framebuffer->attachments[a].attachment;
    struct tu_render_pass_attachment *src = &cmd->state.pass->attachments[gmem_a];
 
-   if (!dst->store)
+   if (!dst->store && !dst->store_stencil)
       return;
 
    uint32_t x1 = render_area->offset.x;
@@ -2243,7 +2389,10 @@ tu_store_gmem_attachment(struct tu_cmd_buffer *cmd,
 
    /* use fast path when render area is aligned, except for unsupported resolve cases */
    if (!unaligned && (a == gmem_a || blit_can_resolve(dst->format))) {
-      tu_emit_blit(cmd, cs, iview, src, true);
+      if (dst->store)
+         tu_emit_blit(cmd, cs, iview, src, true, false);
+      if (dst->store_stencil)
+         tu_emit_blit(cmd, cs, iview, src, true, true);
       return;
    }
 
@@ -2255,37 +2404,18 @@ tu_store_gmem_attachment(struct tu_cmd_buffer *cmd,
       return;
    }
 
-   r2d_setup_common(cmd, cs, dst->format, VK_IMAGE_ASPECT_COLOR_BIT, ROTATE_0, false, true);
-   r2d_dst(cs, iview, 0);
    r2d_coords(cs, &render_area->offset, &render_area->offset, &render_area->extent);
 
-   tu_cs_emit_regs(cs,
-                   A6XX_SP_PS_2D_SRC_INFO(
-                      .color_format = tu6_format_texture(src->format, TILE6_2).fmt,
-                      .tile_mode = TILE6_2,
-                      .srgb = vk_format_is_srgb(src->format),
-                      .samples = tu_msaa_samples(src->samples),
-                      .samples_average = !vk_format_is_int(src->format),
-                      .unk20 = 1,
-                      .unk22 = 1),
-                   /* note: src size does not matter when not scaling */
-                   A6XX_SP_PS_2D_SRC_SIZE( .width = 0x3fff, .height = 0x3fff),
-                   A6XX_SP_PS_2D_SRC_LO(cmd->device->physical_device->gmem_base + src->gmem_offset),
-                   A6XX_SP_PS_2D_SRC_HI(),
-                   A6XX_SP_PS_2D_SRC_PITCH(.pitch = fb->tile0.width * src->cpp));
+   VkFormat format = src->format;
+   if (format == VK_FORMAT_D32_SFLOAT_S8_UINT)
+      format = VK_FORMAT_D32_SFLOAT;
 
-   /* sync GMEM writes with CACHE. */
-   tu6_emit_event_write(cmd, cs, CACHE_INVALIDATE);
-
-   /* Wait for CACHE_INVALIDATE to land */
-   tu_cs_emit_wfi(cs);
-
-   tu_cs_emit_pkt7(cs, CP_BLIT, 1);
-   tu_cs_emit(cs, CP_BLIT_0_OP(BLIT_OP_SCALE));
-
-   /* CP_BLIT writes to the CCU, unlike CP_EVENT_WRITE::BLIT which writes to
-    * sysmem, and we generally assume that GMEM renderpasses leave their
-    * results in sysmem, so we need to flush manually here.
-    */
-   tu6_emit_event_write(cmd, cs, PC_CCU_FLUSH_COLOR_TS);
+   if (dst->store) {
+      store_cp_blit(cmd, cs, iview, src->samples, false, format,
+                    src->gmem_offset, src->cpp);
+   }
+   if (dst->store_stencil) {
+      store_cp_blit(cmd, cs, iview, src->samples, true, VK_FORMAT_S8_UINT,
+                    src->gmem_offset_stencil, src->samples);
+   }
 }

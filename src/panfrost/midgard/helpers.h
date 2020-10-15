@@ -143,6 +143,9 @@
 /* Uniforms are begin at (REGISTER_UNIFORMS - uniform_count) */
 #define REGISTER_UNIFORMS 24
 
+/* r24 and r25 are special registers that only exist during the pipeline,
+ * by using them when we don't care about the register we skip a roundtrip
+ * to the register file. */
 #define REGISTER_UNUSED 24
 #define REGISTER_CONSTANT 26
 #define REGISTER_LDST_BASE 26
@@ -327,6 +330,10 @@ midgard_is_branch_unit(unsigned unit)
 {
         return (unit == ALU_ENAB_BRANCH) || (unit == ALU_ENAB_BR_COMPACT);
 }
+
+/* Packs ALU mod argument */
+struct midgard_instruction;
+unsigned mir_pack_mod(struct midgard_instruction *ins, unsigned i, bool scalar);
 
 void
 mir_print_constant_component(FILE *fp, const midgard_constants *consts,

@@ -29,7 +29,7 @@
 static void mark_sampler_desc(const nir_variable *var,
 			      struct radv_shader_info *info)
 {
-	info->desc_set_used_mask |= (1 << var->data.descriptor_set);
+	info->desc_set_used_mask |= (1u << var->data.descriptor_set);
 }
 
 static void mark_ls_output(struct radv_shader_info *info,
@@ -288,7 +288,7 @@ gather_intrinsic_info(const nir_shader *nir, const nir_intrinsic_instr *instr,
 		gather_push_constant_info(nir, instr, info);
 		break;
 	case nir_intrinsic_vulkan_resource_index:
-		info->desc_set_used_mask |= (1 << nir_intrinsic_desc_set(instr));
+		info->desc_set_used_mask |= (1u << nir_intrinsic_desc_set(instr));
 		break;
 	case nir_intrinsic_image_deref_load:
 	case nir_intrinsic_image_deref_store:
@@ -403,7 +403,7 @@ gather_info_input_decl_vs(const nir_shader *nir, const nir_variable *var,
 	unsigned attrib_count = glsl_count_attribute_slots(var->type, true);
 	int idx = var->data.location;
 
-	if (idx >= VERT_ATTRIB_GENERIC0 && idx <= VERT_ATTRIB_GENERIC15)
+	if (idx >= VERT_ATTRIB_GENERIC0 && idx < VERT_ATTRIB_GENERIC0 + MAX_VERTEX_ATTRIBS)
 		info->vs.has_vertex_buffers = true;
 
 	for (unsigned i = 0; i < attrib_count; ++i) {
@@ -679,14 +679,14 @@ radv_nir_shader_info_pass(const struct nir_shader *nir,
 		info->loads_dynamic_offsets = true;
 	}
 
-	nir_foreach_variable(variable, &nir->inputs)
+	nir_foreach_shader_in_variable(variable, nir)
 		gather_info_input_decl(nir, variable, info, key);
 
 	nir_foreach_block(block, func->impl) {
 		gather_info_block(nir, block, info);
 	}
 
-	nir_foreach_variable(variable, &nir->outputs)
+	nir_foreach_shader_out_variable(variable, nir)
 		gather_info_output_decl(nir, variable, info, key);
 
 	if (nir->info.stage == MESA_SHADER_VERTEX ||
@@ -853,8 +853,8 @@ radv_nir_shader_info_pass(const struct nir_shader *nir,
 		 */
 		unsigned num_targets = (util_last_bit(info->ps.cb_shader_mask) + 3) / 4;
 		for (unsigned i = 0; i < num_targets; i++) {
-			if (!(info->ps.cb_shader_mask & (0xf << (i * 4)))) {
-				info->ps.cb_shader_mask |= 0xf << (i * 4);
+			if (!(info->ps.cb_shader_mask & (0xfu << (i * 4)))) {
+				info->ps.cb_shader_mask |= 0xfu << (i * 4);
 			}
 		}
 

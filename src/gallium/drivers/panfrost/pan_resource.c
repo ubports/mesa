@@ -177,6 +177,7 @@ panfrost_create_surface(struct pipe_context *pipe,
                         assert(surf_tmpl->u.tex.level <= pt->last_level);
                         ps->width = u_minify(pt->width0, surf_tmpl->u.tex.level);
                         ps->height = u_minify(pt->height0, surf_tmpl->u.tex.level);
+                        ps->nr_samples = surf_tmpl->nr_samples;
                         ps->u.tex.level = surf_tmpl->u.tex.level;
                         ps->u.tex.first_layer = surf_tmpl->u.tex.first_layer;
                         ps->u.tex.last_layer = surf_tmpl->u.tex.last_layer;
@@ -484,6 +485,7 @@ panfrost_resource_create(struct pipe_screen *screen,
         case PIPE_TEXTURE_3D:
         case PIPE_TEXTURE_CUBE:
         case PIPE_TEXTURE_RECT:
+        case PIPE_TEXTURE_1D_ARRAY:
         case PIPE_TEXTURE_2D_ARRAY:
                 break;
         default:

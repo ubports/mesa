@@ -149,13 +149,13 @@ bi_class_name(enum bi_class cl)
         case BI_MINMAX: return "minmax";
         case BI_MOV: return "mov";
         case BI_SELECT: return "select";
-        case BI_SHIFT: return "shift";
         case BI_STORE: return "store";
         case BI_STORE_VAR: return "store_var";
         case BI_SPECIAL: return "special";
         case BI_TABLE: return "table";
         case BI_TEX: return "tex";
         case BI_ROUND: return "round";
+        case BI_IMUL: return "imul";
         default: return "unknown_class";
         }
 }

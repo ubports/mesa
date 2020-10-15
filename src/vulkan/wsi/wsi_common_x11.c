@@ -512,7 +512,7 @@ x11_surface_get_capabilities(VkIcdSurfaceBase *icd_surface,
        * to come back from the compositor.  In that case, we don't know the
        * size of the window so we just return valid "I don't know" stuff.
        */
-      caps->currentExtent = (VkExtent2D) { -1, -1 };
+      caps->currentExtent = (VkExtent2D) { UINT32_MAX, UINT32_MAX };
       caps->minImageExtent = (VkExtent2D) { 1, 1 };
       caps->maxImageExtent = (VkExtent2D) {
          wsi_device->maxImageDimension2D,
@@ -653,25 +653,6 @@ x11_surface_get_present_modes(VkIcdSurfaceBase *surface,
       VK_INCOMPLETE : VK_SUCCESS;
 }
 
-static bool
-x11_surface_is_local_to_gpu(struct wsi_device *wsi_dev,
-                            xcb_connection_t *conn)
-{
-   struct wsi_x11_connection *wsi_conn =
-      wsi_x11_get_connection(wsi_dev, conn);
-
-   if (!wsi_conn)
-      return false;
-
-   if (!wsi_x11_check_for_dri3(wsi_conn))
-      return false;
-
-   if (!wsi_x11_check_dri3_compatible(wsi_dev, conn))
-      return false;
-
-   return true;
-}
-
 static VkResult
 x11_surface_get_present_rectangles(VkIcdSurfaceBase *icd_surface,
                                    struct wsi_device *wsi_device,
@@ -682,30 +663,28 @@ x11_surface_get_present_rectangles(VkIcdSurfaceBase *icd_surface,
    xcb_window_t window = x11_surface_get_window(icd_surface);
    VK_OUTARRAY_MAKE(out, pRects, pRectCount);
 
-   if (x11_surface_is_local_to_gpu(wsi_device, conn)) {
-      vk_outarray_append(&out, rect) {
-         xcb_generic_error_t *err = NULL;
-         xcb_get_geometry_cookie_t geom_cookie = xcb_get_geometry(conn, window);
-         xcb_get_geometry_reply_t *geom =
-            xcb_get_geometry_reply(conn, geom_cookie, &err);
-         free(err);
-         if (geom) {
-            *rect = (VkRect2D) {
-               .offset = { 0, 0 },
-               .extent = { geom->width, geom->height },
-            };
-         } else {
-            /* This can happen if the client didn't wait for the configure event
-             * to come back from the compositor.  In that case, we don't know the
-             * size of the window so we just return valid "I don't know" stuff.
-             */
-            *rect = (VkRect2D) {
-               .offset = { 0, 0 },
-               .extent = { -1, -1 },
-            };
-         }
-         free(geom);
+   vk_outarray_append(&out, rect) {
+      xcb_generic_error_t *err = NULL;
+      xcb_get_geometry_cookie_t geom_cookie = xcb_get_geometry(conn, window);
+      xcb_get_geometry_reply_t *geom =
+         xcb_get_geometry_reply(conn, geom_cookie, &err);
+      free(err);
+      if (geom) {
+         *rect = (VkRect2D) {
+            .offset = { 0, 0 },
+            .extent = { geom->width, geom->height },
+         };
+      } else {
+         /* This can happen if the client didn't wait for the configure event
+          * to come back from the compositor.  In that case, we don't know the
+          * size of the window so we just return valid "I don't know" stuff.
+          */
+         *rect = (VkRect2D) {
+            .offset = { 0, 0 },
+            .extent = { UINT32_MAX, UINT32_MAX },
+         };
       }
+      free(geom);
    }
 
    return vk_outarray_status(&out);
@@ -773,6 +752,7 @@ struct x11_swapchain {
    uint64_t                                     send_sbc;
    uint64_t                                     last_present_msc;
    uint32_t                                     stamp;
+   int                                          sent_image_count;
 
    bool                                         has_present_queue;
    bool                                         has_acquire_queue;
@@ -869,6 +849,8 @@ x11_handle_dri3_present_event(struct x11_swapchain *chain,
       for (unsigned i = 0; i < chain->base.image_count; i++) {
          if (chain->images[i].pixmap == idle->pixmap) {
             chain->images[i].busy = false;
+            chain->sent_image_count--;
+            assert(chain->sent_image_count >= 0);
             if (chain->has_acquire_queue)
                wsi_queue_push(&chain->acquire_queue, i);
             break;
@@ -1049,7 +1031,11 @@ x11_present_to_x11(struct x11_swapchain *chain, uint32_t image_index,
 
    xshmfence_reset(image->shm_fence);
 
+   ++chain->sent_image_count;
+   assert(chain->sent_image_count <= chain->base.image_count);
+
    ++chain->send_sbc;
+
    xcb_void_cookie_t cookie =
       xcb_present_pixmap(chain->conn,
                          chain->window,
@@ -1120,11 +1106,9 @@ x11_manage_fifo_queues(void *state)
 
    assert(chain->has_present_queue);
    while (chain->status >= 0) {
-      /* It should be safe to unconditionally block here.  Later in the loop
-       * we blocks until the previous present has landed on-screen.  At that
-       * point, we should have received IDLE_NOTIFY on all images presented
-       * before that point so the client should be able to acquire any image
-       * other than the currently presented one.
+      /* We can block here unconditionally because after an image was sent to
+       * the server (later on in this loop) we ensure at least one image is
+       * acquirable by the consumer or wait there on such an event.
        */
       uint32_t image_index = 0;
       result = wsi_queue_pull(&chain->present_queue, &image_index, INT64_MAX);
@@ -1157,7 +1141,12 @@ x11_manage_fifo_queues(void *state)
          goto fail;
 
       if (chain->has_acquire_queue) {
-         while (chain->last_present_msc < target_msc) {
+         /* Wait for our presentation to occur and ensure we have at least one
+          * image that can be acquired by the client afterwards. This ensures we
+          * can pull on the present-queue on the next loop.
+          */
+         while (chain->last_present_msc < target_msc ||
+                chain->sent_image_count == chain->base.image_count) {
             xcb_generic_event_t *event =
                xcb_wait_for_special_event(chain->conn, chain->special_event);
             if (!event) {
@@ -1500,6 +1489,7 @@ x11_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
    chain->depth = bit_depth;
    chain->extent = pCreateInfo->imageExtent;
    chain->send_sbc = 0;
+   chain->sent_image_count = 0;
    chain->last_present_msc = 0;
    chain->has_acquire_queue = false;
    chain->has_present_queue = false;

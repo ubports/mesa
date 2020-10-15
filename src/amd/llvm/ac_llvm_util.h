@@ -109,8 +109,6 @@ LLVMModuleRef ac_create_module(LLVMTargetMachineRef tm, LLVMContextRef ctx);
 
 LLVMBuilderRef ac_create_builder(LLVMContextRef ctx,
 				 enum ac_float_mode float_mode);
-bool ac_disable_inexact_math(LLVMBuilderRef builder);
-void ac_restore_inexact_math(LLVMBuilderRef builder, bool value);
 
 void
 ac_llvm_add_target_dep_function_attr(LLVMValueRef F,
@@ -131,6 +129,7 @@ ac_count_scratch_private_memory(LLVMValueRef function);
 
 LLVMTargetLibraryInfoRef ac_create_target_library_info(const char *triple);
 void ac_dispose_target_library_info(LLVMTargetLibraryInfoRef library_info);
+void ac_init_shared_llvm_once(void); /* Do not use directly, use ac_init_llvm_once */
 void ac_init_llvm_once(void);
 
 

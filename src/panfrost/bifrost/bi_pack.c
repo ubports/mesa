@@ -1022,7 +1022,7 @@ bi_pack_fma_cmp(bi_instruction *ins, bi_registers *regs)
                         .src_expand = 0,
                         .unk1 = 0,
                         .cond = cond,
-                        .op = BIFROST_FMA_OP_FCMP_GL
+                        .op = BIFROST_FMA_OP_FCMP_D3D
                 };
 
                 RETURN_PACKED(pack);
@@ -1042,7 +1042,7 @@ bi_pack_fma_cmp(bi_instruction *ins, bi_registers *regs)
                         .abs1 = l,
                         .unk = 0,
                         .cond = cond,
-                        .op = BIFROST_FMA_OP_FCMP_GL_16,
+                        .op = BIFROST_FMA_OP_FCMP_D3D_16,
                 };
 
                 RETURN_PACKED(pack);
@@ -1142,6 +1142,14 @@ bi_pack_fma_imath(bi_instruction *ins, bi_registers *regs)
 }
 
 static unsigned
+bi_pack_fma_imul(bi_instruction *ins, bi_registers *regs)
+{
+        assert(ins->op.imul == BI_IMUL_IMUL);
+        unsigned op = BIFROST_FMA_IMUL_32;
+        return bi_pack_fma_2src(ins, regs, op);
+}
+
+static unsigned
 bi_pack_fma(bi_clause *clause, bi_bundle bundle, bi_registers *regs)
 {
         if (!bundle.fma)
@@ -1168,14 +1176,14 @@ bi_pack_fma(bi_clause *clause, bi_bundle bundle, bi_registers *regs)
                 return bi_pack_fma_addmin(bundle.fma, regs);
         case BI_MOV:
                 return bi_pack_fma_1src(bundle.fma, regs, BIFROST_FMA_OP_MOV);
-        case BI_SHIFT:
-                unreachable("Packing todo");
         case BI_SELECT:
                 return bi_pack_fma_select(bundle.fma, regs);
         case BI_ROUND:
                 return bi_pack_fma_round(bundle.fma, regs);
         case BI_REDUCE_FMA:
                 return bi_pack_fma_reduce(bundle.fma, regs);
+        case BI_IMUL:
+                return bi_pack_fma_imul(bundle.fma, regs);
         default:
                 unreachable("Cannot encode class as FMA");
         }
@@ -1425,7 +1433,10 @@ bi_pack_add_special(bi_instruction *ins, bi_registers *regs)
 
         } else if (ins->op.special == BI_SPECIAL_EXP2_LOW) {
                 assert(!fp16);
-                op = BIFROST_ADD_OP_FEXP2_FAST;
+                return bi_pack_add_2src(ins, regs, BIFROST_ADD_OP_FEXP2_FAST);
+        } else if (ins->op.special == BI_SPECIAL_IABS) {
+                assert(ins->src_types[0] == nir_type_int32);
+                op = BIFROST_ADD_OP_IABS_32;
         } else {
                 unreachable("Unknown special op");
         }
@@ -1552,7 +1563,7 @@ bi_pack_add_icmp32(bi_instruction *ins, bi_registers *regs, bool flip,
                 .src1 = bi_get_src(ins, regs, flip ? 0 : 1),
                 .cond = cond,
                 .sz = 1,
-                .d3d = false,
+                .d3d = true,
                 .op = BIFROST_ADD_OP_ICMP_32
         };
 
@@ -1569,7 +1580,7 @@ bi_pack_add_icmp16(bi_instruction *ins, bi_registers *regs, bool flip,
                 .src0_swizzle = bi_swiz16(ins, flip ? 1 : 0),
                 .src1_swizzle = bi_swiz16(ins, flip ? 0 : 1),
                 .cond = cond,
-                .d3d = false,
+                .d3d = true,
                 .op = BIFROST_ADD_OP_ICMP_16
         };
 
@@ -1733,7 +1744,6 @@ bi_pack_add(bi_clause *clause, bi_bundle bundle, bi_registers *regs, gl_shader_s
         case BI_MINMAX:
                 return bi_pack_add_addmin(bundle.add, regs);
         case BI_MOV:
-        case BI_SHIFT:
         case BI_STORE:
                 unreachable("Packing todo");
         case BI_STORE_VAR:

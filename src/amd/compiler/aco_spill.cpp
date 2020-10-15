@@ -383,6 +383,20 @@ RegisterDemand init_live_in_vars(spill_ctx& ctx, Block* block, unsigned block_id
       }
       unsigned loop_end = i;
 
+      /* keep live-through spilled */
+      for (std::pair<Temp, std::pair<uint32_t, uint32_t>> pair : ctx.next_use_distances_end[block_idx - 1]) {
+         if (pair.second.first < loop_end)
+            continue;
+
+         Temp to_spill = pair.first;
+         auto it = ctx.spills_exit[block_idx - 1].find(to_spill);
+         if (it == ctx.spills_exit[block_idx - 1].end())
+            continue;
+
+         ctx.spills_entry[block_idx][to_spill] = it->second;
+         spilled_registers += to_spill;
+      }
+
       /* select live-through vgpr variables */
       while (new_demand.vgpr - spilled_registers.vgpr > ctx.target_pressure.vgpr) {
          unsigned distance = 0;
@@ -451,6 +465,13 @@ RegisterDemand init_live_in_vars(spill_ctx& ctx, Block* block, unsigned block_id
       assert(idx != 0 && "loop without phis: TODO");
       idx--;
       RegisterDemand reg_pressure = ctx.register_demand[block_idx][idx] - spilled_registers;
+      /* Consider register pressure from linear predecessors. This can affect
+       * reg_pressure if the branch instructions define sgprs. */
+      for (unsigned pred : block->linear_preds) {
+         reg_pressure.sgpr = std::max<int16_t>(
+            reg_pressure.sgpr, ctx.register_demand[pred].back().sgpr - spilled_registers.sgpr);
+      }
+
       while (reg_pressure.sgpr > ctx.target_pressure.sgpr) {
          unsigned distance = 0;
          Temp to_spill;
@@ -495,7 +516,7 @@ RegisterDemand init_live_in_vars(spill_ctx& ctx, Block* block, unsigned block_id
       for (std::pair<Temp, uint32_t> pair : ctx.spills_exit[pred_idx]) {
          if (pair.first.type() == RegType::sgpr &&
              ctx.next_use_distances_start[block_idx].find(pair.first) != ctx.next_use_distances_start[block_idx].end() &&
-             ctx.next_use_distances_start[block_idx][pair.first].second > block_idx) {
+             ctx.next_use_distances_start[block_idx][pair.first].first != block_idx) {
             ctx.spills_entry[block_idx].insert(pair);
             spilled_registers.sgpr += pair.first.size();
          }
@@ -505,7 +526,7 @@ RegisterDemand init_live_in_vars(spill_ctx& ctx, Block* block, unsigned block_id
          for (std::pair<Temp, uint32_t> pair : ctx.spills_exit[pred_idx]) {
             if (pair.first.type() == RegType::vgpr &&
                 ctx.next_use_distances_start[block_idx].find(pair.first) != ctx.next_use_distances_start[block_idx].end() &&
-                ctx.next_use_distances_start[block_idx][pair.first].second > block_idx) {
+                ctx.next_use_distances_start[block_idx][pair.first].first != block_idx) {
                ctx.spills_entry[block_idx].insert(pair);
                spilled_registers.vgpr += pair.first.size();
             }
@@ -629,12 +650,19 @@ RegisterDemand init_live_in_vars(spill_ctx& ctx, Block* block, unsigned block_id
    }
    reg_pressure += ctx.register_demand[block_idx][idx] - spilled_registers;
 
+   /* Consider register pressure from linear predecessors. This can affect
+    * reg_pressure if the branch instructions define sgprs. */
+   for (unsigned pred : block->linear_preds) {
+      reg_pressure.sgpr = std::max<int16_t>(
+         reg_pressure.sgpr, ctx.register_demand[pred].back().sgpr - spilled_registers.sgpr);
+   }
+
    while (reg_pressure.sgpr > ctx.target_pressure.sgpr) {
       assert(!partial_spills.empty());
 
       std::set<Temp>::iterator it = partial_spills.begin();
-      Temp to_spill = *it;
-      unsigned distance = ctx.next_use_distances_start[block_idx][*it].second;
+      Temp to_spill = Temp();
+      unsigned distance = 0;
       while (it != partial_spills.end()) {
          assert(ctx.spills_entry[block_idx].find(*it) == ctx.spills_entry[block_idx].end());
 
@@ -656,8 +684,8 @@ RegisterDemand init_live_in_vars(spill_ctx& ctx, Block* block, unsigned block_id
       assert(!partial_spills.empty());
 
       std::set<Temp>::iterator it = partial_spills.begin();
-      Temp to_spill = *it;
-      unsigned distance = ctx.next_use_distances_start[block_idx][*it].second;
+      Temp to_spill = Temp();
+      unsigned distance = 0;
       while (it != partial_spills.end()) {
          assert(ctx.spills_entry[block_idx].find(*it) == ctx.spills_entry[block_idx].end());
 
@@ -1565,10 +1593,13 @@ void assign_spill_slots(spill_ctx& ctx, unsigned spills_to_vgpr) {
                   for (unsigned i = 0; i < temp.size(); i++)
                      split->definitions[i] = bld.def(v1);
                   bld.insert(split);
-                  for (unsigned i = 0; i < temp.size(); i++)
-                     bld.mubuf(opcode, scratch_rsrc, Operand(v1), scratch_offset, split->definitions[i].getTemp(), offset + i * 4, false, true);
+                  for (unsigned i = 0; i < temp.size(); i++) {
+                     Instruction *instr = bld.mubuf(opcode, scratch_rsrc, Operand(v1), scratch_offset, split->definitions[i].getTemp(), offset + i * 4, false, true);
+                     static_cast<MUBUF_instruction *>(instr)->sync = memory_sync_info(storage_vgpr_spill, semantic_private);
+                  }
                } else {
-                  bld.mubuf(opcode, scratch_rsrc, Operand(v1), scratch_offset, temp, offset, false, true);
+                  Instruction *instr = bld.mubuf(opcode, scratch_rsrc, Operand(v1), scratch_offset, temp, offset, false, true);
+                  static_cast<MUBUF_instruction *>(instr)->sync = memory_sync_info(storage_vgpr_spill, semantic_private);
                }
             } else {
                ctx.program->config->spilled_sgprs += (*it)->operands[0].size();
@@ -1632,11 +1663,13 @@ void assign_spill_slots(spill_ctx& ctx, unsigned spills_to_vgpr) {
                   for (unsigned i = 0; i < def.size(); i++) {
                      Temp tmp = bld.tmp(v1);
                      vec->operands[i] = Operand(tmp);
-                     bld.mubuf(opcode, Definition(tmp), scratch_rsrc, Operand(v1), scratch_offset, offset + i * 4, false, true);
+                     Instruction *instr = bld.mubuf(opcode, Definition(tmp), scratch_rsrc, Operand(v1), scratch_offset, offset + i * 4, false, true);
+                     static_cast<MUBUF_instruction *>(instr)->sync = memory_sync_info(storage_vgpr_spill, semantic_private);
                   }
                   bld.insert(vec);
                } else {
-                  bld.mubuf(opcode, def, scratch_rsrc, Operand(v1), scratch_offset, offset, false, true);
+                  Instruction *instr = bld.mubuf(opcode, def, scratch_rsrc, Operand(v1), scratch_offset, offset, false, true);
+                  static_cast<MUBUF_instruction *>(instr)->sync = memory_sync_info(storage_vgpr_spill, semantic_private);
                }
             } else {
                uint32_t spill_slot = slots[spill_id];

@@ -327,8 +327,8 @@ void fill_desc_set_info(isel_context *ctx, nir_function_impl *impl)
    }
    ctx->buffer_resource_flags = std::vector<uint8_t>(resource_flag_count);
 
-   nir_foreach_variable(var, &impl->function->shader->uniforms) {
-      if (var->data.mode == nir_var_mem_ssbo && (var->data.access & ACCESS_RESTRICT)) {
+   nir_foreach_variable_with_modes(var, impl->function->shader, nir_var_mem_ssbo) {
+      if (var->data.access & ACCESS_RESTRICT) {
          uint32_t offset = ctx->resource_flag_offsets[var->data.descriptor_set];
          ctx->buffer_resource_flags[offset + var->data.binding] |= buffer_is_restrict;
       }
@@ -367,7 +367,8 @@ void fill_desc_set_info(isel_context *ctx, nir_function_impl *impl)
             res = intrin->src[0].ssa;
             break;
          case nir_intrinsic_store_ssbo:
-            if (nir_src_is_divergent(intrin->src[2]) || ctx->program->chip_class < GFX8 ||
+            if (nir_src_is_divergent(intrin->src[2]) ||
+                ctx->program->chip_class < GFX8 || ctx->program->chip_class >= GFX10_3 ||
                 (intrin->src[0].ssa->bit_size < 32 && !can_subdword_ssbo_store_use_smem(intrin)))
                flags |= glc ? has_glc_vmem_store : has_nonglc_vmem_store;
             res = intrin->src[1].ssa;
@@ -935,6 +936,14 @@ void init_context(isel_context *ctx, nir_shader *shader)
 
    ctx->allocated.reset(allocated.release());
    ctx->cf_info.nir_to_aco.reset(nir_to_aco.release());
+
+   /* align and copy constant data */
+   while (ctx->program->constant_data.size() % 4u)
+      ctx->program->constant_data.push_back(0);
+   ctx->constant_data_offset = ctx->program->constant_data.size();
+   ctx->program->constant_data.insert(ctx->program->constant_data.end(),
+                                      (uint8_t*)shader->constant_data,
+                                      (uint8_t*)shader->constant_data + shader->constant_data_size);
 }
 
 Pseudo_instruction *add_startpgm(struct isel_context *ctx)
@@ -1103,11 +1112,11 @@ setup_vs_output_info(isel_context *ctx, nir_shader *nir,
 void
 setup_vs_variables(isel_context *ctx, nir_shader *nir)
 {
-   nir_foreach_variable(variable, &nir->inputs)
+   nir_foreach_shader_in_variable(variable, nir)
    {
       variable->data.driver_location = variable->data.location * 4;
    }
-   nir_foreach_variable(variable, &nir->outputs)
+   nir_foreach_shader_out_variable(variable, nir)
    {
       if (ctx->stage == vertex_vs || ctx->stage == ngg_vertex_gs)
          variable->data.driver_location = variable->data.location * 4;
@@ -1137,7 +1146,7 @@ void setup_gs_variables(isel_context *ctx, nir_shader *nir)
    if (ctx->stage == vertex_geometry_gs || ctx->stage == tess_eval_geometry_gs)
       ctx->program->config->lds_size = ctx->program->info->gs_ring_info.lds_size; /* Already in units of the alloc granularity */
 
-   nir_foreach_variable(variable, &nir->outputs) {
+   nir_foreach_shader_out_variable(variable, nir) {
       variable->data.driver_location = variable->data.location * 4;
    }
 
@@ -1184,6 +1193,7 @@ setup_tcs_info(isel_context *ctx, nir_shader *nir, nir_shader *vs)
                              ctx->args->options->chip_class,
                              ctx->args->options->family);
    unsigned lds_size = calculate_tess_lds_size(
+                             ctx->args->options->chip_class,
                              ctx->args->options->key.tcs.input_vertices,
                              nir->info.tess.tcs_vertices_out,
                              ctx->tcs_num_inputs,
@@ -1192,7 +1202,7 @@ setup_tcs_info(isel_context *ctx, nir_shader *nir, nir_shader *vs)
                              ctx->tcs_num_patch_outputs);
 
    ctx->args->shader_info->tcs.num_patches = ctx->tcs_num_patches;
-   ctx->args->shader_info->tcs.lds_size = lds_size;
+   ctx->args->shader_info->tcs.num_lds_blocks = lds_size;
    ctx->program->config->lds_size = (lds_size + ctx->program->lds_alloc_granule - 1) /
                                     ctx->program->lds_alloc_granule;
 }
@@ -1200,7 +1210,7 @@ setup_tcs_info(isel_context *ctx, nir_shader *nir, nir_shader *vs)
 void
 setup_tcs_variables(isel_context *ctx, nir_shader *nir)
 {
-   nir_foreach_variable(variable, &nir->outputs) {
+   nir_foreach_shader_out_variable(variable, nir) {
       assert(variable->data.location >= 0 && variable->data.location <= UINT8_MAX);
 
       if (variable->data.location == VARYING_SLOT_TESS_LEVEL_OUTER)
@@ -1221,7 +1231,7 @@ setup_tes_variables(isel_context *ctx, nir_shader *nir)
    ctx->tcs_num_patches = ctx->args->options->key.tes.num_patches;
    ctx->tcs_num_outputs = ctx->program->info->tes.num_linked_inputs;
 
-   nir_foreach_variable(variable, &nir->outputs) {
+   nir_foreach_shader_out_variable(variable, nir) {
       if (ctx->stage == tess_eval_vs || ctx->stage == ngg_tess_eval_gs)
          variable->data.driver_location = variable->data.location * 4;
    }
@@ -1238,7 +1248,7 @@ setup_variables(isel_context *ctx, nir_shader *nir)
 {
    switch (nir->info.stage) {
    case MESA_SHADER_FRAGMENT: {
-      nir_foreach_variable(variable, &nir->outputs)
+      nir_foreach_shader_out_variable(variable, nir)
       {
          int idx = variable->data.location + variable->data.index;
          variable->data.driver_location = idx * 4;
@@ -1302,16 +1312,6 @@ lower_bit_size_callback(const nir_alu_instr *alu, void *_)
 void
 setup_nir(isel_context *ctx, nir_shader *nir)
 {
-   Program *program = ctx->program;
-
-   /* align and copy constant data */
-   while (program->constant_data.size() % 4u)
-      program->constant_data.push_back(0);
-   ctx->constant_data_offset = program->constant_data.size();
-   program->constant_data.insert(program->constant_data.end(),
-                                 (uint8_t*)nir->constant_data,
-                                 (uint8_t*)nir->constant_data + nir->constant_data_size);
-
    /* the variable setup has to be done before lower_io / CSE */
    setup_variables(ctx, nir);
 
@@ -1343,13 +1343,15 @@ setup_nir(isel_context *ctx, nir_shader *nir)
    if (nir->info.stage != MESA_SHADER_COMPUTE)
       nir_lower_io(nir, (nir_variable_mode)(nir_var_shader_in | nir_var_shader_out), type_size, (nir_lower_io_options)0);
 
+   lower_to_scalar |= nir_opt_shrink_vectors(nir);
+
    if (lower_to_scalar)
       nir_lower_alu_to_scalar(nir, NULL, NULL);
    if (lower_pack)
       nir_lower_pack(nir);
 
    /* lower ALU operations */
-   nir_lower_int64(nir, nir->options->lower_int64_options);
+   nir_lower_int64(nir);
 
    if (nir_lower_bit_size(nir, lower_bit_size_callback, NULL))
       nir_copy_prop(nir); /* allow nir_opt_idiv_const() to optimize lowered divisions */
@@ -1384,7 +1386,6 @@ setup_nir(isel_context *ctx, nir_shader *nir)
 
    /* cleanup passes */
    nir_lower_load_const_to_scalar(nir);
-   nir_opt_shrink_load(nir);
    nir_move_options move_opts = (nir_move_options)(
       nir_move_const_undef | nir_move_load_ubo | nir_move_load_input |
       nir_move_comparisons | nir_move_copies);

@@ -134,6 +134,7 @@ panfrost_get_param(struct pipe_screen *screen, enum pipe_cap param)
         case PIPE_CAP_OCCLUSION_QUERY:
         case PIPE_CAP_TGSI_INSTANCEID:
         case PIPE_CAP_TEXTURE_MULTISAMPLE:
+        case PIPE_CAP_SURFACE_SAMPLE_COUNT:
         case PIPE_CAP_PRIMITIVE_RESTART:
         case PIPE_CAP_PRIMITIVE_RESTART_FIXED_INDEX:
                 return !is_bifrost;
@@ -189,6 +190,10 @@ panfrost_get_param(struct pipe_screen *screen, enum pipe_cap param)
         case PIPE_CAP_QUERY_TIMESTAMP:
         case PIPE_CAP_CONDITIONAL_RENDER:
                 return is_gl3;
+
+        /* TODO: Where does this req come from in practice? */
+        case PIPE_CAP_VERTEX_BUFFER_STRIDE_4BYTE_ALIGNED_ONLY:
+                return 1;
 
         case PIPE_CAP_MAX_TEXTURE_2D_SIZE:
                 return 4096;
@@ -335,7 +340,7 @@ panfrost_get_shader_param(struct pipe_screen *screen,
                 return 1;
 
         case PIPE_SHADER_CAP_FP16:
-        case PIPE_SHADER_CAP_GLSL_16BIT_TEMPS:
+        case PIPE_SHADER_CAP_GLSL_16BIT_CONSTS:
                 return !is_nofp16;
 
         case PIPE_SHADER_CAP_FP16_DERIVATIVES:

@@ -274,10 +274,10 @@ panfrost_shader_compile(struct panfrost_context *ctx,
 
         /* Record the varying mapping for the command stream's bookkeeping */
 
-        struct exec_list *l_varyings =
-                        stage == MESA_SHADER_VERTEX ? &s->outputs : &s->inputs;
+        nir_variable_mode varying_mode =
+                        stage == MESA_SHADER_VERTEX ? nir_var_shader_out : nir_var_shader_in;
 
-        nir_foreach_variable(var, l_varyings) {
+        nir_foreach_variable_with_modes(var, s, varying_mode) {
                 unsigned loc = var->data.driver_location;
                 unsigned sz = glsl_count_attribute_slots(var->type, FALSE);
 
@@ -287,4 +287,8 @@ panfrost_shader_compile(struct panfrost_context *ctx,
                                         var->data.precision, var->data.location_frac);
                 }
         }
+
+        /* In both clone and tgsi_to_nir paths, the shader is ralloc'd against
+         * a NULL context */
+        ralloc_free(s);
 }

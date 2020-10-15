@@ -510,7 +510,8 @@ st_translate_vertex_program(struct st_context *st,
          stp->affected_states |= ST_NEW_VS_CONSTANTS;
 
       /* Translate to NIR if preferred. */
-      if (st->pipe->screen->get_shader_param(st->pipe->screen,
+      if (PIPE_SHADER_IR_NIR ==
+          st->pipe->screen->get_shader_param(st->pipe->screen,
                                              PIPE_SHADER_VERTEX,
                                              PIPE_SHADER_CAP_PREFERRED_IR)) {
          assert(!stp->glsl_to_tgsi);
@@ -889,6 +890,7 @@ st_translate_fragment_program(struct st_context *st,
 
       /* Translate to NIR. */
       if (!stfp->ati_fs &&
+          PIPE_SHADER_IR_NIR ==
           st->pipe->screen->get_shader_param(st->pipe->screen,
                                              PIPE_SHADER_FRAGMENT,
                                              PIPE_SHADER_CAP_PREFERRED_IR)) {
@@ -1285,7 +1287,7 @@ st_create_fp_variant(struct st_context *st,
 
       if (key->persample_shading) {
           nir_shader *shader = state.ir.nir;
-          nir_foreach_variable(var, &shader->inputs)
+          nir_foreach_shader_in_variable(var, shader)
              var->data.sample = true;
           finalize = true;
       }

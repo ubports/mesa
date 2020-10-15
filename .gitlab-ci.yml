@@ -30,6 +30,7 @@ stages:
   - radv
   - lima
   - virgl
+  - radeonsi
   - success
 
 # Generic rule to not run the job during scheduled pipelines
@@ -203,7 +204,7 @@ x86_build-base:
     - .fdo.container-build@debian
     - .container
   variables:
-    FDO_DISTRIBUTION_TAG: &x86_build-base "2020-07-21-tracie"
+    FDO_DISTRIBUTION_TAG: &x86_build-base "2020-07-28-x86-2"
 
 .use-x86_build-base:
   extends:
@@ -221,7 +222,7 @@ x86_build:
   extends:
     - .use-x86_build-base
   variables:
-    FDO_DISTRIBUTION_TAG: &x86_build "2020-07-21-tracie"
+    FDO_DISTRIBUTION_TAG: &x86_build "2020-08-08-glvnd"
 
 .use-x86_build:
   variables:
@@ -235,7 +236,7 @@ i386_build:
   extends:
     - .use-x86_build-base
   variables:
-    FDO_DISTRIBUTION_TAG: &i386_build "2020-07-21-tracie"
+    FDO_DISTRIBUTION_TAG: &i386_build "2020-07-28-x86-2"
 
 .use-i386_build:
   variables:
@@ -249,7 +250,7 @@ ppc64el_build:
   extends:
     - .use-x86_build-base
   variables:
-    FDO_DISTRIBUTION_TAG: &ppc64el_build "2020-07-21-tracie"
+    FDO_DISTRIBUTION_TAG: &ppc64el_build "2020-07-28-x86-2"
 
 .use-ppc64el_build:
   variables:
@@ -263,7 +264,7 @@ s390x_build:
   extends:
     - .use-x86_build-base
   variables:
-    FDO_DISTRIBUTION_TAG: &s390x_build "2020-07-21-tracie"
+    FDO_DISTRIBUTION_TAG: &s390x_build "2020-07-28-x86-2"
 
 .use-s390x_build:
   variables:
@@ -276,7 +277,7 @@ s390x_build:
 x86_test-base:
   extends: x86_build-base
   variables:
-    FDO_DISTRIBUTION_TAG: &x86_test-base "2020-07-21-tracie"
+    FDO_DISTRIBUTION_TAG: &x86_test-base "2020-07-28-x86-2"
 
 .use-x86_test-base:
   extends:
@@ -293,19 +294,19 @@ x86_test-base:
 x86_test-gl:
   extends: .use-x86_test-base
   variables:
-    FDO_DISTRIBUTION_TAG: &x86_test-gl "2020-07-21-tracie"
+    FDO_DISTRIBUTION_TAG: &x86_test-gl "2020-07-28-x86-2"
 
 # Debian 10 based x86 test image for VK
 x86_test-vk:
   extends: .use-x86_test-base
   variables:
-    FDO_DISTRIBUTION_TAG: &x86_test-vk "2020-07-21-gfxreconstruct-dev"
+    FDO_DISTRIBUTION_TAG: &x86_test-vk "2020-07-28-x86-2"
 
 # Debian 9 based x86 build image (old LLVM)
 x86_build_old:
   extends: x86_build-base
   variables:
-    FDO_DISTRIBUTION_TAG: &x86_build_old "2020-07-21-tracie"
+    FDO_DISTRIBUTION_TAG: &x86_build_old "2020-07-28-x86-2"
     FDO_DISTRIBUTION_VERSION: stretch-slim
 
 .use-x86_build_old:
@@ -321,7 +322,7 @@ arm_build:
     - .fdo.container-build@debian@arm64v8
     - .container
   variables:
-    FDO_DISTRIBUTION_TAG: &arm_build "2020-07-21-tracie"
+    FDO_DISTRIBUTION_TAG: &arm_build "2020-08-04-nfs-2"
 
 .use-arm_build:
   variables:
@@ -336,7 +337,7 @@ arm_test-base:
     - .fdo.container-build@debian
     - .container
   variables:
-    FDO_DISTRIBUTION_TAG: &arm_test-base "2020-07-18-nginx"
+    FDO_DISTRIBUTION_TAG: &arm_test-base "2020-07-28-libdrm"
 
 .use-arm_test-base:
   extends:
@@ -354,7 +355,7 @@ arm64_test:
   extends:
     - .use-arm_test-base
   variables:
-    FDO_DISTRIBUTION_TAG: &arm64_test "2020-07-18-nginx"
+    FDO_DISTRIBUTION_TAG: &arm64_test "2020-08-04-nfs-2"
 
 .use-arm64_test:
   variables:
@@ -518,11 +519,13 @@ meson-testing:
       -D platforms=x11
     GALLIUM_ST: >
       -D dri3=enabled
-    GALLIUM_DRIVERS: "swrast,virgl"
+    GALLIUM_DRIVERS: "swrast,virgl,radeonsi"
     VULKAN_DRIVERS: amd
     BUILDTYPE: "debugoptimized"
     EXTRA_OPTION: >
       -D werror=true
+    UPLOAD_FOR_LAVA: 1
+    DEBIAN_ARCH: amd64
   script:
     - .gitlab-ci/meson-build.sh
     - .gitlab-ci/prepare-artifacts.sh
@@ -554,6 +557,7 @@ meson-gallium:
   script:
     - .gitlab-ci/meson-build.sh
     - .gitlab-ci/run-shader-db.sh
+    - src/freedreno/.gitlab-ci/run-fdtools.sh
 
 meson-classic:
   extends: .meson-build
@@ -569,6 +573,30 @@ meson-classic:
       -D osmesa=classic
       -D tools=all
       -D werror=true
+
+meson-android:
+  extends: .meson-build
+  variables:
+    UNWIND: "disabled"
+    DRI_LOADERS: >
+      -D glx=disabled
+      -D gbm=disabled
+      -D egl=enabled
+      -D platforms=android
+    GALLIUM_DRIVERS: freedreno
+    VULKAN_DRIVERS: freedreno,intel,amd
+    EXTRA_OPTION: >
+      -D android-stub=true
+      -D werror=true
+    GALLIUM_ST: >
+      -D dri3=disabled
+      -D gallium-vdpau=disabled
+      -D gallium-xvmc=disabled
+      -D gallium-omx=disabled
+      -D gallium-va=disabled
+      -D gallium-xa=disabled
+      -D gallium-nine=false
+      -D gallium-opencl=disabled
 
 .meson-cross:
   extends:
@@ -638,6 +666,8 @@ meson-arm64-build-test:
     - .ci-deqp-artifacts
   variables:
     VULKAN_DRIVERS: "amd"
+    EXTRA_OPTION: >
+      -Dtools=panfrost
   script:
     - .gitlab-ci/meson-build.sh
 
@@ -735,6 +765,7 @@ meson-vulkan:
     VULKAN_DRIVERS: intel,amd,freedreno
     EXTRA_OPTION: >
       -D vulkan-overlay-layer=true
+      -D build-aco-tests=true
       -D werror=true
 
 meson-i386:
@@ -1071,6 +1102,7 @@ arm64_a630_traces:
     BARE_METAL_TEST_SCRIPT: "/install/tracie-runner-gl.sh"
     DEVICE_NAME: "freedreno-a630"
     TRACIE_NO_UNIT_TESTS: 1
+    TRACIE_UPLOAD_TO_MINIO: 1
     # This lets us run several more traces which don't use any features we're
     # missing.
     MESA_GLSL_VERSION_OVERRIDE: "460"

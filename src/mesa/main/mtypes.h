@@ -3211,10 +3211,11 @@ struct gl_shader_compiler_options
    GLboolean LowerPrecisionDerivatives;
 
    /**
-    * This enables 16-bit phis in NIR, 16-bit loop counters, 16-bit indirect
-    * arrays, etc.
+    * This enables lowering of 16b constants.  Some drivers may not
+    * to lower constants to 16b (ie. if the hw can do automatic
+    * narrowing on constant load)
     */
-   GLboolean LowerPrecisionTemporaries;
+   GLboolean LowerPrecisionConstants;
 
    /**
     * \name Forms of indirect addressing the driver cannot do.
@@ -4208,6 +4209,12 @@ struct gl_constants
 
    /** Buffer size used to upload vertices from glBegin/glEnd. */
    unsigned glBeginEndBufferSize;
+
+   /** Whether the driver doesn't want x/y/width/height clipped based on src size
+    *  when doing a copy texture operation (eg: may want out-of-bounds reads that
+    *  produce 0 instead of leaving the texture content undefined).
+    */
+   bool NoClippingOnCopyTex;
 };
 
 

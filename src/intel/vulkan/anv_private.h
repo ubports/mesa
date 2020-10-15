@@ -2026,6 +2026,10 @@ struct anv_descriptor_set {
 
    struct anv_descriptor_pool *pool;
    struct anv_descriptor_set_layout *layout;
+
+   /* Amount of space occupied in the the pool by this descriptor set. It can
+    * be larger than the size of the descriptor set.
+    */
    uint32_t size;
 
    /* State relative to anv_descriptor_pool::bo */
@@ -2287,42 +2291,64 @@ anv_buffer_get_range(struct anv_buffer *buffer, uint64_t offset, uint64_t range)
 }
 
 enum anv_cmd_dirty_bits {
-   ANV_CMD_DIRTY_DYNAMIC_VIEWPORT                  = 1 << 0, /* VK_DYNAMIC_STATE_VIEWPORT */
-   ANV_CMD_DIRTY_DYNAMIC_SCISSOR                   = 1 << 1, /* VK_DYNAMIC_STATE_SCISSOR */
-   ANV_CMD_DIRTY_DYNAMIC_LINE_WIDTH                = 1 << 2, /* VK_DYNAMIC_STATE_LINE_WIDTH */
-   ANV_CMD_DIRTY_DYNAMIC_DEPTH_BIAS                = 1 << 3, /* VK_DYNAMIC_STATE_DEPTH_BIAS */
-   ANV_CMD_DIRTY_DYNAMIC_BLEND_CONSTANTS           = 1 << 4, /* VK_DYNAMIC_STATE_BLEND_CONSTANTS */
-   ANV_CMD_DIRTY_DYNAMIC_DEPTH_BOUNDS              = 1 << 5, /* VK_DYNAMIC_STATE_DEPTH_BOUNDS */
-   ANV_CMD_DIRTY_DYNAMIC_STENCIL_COMPARE_MASK      = 1 << 6, /* VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK */
-   ANV_CMD_DIRTY_DYNAMIC_STENCIL_WRITE_MASK        = 1 << 7, /* VK_DYNAMIC_STATE_STENCIL_WRITE_MASK */
-   ANV_CMD_DIRTY_DYNAMIC_STENCIL_REFERENCE         = 1 << 8, /* VK_DYNAMIC_STATE_STENCIL_REFERENCE */
-   ANV_CMD_DIRTY_PIPELINE                          = 1 << 9,
-   ANV_CMD_DIRTY_INDEX_BUFFER                      = 1 << 10,
-   ANV_CMD_DIRTY_RENDER_TARGETS                    = 1 << 11,
-   ANV_CMD_DIRTY_XFB_ENABLE                        = 1 << 12,
-   ANV_CMD_DIRTY_DYNAMIC_LINE_STIPPLE              = 1 << 13, /* VK_DYNAMIC_STATE_LINE_STIPPLE_EXT */
+   ANV_CMD_DIRTY_DYNAMIC_VIEWPORT                    = 1 << 0, /* VK_DYNAMIC_STATE_VIEWPORT */
+   ANV_CMD_DIRTY_DYNAMIC_SCISSOR                     = 1 << 1, /* VK_DYNAMIC_STATE_SCISSOR */
+   ANV_CMD_DIRTY_DYNAMIC_LINE_WIDTH                  = 1 << 2, /* VK_DYNAMIC_STATE_LINE_WIDTH */
+   ANV_CMD_DIRTY_DYNAMIC_DEPTH_BIAS                  = 1 << 3, /* VK_DYNAMIC_STATE_DEPTH_BIAS */
+   ANV_CMD_DIRTY_DYNAMIC_BLEND_CONSTANTS             = 1 << 4, /* VK_DYNAMIC_STATE_BLEND_CONSTANTS */
+   ANV_CMD_DIRTY_DYNAMIC_DEPTH_BOUNDS                = 1 << 5, /* VK_DYNAMIC_STATE_DEPTH_BOUNDS */
+   ANV_CMD_DIRTY_DYNAMIC_STENCIL_COMPARE_MASK        = 1 << 6, /* VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK */
+   ANV_CMD_DIRTY_DYNAMIC_STENCIL_WRITE_MASK          = 1 << 7, /* VK_DYNAMIC_STATE_STENCIL_WRITE_MASK */
+   ANV_CMD_DIRTY_DYNAMIC_STENCIL_REFERENCE           = 1 << 8, /* VK_DYNAMIC_STATE_STENCIL_REFERENCE */
+   ANV_CMD_DIRTY_PIPELINE                            = 1 << 9,
+   ANV_CMD_DIRTY_INDEX_BUFFER                        = 1 << 10,
+   ANV_CMD_DIRTY_RENDER_TARGETS                      = 1 << 11,
+   ANV_CMD_DIRTY_XFB_ENABLE                          = 1 << 12,
+   ANV_CMD_DIRTY_DYNAMIC_LINE_STIPPLE                = 1 << 13, /* VK_DYNAMIC_STATE_LINE_STIPPLE_EXT */
+   ANV_CMD_DIRTY_DYNAMIC_CULL_MODE                   = 1 << 14, /* VK_DYNAMIC_STATE_CULL_MODE_EXT */
+   ANV_CMD_DIRTY_DYNAMIC_FRONT_FACE                  = 1 << 15, /* VK_DYNAMIC_STATE_FRONT_FACE_EXT */
+   ANV_CMD_DIRTY_DYNAMIC_PRIMITIVE_TOPOLOGY          = 1 << 16, /* VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY_EXT */
+   ANV_CMD_DIRTY_DYNAMIC_VERTEX_INPUT_BINDING_STRIDE = 1 << 17, /* VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE_EXT */
+   ANV_CMD_DIRTY_DYNAMIC_DEPTH_TEST_ENABLE           = 1 << 18, /* VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE_EXT */
+   ANV_CMD_DIRTY_DYNAMIC_DEPTH_WRITE_ENABLE          = 1 << 19, /* VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE_EXT */
+   ANV_CMD_DIRTY_DYNAMIC_DEPTH_COMPARE_OP            = 1 << 20, /* VK_DYNAMIC_STATE_DEPTH_COMPARE_OP_EXT */
+   ANV_CMD_DIRTY_DYNAMIC_DEPTH_BOUNDS_TEST_ENABLE    = 1 << 21, /* VK_DYNAMIC_STATE_DEPTH_BOUNDS_TEST_ENABLE_EXT */
+   ANV_CMD_DIRTY_DYNAMIC_STENCIL_TEST_ENABLE         = 1 << 22, /* VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE_EXT */
+   ANV_CMD_DIRTY_DYNAMIC_STENCIL_OP                  = 1 << 23, /* VK_DYNAMIC_STATE_STENCIL_OP_EXT */
 };
 typedef uint32_t anv_cmd_dirty_mask_t;
 
-#define ANV_CMD_DIRTY_DYNAMIC_ALL                  \
-   (ANV_CMD_DIRTY_DYNAMIC_VIEWPORT |               \
-    ANV_CMD_DIRTY_DYNAMIC_SCISSOR |                \
-    ANV_CMD_DIRTY_DYNAMIC_LINE_WIDTH |             \
-    ANV_CMD_DIRTY_DYNAMIC_DEPTH_BIAS |             \
-    ANV_CMD_DIRTY_DYNAMIC_BLEND_CONSTANTS |        \
-    ANV_CMD_DIRTY_DYNAMIC_DEPTH_BOUNDS |           \
-    ANV_CMD_DIRTY_DYNAMIC_STENCIL_COMPARE_MASK |   \
-    ANV_CMD_DIRTY_DYNAMIC_STENCIL_WRITE_MASK |     \
-    ANV_CMD_DIRTY_DYNAMIC_STENCIL_REFERENCE |      \
-    ANV_CMD_DIRTY_DYNAMIC_LINE_STIPPLE)
+#define ANV_CMD_DIRTY_DYNAMIC_ALL                       \
+   (ANV_CMD_DIRTY_DYNAMIC_VIEWPORT |                    \
+    ANV_CMD_DIRTY_DYNAMIC_SCISSOR |                     \
+    ANV_CMD_DIRTY_DYNAMIC_LINE_WIDTH |                  \
+    ANV_CMD_DIRTY_DYNAMIC_DEPTH_BIAS |                  \
+    ANV_CMD_DIRTY_DYNAMIC_BLEND_CONSTANTS |             \
+    ANV_CMD_DIRTY_DYNAMIC_DEPTH_BOUNDS |                \
+    ANV_CMD_DIRTY_DYNAMIC_STENCIL_COMPARE_MASK |        \
+    ANV_CMD_DIRTY_DYNAMIC_STENCIL_WRITE_MASK |          \
+    ANV_CMD_DIRTY_DYNAMIC_STENCIL_REFERENCE |           \
+    ANV_CMD_DIRTY_DYNAMIC_LINE_STIPPLE |                \
+    ANV_CMD_DIRTY_DYNAMIC_CULL_MODE |                   \
+    ANV_CMD_DIRTY_DYNAMIC_FRONT_FACE |                  \
+    ANV_CMD_DIRTY_DYNAMIC_PRIMITIVE_TOPOLOGY |          \
+    ANV_CMD_DIRTY_DYNAMIC_VERTEX_INPUT_BINDING_STRIDE | \
+    ANV_CMD_DIRTY_DYNAMIC_DEPTH_TEST_ENABLE |           \
+    ANV_CMD_DIRTY_DYNAMIC_DEPTH_WRITE_ENABLE |          \
+    ANV_CMD_DIRTY_DYNAMIC_DEPTH_COMPARE_OP |            \
+    ANV_CMD_DIRTY_DYNAMIC_DEPTH_BOUNDS_TEST_ENABLE |    \
+    ANV_CMD_DIRTY_DYNAMIC_STENCIL_TEST_ENABLE |         \
+    ANV_CMD_DIRTY_DYNAMIC_STENCIL_OP)
 
 static inline enum anv_cmd_dirty_bits
 anv_cmd_dirty_bit_for_vk_dynamic_state(VkDynamicState vk_state)
 {
    switch (vk_state) {
    case VK_DYNAMIC_STATE_VIEWPORT:
+   case VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT_EXT:
       return ANV_CMD_DIRTY_DYNAMIC_VIEWPORT;
    case VK_DYNAMIC_STATE_SCISSOR:
+   case VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT_EXT:
       return ANV_CMD_DIRTY_DYNAMIC_SCISSOR;
    case VK_DYNAMIC_STATE_LINE_WIDTH:
       return ANV_CMD_DIRTY_DYNAMIC_LINE_WIDTH;
@@ -2340,6 +2366,26 @@ anv_cmd_dirty_bit_for_vk_dynamic_state(VkDynamicState vk_state)
       return ANV_CMD_DIRTY_DYNAMIC_STENCIL_REFERENCE;
    case VK_DYNAMIC_STATE_LINE_STIPPLE_EXT:
       return ANV_CMD_DIRTY_DYNAMIC_LINE_STIPPLE;
+   case VK_DYNAMIC_STATE_CULL_MODE_EXT:
+      return ANV_CMD_DIRTY_DYNAMIC_CULL_MODE;
+   case VK_DYNAMIC_STATE_FRONT_FACE_EXT:
+      return ANV_CMD_DIRTY_DYNAMIC_FRONT_FACE;
+   case VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY_EXT:
+      return ANV_CMD_DIRTY_DYNAMIC_PRIMITIVE_TOPOLOGY;
+   case VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE_EXT:
+      return ANV_CMD_DIRTY_DYNAMIC_VERTEX_INPUT_BINDING_STRIDE;
+   case VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE_EXT:
+      return ANV_CMD_DIRTY_DYNAMIC_DEPTH_TEST_ENABLE;
+   case VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE_EXT:
+      return ANV_CMD_DIRTY_DYNAMIC_DEPTH_WRITE_ENABLE;
+   case VK_DYNAMIC_STATE_DEPTH_COMPARE_OP_EXT:
+      return ANV_CMD_DIRTY_DYNAMIC_DEPTH_COMPARE_OP;
+   case VK_DYNAMIC_STATE_DEPTH_BOUNDS_TEST_ENABLE_EXT:
+      return ANV_CMD_DIRTY_DYNAMIC_DEPTH_BOUNDS_TEST_ENABLE;
+   case VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE_EXT:
+      return ANV_CMD_DIRTY_DYNAMIC_STENCIL_TEST_ENABLE;
+   case VK_DYNAMIC_STATE_STENCIL_OP_EXT:
+      return ANV_CMD_DIRTY_DYNAMIC_STENCIL_OP;
    default:
       assert(!"Unsupported dynamic state");
       return 0;
@@ -2561,6 +2607,8 @@ anv_pipe_invalidate_bits_for_access_flags(VkAccessFlags flags)
 struct anv_vertex_binding {
    struct anv_buffer *                          buffer;
    VkDeviceSize                                 offset;
+   VkDeviceSize                                 stride;
+   VkDeviceSize                                 size;
 };
 
 struct anv_xfb_binding {
@@ -2639,9 +2687,35 @@ struct anv_dynamic_state {
    } stencil_reference;
 
    struct {
+      struct {
+         VkStencilOp fail_op;
+         VkStencilOp pass_op;
+         VkStencilOp depth_fail_op;
+         VkCompareOp compare_op;
+      } front;
+      struct {
+         VkStencilOp fail_op;
+         VkStencilOp pass_op;
+         VkStencilOp depth_fail_op;
+         VkCompareOp compare_op;
+      } back;
+   } stencil_op;
+
+   struct {
       uint32_t                                  factor;
       uint16_t                                  pattern;
    } line_stipple;
+
+   VkCullModeFlags                              cull_mode;
+   VkFrontFace                                  front_face;
+   VkPrimitiveTopology                          primitive_topology;
+   bool                                         depth_test_enable;
+   bool                                         depth_write_enable;
+   VkCompareOp                                  depth_compare_op;
+   bool                                         depth_bounds_test_enable;
+   bool                                         stencil_test_enable;
+   bool                                         dyn_vbo_stride;
+   bool                                         dyn_vbo_size;
 };
 
 extern const struct anv_dynamic_state default_dynamic_state;
@@ -2754,6 +2828,8 @@ struct anv_cmd_graphics_state {
    struct anv_vb_cache_range vb_dirty_ranges[33];
 
    struct anv_dynamic_state dynamic;
+
+   uint32_t primitive_topology;
 
    struct {
       struct anv_buffer *index_buffer;
@@ -3339,6 +3415,7 @@ struct anv_graphics_pipeline {
    struct {
       uint32_t                                  sf[7];
       uint32_t                                  depth_stencil_state[3];
+      uint32_t                                  clip[4];
    } gen7;
 
    struct {
@@ -4365,6 +4442,14 @@ anv_get_subpass_id(const struct anv_cmd_state * const cmd_state)
    return subpass_id;
 }
 
+struct anv_performance_configuration_intel {
+   struct vk_object_base      base;
+
+   struct gen_perf_registers *register_config;
+
+   uint64_t                   config_id;
+};
+
 struct gen_perf_config *anv_get_perf(const struct gen_device_info *devinfo, int fd);
 void anv_device_perf_init(struct anv_device *device);
 void anv_perf_write_pass_results(struct gen_perf_config *perf,
@@ -4427,6 +4512,9 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(anv_shader_module, base, VkShaderModule,
 VK_DEFINE_NONDISP_HANDLE_CASTS(anv_ycbcr_conversion, base,
                                VkSamplerYcbcrConversion,
                                VK_OBJECT_TYPE_SAMPLER_YCBCR_CONVERSION)
+VK_DEFINE_NONDISP_HANDLE_CASTS(anv_performance_configuration_intel, base,
+                               VkPerformanceConfigurationINTEL,
+                               VK_OBJECT_TYPE_PERFORMANCE_CONFIGURATION_INTEL)
 
 /* Gen-specific function declarations */
 #ifdef genX

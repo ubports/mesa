@@ -273,22 +273,14 @@ iris_fix_edge_flags(nir_shader *nir)
       return false;
    }
 
-   nir_variable *var = NULL;
-   nir_foreach_variable(v, &nir->outputs) {
-      if (v->data.location == VARYING_SLOT_EDGE) {
-         var = v;
-         break;
-      }
-   }
-
+   nir_variable *var = nir_find_variable_with_location(nir, nir_var_shader_out,
+                                                       VARYING_SLOT_EDGE);
    if (!var) {
       nir_shader_preserve_all_metadata(nir);
       return false;
    }
 
-   exec_node_remove(&var->node);
    var->data.mode = nir_var_shader_temp;
-   exec_list_push_tail(&nir->globals, &var->node);
    nir->info.outputs_written &= ~VARYING_BIT_EDGE;
    nir->info.inputs_read &= ~VERT_BIT_EDGEFLAG;
    nir_fixup_deref_modes(nir);
@@ -1843,9 +1835,6 @@ get_vue_prog_data(struct iris_context *ice, gl_shader_stage stage)
    return (void *) ice->shaders.prog[stage]->prog_data;
 }
 
-// XXX: iris_compiled_shaders are space-leaking :(
-// XXX: do remember to unbind them if deleting them.
-
 /**
  * Update the current shader variants for the given state.
  *
@@ -2426,6 +2415,8 @@ iris_delete_shader_state(struct pipe_context *ctx, void *state, gl_shader_stage 
       pipe_resource_reference(&ish->const_data, NULL);
       pipe_resource_reference(&ish->const_data_state.res, NULL);
    }
+
+   iris_delete_shader_variants(ice, ish);
 
    ralloc_free(ish->nir);
    free(ish);

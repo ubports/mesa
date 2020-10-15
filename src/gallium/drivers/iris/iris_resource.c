@@ -782,8 +782,9 @@ iris_resource_finish_aux_import(struct pipe_screen *pscreen,
 
    if (clear_color_state_size > 0) {
       res->aux.clear_color_bo =
-         iris_bo_alloc(screen->bufmgr, "clear color buffer",
-                       clear_color_state_size, IRIS_MEMZONE_OTHER);
+         iris_bo_alloc_tiled(screen->bufmgr, "clear color_buffer",
+                             clear_color_state_size, 1, IRIS_MEMZONE_OTHER,
+                             I915_TILING_NONE, 0, BO_ALLOC_ZEROED);
       res->aux.clear_color_offset = 0;
    }
 
@@ -1045,7 +1046,7 @@ iris_resource_from_handle(struct pipe_screen *pscreen,
       else
          tiling = -1;
       res->bo = iris_bo_import_dmabuf(bufmgr, whandle->handle,
-                                      tiling, whandle->stride);
+                                      tiling);
       break;
    case WINSYS_HANDLE_TYPE_SHARED:
       res->bo = iris_bo_gem_create_from_name(bufmgr, "winsys image",
@@ -1275,6 +1276,7 @@ iris_resource_get_handle(struct pipe_screen *pscreen,
 
 #ifndef NDEBUG
    enum isl_aux_usage allowed_usage =
+      usage & PIPE_HANDLE_USAGE_EXPLICIT_FLUSH ? res->aux.usage :
       res->mod_info ? res->mod_info->aux_usage : ISL_AUX_USAGE_NONE;
 
    if (res->aux.usage != allowed_usage) {

@@ -36,6 +36,8 @@
 #include "ir3_compiler.h"
 #include "ir3_nir.h"
 
+#include "disasm.h"
+
 int
 ir3_glsl_type_size(const struct glsl_type *type, bool bindless)
 {
@@ -122,18 +124,12 @@ fixup_regfootprint(struct ir3_shader_variant *v)
  */
 void * ir3_shader_assemble(struct ir3_shader_variant *v)
 {
-	unsigned gpu_id = v->shader->compiler->gpu_id;
+	const struct ir3_compiler *compiler = v->shader->compiler;
 	void *bin;
 
 	bin = ir3_assemble(v);
 	if (!bin)
 		return NULL;
-
-	if (gpu_id >= 400) {
-		v->instrlen = v->info.sizedwords / (2 * 16);
-	} else {
-		v->instrlen = v->info.sizedwords / (2 * 4);
-	}
 
 	/* NOTE: if relative addressing is used, we set constlen in
 	 * the compiler (to worst-case value) since we don't know in
@@ -145,7 +141,7 @@ void * ir3_shader_assemble(struct ir3_shader_variant *v)
 	 * uploads are in units of 4 dwords. Round it up here to make calculations
 	 * regarding the shared constlen simpler.
 	 */
-	if (gpu_id >= 400)
+	if (compiler->gpu_id >= 400)
 		v->constlen = align(v->constlen, 4);
 
 	fixup_regfootprint(v);
@@ -569,13 +565,13 @@ ir3_shader_disasm(struct ir3_shader_variant *so, uint32_t *bin, FILE *out)
 	}
 
 	const struct ir3_const_state *const_state = ir3_const_state(so);
-	for (i = 0; i < const_state->immediates_count; i++) {
+	for (i = 0; i < DIV_ROUND_UP(const_state->immediates_count, 4); i++) {
 		fprintf(out, "@const(c%d.x)\t", const_state->offsets.immediate + i);
 		fprintf(out, "0x%08x, 0x%08x, 0x%08x, 0x%08x\n",
-				const_state->immediates[i].val[0],
-				const_state->immediates[i].val[1],
-				const_state->immediates[i].val[2],
-				const_state->immediates[i].val[3]);
+				const_state->immediates[i * 4 + 0],
+				const_state->immediates[i * 4 + 1],
+				const_state->immediates[i * 4 + 2],
+				const_state->immediates[i * 4 + 3]);
 	}
 
 	disasm_a3xx(bin, so->info.sizedwords, 0, out, ir->compiler->gpu_id);

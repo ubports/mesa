@@ -183,7 +183,7 @@ optimize_nir(struct nir_shader *s)
 static bool
 check_psiz(struct nir_shader *s)
 {
-   nir_foreach_variable(var, &s->outputs) {
+   nir_foreach_shader_out_variable(var, s) {
       if (var->data.location == VARYING_SLOT_PSIZ) {
          /* genuine PSIZ outputs will have this set */
          return !!var->data.explicit_location;
@@ -242,7 +242,8 @@ zink_compile_nir(struct zink_screen *screen, struct nir_shader *nir,
    }
 
    ret->num_bindings = 0;
-   nir_foreach_variable(var, &nir->uniforms) {
+   nir_foreach_variable_with_modes(var, nir, nir_var_uniform |
+                                             nir_var_mem_ubo) {
       if (var->data.mode == nir_var_mem_ubo) {
          int binding = zink_binding(nir->info.stage,
                                     VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,

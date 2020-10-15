@@ -11,6 +11,7 @@ parser.add_argument("--pipeline-info")
 parser.add_argument("--base-artifacts-url")
 parser.add_argument("--mesa-url")
 parser.add_argument("--device-type")
+parser.add_argument("--dtb", nargs='?', default="")
 parser.add_argument("--kernel-image-name")
 parser.add_argument("--kernel-image-type", nargs='?', default="")
 parser.add_argument("--gpu-version")
@@ -33,6 +34,7 @@ values['pipeline_info'] = args.pipeline_info
 values['base_artifacts_url'] = args.base_artifacts_url
 values['mesa_url'] = args.mesa_url
 values['device_type'] = args.device_type
+values['dtb'] = args.dtb
 values['kernel_image_name'] = args.kernel_image_name
 values['kernel_image_type'] = args.kernel_image_type
 values['gpu_version'] = args.gpu_version
@@ -40,10 +42,6 @@ values['boot_method'] = args.boot_method
 values['tags'] = args.lava_tags
 values['env_vars'] = env_vars
 values['deqp_version'] = args.deqp_version
-
-# We need a sane date to check certificates, but don't want to wait to get
-# time from the network after boot.
-values['date'] = datetime.datetime.now().strftime("%Y%m%d %H%M")
 
 f = open(os.path.splitext(os.path.basename(args.template))[0], "w")
 f.write(template.render(values))

@@ -259,6 +259,7 @@ anv_shader_compile_to_nir(struct anv_device *device,
    NIR_PASS_V(nir, nir_lower_variable_initializers, nir_var_function_temp);
    NIR_PASS_V(nir, nir_lower_returns);
    NIR_PASS_V(nir, nir_inline_functions);
+   NIR_PASS_V(nir, nir_copy_prop);
    NIR_PASS_V(nir, nir_opt_deref);
 
    /* Pick off the single entrypoint that we want */
@@ -1012,7 +1013,7 @@ anv_pipeline_link_fs(const struct brw_compiler *compiler,
     */
    nir_function_impl *impl = nir_shader_get_entrypoint(stage->nir);
    bool deleted_output = false;
-   nir_foreach_variable_safe(var, &stage->nir->outputs) {
+   nir_foreach_shader_out_variable_safe(var, stage->nir) {
       /* TODO: We don't delete depth/stencil writes.  We probably could if the
        * subpass doesn't have a depth/stencil attachment.
        */
@@ -1504,13 +1505,38 @@ anv_pipeline_compile_graphics(struct anv_graphics_pipeline *pipeline,
 
       void *stage_ctx = ralloc_context(NULL);
 
+      anv_pipeline_lower_nir(&pipeline->base, stage_ctx, &stages[s], layout);
+
+      if (prev_stage && compiler->glsl_compiler_options[s].NirOptions->unify_interfaces) {
+         prev_stage->nir->info.outputs_written |= stages[s].nir->info.inputs_read &
+                  ~(VARYING_BIT_TESS_LEVEL_INNER | VARYING_BIT_TESS_LEVEL_OUTER);
+         stages[s].nir->info.inputs_read |= prev_stage->nir->info.outputs_written &
+                  ~(VARYING_BIT_TESS_LEVEL_INNER | VARYING_BIT_TESS_LEVEL_OUTER);
+         prev_stage->nir->info.patch_outputs_written |= stages[s].nir->info.patch_inputs_read;
+         stages[s].nir->info.patch_inputs_read |= prev_stage->nir->info.patch_outputs_written;
+      }
+
+      ralloc_free(stage_ctx);
+
+      stages[s].feedback.duration += os_time_get_nano() - stage_start;
+
+      prev_stage = &stages[s];
+   }
+
+   prev_stage = NULL;
+   for (unsigned s = 0; s < MESA_SHADER_STAGES; s++) {
+      if (!stages[s].entrypoint)
+         continue;
+
+      int64_t stage_start = os_time_get_nano();
+
+      void *stage_ctx = ralloc_context(NULL);
+
       nir_xfb_info *xfb_info = NULL;
       if (s == MESA_SHADER_VERTEX ||
           s == MESA_SHADER_TESS_EVAL ||
           s == MESA_SHADER_GEOMETRY)
          xfb_info = nir_gather_xfb_info(stages[s].nir, stage_ctx);
-
-      anv_pipeline_lower_nir(&pipeline->base, stage_ctx, &stages[s], layout);
 
       switch (s) {
       case MESA_SHADER_VERTEX:
@@ -1870,6 +1896,36 @@ copy_non_dynamic_state(struct anv_graphics_pipeline *pipeline,
          pCreateInfo->pRasterizationState->depthBiasSlopeFactor;
    }
 
+   if (states & ANV_CMD_DIRTY_DYNAMIC_CULL_MODE) {
+      assert(pCreateInfo->pRasterizationState);
+      dynamic->cull_mode =
+         pCreateInfo->pRasterizationState->cullMode;
+   }
+
+   if (states & ANV_CMD_DIRTY_DYNAMIC_FRONT_FACE) {
+      assert(pCreateInfo->pRasterizationState);
+      dynamic->front_face =
+         pCreateInfo->pRasterizationState->frontFace;
+   }
+
+   if (states & ANV_CMD_DIRTY_DYNAMIC_PRIMITIVE_TOPOLOGY) {
+      assert(pCreateInfo->pInputAssemblyState);
+      bool has_tess = false;
+      for (uint32_t i = 0; i < pCreateInfo->stageCount; i++) {
+         const VkPipelineShaderStageCreateInfo *sinfo = &pCreateInfo->pStages[i];
+         gl_shader_stage stage = vk_to_mesa_shader_stage(sinfo->stage);
+         if (stage == MESA_SHADER_TESS_CTRL || stage == MESA_SHADER_TESS_EVAL)
+            has_tess = true;
+      }
+       if (has_tess) {
+          const VkPipelineTessellationStateCreateInfo *tess_info =
+             pCreateInfo->pTessellationState;
+          dynamic->primitive_topology = _3DPRIM_PATCHLIST(tess_info->patchControlPoints);
+       } else {
+         dynamic->primitive_topology = pCreateInfo->pInputAssemblyState->topology;
+       }
+   }
+
    /* Section 9.2 of the Vulkan 1.0.15 spec says:
     *
     *    pColorBlendState is [...] NULL if the pipeline has rasterization
@@ -1935,6 +1991,40 @@ copy_non_dynamic_state(struct anv_graphics_pipeline *pipeline,
             pCreateInfo->pDepthStencilState->front.reference;
          dynamic->stencil_reference.back =
             pCreateInfo->pDepthStencilState->back.reference;
+      }
+
+      if (states & ANV_CMD_DIRTY_DYNAMIC_DEPTH_TEST_ENABLE) {
+         dynamic->depth_test_enable =
+            pCreateInfo->pDepthStencilState->depthTestEnable;
+      }
+
+      if (states & ANV_CMD_DIRTY_DYNAMIC_DEPTH_WRITE_ENABLE) {
+         dynamic->depth_write_enable =
+            pCreateInfo->pDepthStencilState->depthWriteEnable;
+      }
+
+      if (states & ANV_CMD_DIRTY_DYNAMIC_DEPTH_COMPARE_OP) {
+         dynamic->depth_compare_op =
+            pCreateInfo->pDepthStencilState->depthCompareOp;
+      }
+
+      if (states & ANV_CMD_DIRTY_DYNAMIC_DEPTH_BOUNDS_TEST_ENABLE) {
+         dynamic->depth_bounds_test_enable =
+            pCreateInfo->pDepthStencilState->depthBoundsTestEnable;
+      }
+
+      if (states & ANV_CMD_DIRTY_DYNAMIC_STENCIL_TEST_ENABLE) {
+         dynamic->stencil_test_enable =
+            pCreateInfo->pDepthStencilState->stencilTestEnable;
+      }
+
+      if (states & ANV_CMD_DIRTY_DYNAMIC_STENCIL_OP) {
+         const VkPipelineDepthStencilStateCreateInfo *info =
+            pCreateInfo->pDepthStencilState;
+         memcpy(&dynamic->stencil_op.front, &info->front,
+                sizeof(dynamic->stencil_op.front));
+         memcpy(&dynamic->stencil_op.back, &info->back,
+                sizeof(dynamic->stencil_op.back));
       }
    }
 

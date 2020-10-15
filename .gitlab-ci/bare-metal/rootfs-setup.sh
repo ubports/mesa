@@ -7,6 +7,8 @@ mkdir -p $rootfs_dst/results
 # Set up the init script that brings up the system.
 cp $BM/init.sh $rootfs_dst/init
 
+cp $BM/capture-devcoredump.sh $rootfs_dst/
+
 set +x
 # Pass through relevant env vars from the gitlab job to the baremetal init script
 touch $rootfs_dst/set-job-env-vars.sh
@@ -15,6 +17,7 @@ for var in \
     BARE_METAL_TEST_SCRIPT \
     CI_COMMIT_BRANCH \
     CI_COMMIT_TITLE \
+    CI_JOB_JWT \
     CI_JOB_ID \
     CI_JOB_URL \
     CI_MERGE_REQUEST_SOURCE_BRANCH_NAME \
@@ -22,6 +25,7 @@ for var in \
     CI_NODE_INDEX \
     CI_NODE_TOTAL \
     CI_PIPELINE_ID \
+    CI_PROJECT_PATH \
     CI_RUNNER_DESCRIPTION \
     DEQP_CASELIST_FILTER \
     DEQP_EXPECTED_FAILS \
@@ -40,6 +44,7 @@ for var in \
     MESA_GLES_VERSION_OVERRIDE \
     NIR_VALIDATE \
     TRACIE_NO_UNIT_TESTS \
+    TRACIE_UPLOAD_TO_MINIO \
     TU_DEBUG \
     VK_DRIVER \
     ; do

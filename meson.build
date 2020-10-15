@@ -51,6 +51,7 @@ pre_args = [
 
 with_vulkan_icd_dir = get_option('vulkan-icd-dir')
 with_tests = get_option('build-tests')
+with_aco_tests = get_option('build-aco-tests')
 with_glx_read_only_text = get_option('glx-read-only-text')
 with_glx_direct = get_option('glx-direct')
 with_osmesa = get_option('osmesa')
@@ -275,6 +276,9 @@ endif
 if with_gallium_tegra and not with_gallium_nouveau
   error('tegra driver requires nouveau driver')
 endif
+if with_aco_tests and not with_amd_vk
+  error('ACO tests require Radv')
+endif
 
 if host_machine.system() == 'darwin'
   with_dri_platform = 'apple'
@@ -386,7 +390,7 @@ elif _xlib_lease == 'false'
   warning('xlib_lease option "false" deprecated, please use "disabled" instead.')
 endif
 if _xlib_lease == 'auto'
-  with_xlib_lease = with_platform_x11 and with_gbm
+  with_xlib_lease = with_platform_x11 and system_has_kms_drm
 else
   with_xlib_lease = _xlib_lease == 'enabled'
 endif
@@ -420,8 +424,10 @@ else
 endif
 
 # Android uses emutls for versions <= P/28. For USE_ELF_TLS we need ELF TLS.
-if not ['windows', 'freebsd'].contains(host_machine.system()) and (not with_platform_android or get_option('platform-sdk-version') >= 29)
+use_elf_tls = false
+if not ['windows', 'freebsd', 'openbsd'].contains(host_machine.system()) and (not with_platform_android or get_option('platform-sdk-version') >= 29)
   pre_args += '-DUSE_ELF_TLS'
+  use_elf_tls = true
 endif
 
 if with_glx != 'disabled'
@@ -538,6 +544,10 @@ endif
 
 if with_gallium_zink
   dep_vulkan = dependency('vulkan')
+endif
+
+if with_vulkan_overlay_layer or with_aco_tests
+  prog_glslang = find_program('glslangValidator')
 endif
 
 _xvmc = get_option('gallium-xvmc')
@@ -743,7 +753,7 @@ _power8 = get_option('power8')
 if _power8 == 'true'
   _power8 = 'enabled'
   warning('power8 option "true" deprecated, please use "enabled" instead.')
-elif _power8 == 'disabled'
+elif _power8 == 'false'
   _power8 = 'disabled'
   warning('power8 option "false" deprecated, please use "disabled" instead.')
 endif
@@ -829,19 +839,29 @@ endif
 if with_gbm
   pre_args += '-DHAVE_DRM_PLATFORM'
 endif
+
+with_android_stub = get_option('android-stub')
+if with_android_stub and not with_platform_android
+  error('`-D android-stub=true` makes no sense without `-D platforms=android`')
+endif
+
 if with_platform_android
-  dep_android = [
-    dependency('cutils'),
-    dependency('hardware'),
-    dependency('sync'),
+  if not with_android_stub
+    dep_android = [
+      dependency('cutils'),
+      dependency('hardware'),
+      dependency('sync'),
+      dependency('backtrace')
+    ]
+    if get_option('platform-sdk-version') >= 26
+      dep_android += dependency('nativewindow')
+    endif
+  endif
+  pre_args += [
+    '-DHAVE_ANDROID_PLATFORM',
+    '-DANDROID',
+    '-DANDROID_API_LEVEL=' + get_option('platform-sdk-version').to_string()
   ]
-  if with_gallium
-    dep_android += dependency('backtrace')
-  endif
-  if get_option('platform-sdk-version') >= 26
-    dep_android += dependency('nativewindow')
-  endif
-  pre_args += '-DHAVE_ANDROID_PLATFORM'
 endif
 if with_platform_haiku
   pre_args += '-DHAVE_HAIKU_PLATFORM'
@@ -941,6 +961,8 @@ elif host_machine.system() == 'windows'
   else
     pre_args += ['-D__MSVCRT_VERSION__=0x0700']
   endif
+elif host_machine.system() == 'openbsd'
+  pre_args += '-D_ISOC11_SOURCE'
 endif
 
 # Check for generic C arguments
@@ -1190,7 +1212,7 @@ if not ['linux'].contains(host_machine.system())
   endif
 endif
 
-foreach h : ['xlocale.h', 'linux/futex.h', 'endian.h', 'dlfcn.h', 'execinfo.h', 'sys/shm.h', 'cet.h']
+foreach h : ['xlocale.h', 'linux/futex.h', 'endian.h', 'dlfcn.h', 'execinfo.h', 'sys/shm.h', 'cet.h', 'pthread_np.h']
   if cc.check_header(h)
     pre_args += '-DHAVE_@0@'.format(h.to_upper().underscorify())
   endif
@@ -1328,12 +1350,6 @@ if dep_thread.found() and host_machine.system() != 'windows'
       prefix : '#include <pthread.h>',
       args : '-D_GNU_SOURCE')
     pre_args += '-DHAVE_PTHREAD_SETAFFINITY'
-  endif
-  if cc.has_function(
-      'pthread_setaffinity_np',
-      dependencies : dep_thread,
-      prefix : '#include <pthread_np.h>')
-    pre_args += '-DPTHREAD_SETAFFINITY_IN_NP_HEADER'
   endif
 endif
 if host_machine.system() != 'windows'
@@ -1492,6 +1508,7 @@ endif
 if with_llvm
   pre_args += '-DLLVM_AVAILABLE'
   pre_args += '-DMESA_LLVM_VERSION_STRING="@0@"'.format(dep_llvm.version())
+  pre_args += '-DLLVM_IS_SHARED=@0@'.format(_shared_llvm.to_int())
 
   # LLVM can be built without rtti, turning off rtti changes the ABI of C++
   # programs, so we need to build all C++ code in mesa without rtti as well to
@@ -1536,7 +1553,7 @@ endif
 
 dep_glvnd = null_dep
 if with_glvnd
-  dep_glvnd = dependency('libglvnd', version : '>= 1.2.0')
+  dep_glvnd = dependency('libglvnd', version : '>= 1.3.2')
   pre_args += '-DUSE_LIBGLVND=1'
 endif
 
@@ -1695,7 +1712,7 @@ if with_platform_x11
     dep_x11 = dependency('x11')
     dep_xext = dependency('xext')
     dep_xdamage = dependency('xdamage', version : '>= 1.1')
-    dep_xfixes = dependency('xfixes')
+    dep_xfixes = dependency('xfixes', version : '>= 2.0')
     dep_xcb_glx = dependency('xcb-glx', version : '>= 1.8.1')
   endif
   if (with_any_vk or with_glx == 'dri' or with_egl or
@@ -1750,10 +1767,10 @@ endif
 _sensors = get_option('lmsensors')
 if _sensors == 'true'
   _sensors = 'enabled'
-  warning('sensors option "true" deprecated, please use "enabled" instead.')
+  warning('lmsensors option "true" deprecated, please use "enabled" instead.')
 elif _sensors == 'false'
   _sensors = 'disabled'
-  warning('sensors option "false" deprecated, please use "disabled" instead.')
+  warning('lmsensors option "false" deprecated, please use "disabled" instead.')
 endif
 if _sensors != 'disabled'
   dep_lmsensors = cc.find_library('sensors', required : _sensors == 'enabled')
@@ -1813,6 +1830,12 @@ if dep_m.found()
 endif
 if dep_dl.found()
   gl_priv_libs += '-ldl'
+endif
+
+# FIXME: autotools lists this as incomplete
+gbm_priv_libs = []
+if dep_dl.found()
+  gbm_priv_libs += '-ldl'
 endif
 
 pkg = import('pkgconfig')
