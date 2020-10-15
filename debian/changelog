@@ -1,3 +1,9 @@
+mesa (20.2.1~git-0ubports0) xenial; urgency=medium
+
+  * Update from upstream tag 20.2.1
+
+ -- Dalton Durst <dalton@ubports.com>  Thu, 15 Oct 2020 14:21:07 -0500
+
 mesa (20.2.0~git-1ubports1) xenial; urgency=medium
 
   * Update from upstream master
