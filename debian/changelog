@@ -1,3 +1,9 @@
+mesa (20.2.1~git-1ubports0) xenial; urgency=medium
+
+  * Do not build the mirclient platform
+
+ -- Dalton Durst <dalton@ubports.com>  Mon, 19 Oct 2020 17:01:50 -0500
+
 mesa (20.2.1~git-0ubports0) xenial; urgency=medium
 
   * Update from upstream tag 20.2.1
