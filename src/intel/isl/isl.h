@@ -85,6 +85,10 @@ struct brw_image_param;
 #define ISL_DEV_IS_BAYTRAIL(__dev) ((__dev)->info->is_baytrail)
 #endif
 
+#ifndef ISL_DEV_IS_GEN12HP
+#define ISL_DEV_IS_GEN12HP(__dev) (gen_device_info_is_12hp((__dev)->info))
+#endif
+
 #ifndef ISL_DEV_USE_SEPARATE_STENCIL
 /**
  * You can define this as a compile-time constant in the CFLAGS. For example,
@@ -298,6 +302,7 @@ enum isl_format {
    ISL_FORMAT_BC7_UNORM_SRGB =                                 419,
    ISL_FORMAT_BC6H_UF16 =                                      420,
    ISL_FORMAT_PLANAR_420_8 =                                   421,
+   ISL_FORMAT_PLANAR_420_16 =                                  422,
    ISL_FORMAT_R8G8B8_UNORM_SRGB =                              424,
    ISL_FORMAT_ETC1_RGB8 =                                      425,
    ISL_FORMAT_ETC2_RGB8 =                                      426,
@@ -374,6 +379,10 @@ enum isl_format {
     * explicit number.  We'll just let the C compiler assign it for us.  Any
     * actual hardware formats *must* come before these in the list.
     */
+
+   /* Formats for the aux-map */
+   ISL_FORMAT_PLANAR_420_10,
+   ISL_FORMAT_PLANAR_420_12,
 
    /* Formats for auxiliary surfaces */
    ISL_FORMAT_HIZ,
@@ -912,6 +921,10 @@ typedef uint64_t isl_surf_usage_flags_t;
 #define ISL_SURF_USAGE_HIZ_BIT                 (1u << 13)
 #define ISL_SURF_USAGE_MCS_BIT                 (1u << 14)
 #define ISL_SURF_USAGE_CCS_BIT                 (1u << 15)
+#define ISL_SURF_USAGE_VERTEX_BUFFER_BIT       (1u << 16)
+#define ISL_SURF_USAGE_INDEX_BUFFER_BIT        (1u << 17)
+#define ISL_SURF_USAGE_CONSTANT_BUFFER_BIT     (1u << 18)
+#define ISL_SURF_USAGE_STAGING_BIT             (1u << 19)
 /** @} */
 
 /**
@@ -1067,6 +1080,7 @@ struct isl_device {
    struct {
       uint32_t internal;
       uint32_t external;
+      uint32_t l1_hdc_l3_llc;
    } mocs;
 };
 
@@ -1122,6 +1136,9 @@ struct isl_format_layout {
       } channels;
       struct isl_channel_layout channels_array[7];
    };
+
+   /** Set if all channels have the same isl_base_type. Otherwise, ISL_BASE_VOID. */
+   enum isl_base_type uniform_channel_type;
 
    enum isl_colorspace colorspace;
    enum isl_txc txc;
@@ -1633,7 +1650,10 @@ isl_format_has_bc_compression(enum isl_format fmt)
 static inline bool
 isl_format_is_planar(enum isl_format fmt)
 {
-   return fmt == ISL_FORMAT_PLANAR_420_8;
+   return fmt == ISL_FORMAT_PLANAR_420_8 ||
+          fmt == ISL_FORMAT_PLANAR_420_10 ||
+          fmt == ISL_FORMAT_PLANAR_420_12 ||
+          fmt == ISL_FORMAT_PLANAR_420_16;
 }
 
 static inline bool
@@ -1832,6 +1852,13 @@ isl_aux_state_has_valid_aux(enum isl_aux_state state)
    return state != ISL_AUX_STATE_AUX_INVALID;
 }
 
+extern const struct isl_drm_modifier_info isl_drm_modifier_info_list[];
+
+#define isl_drm_modifier_info_for_each(__info) \
+   for (const struct isl_drm_modifier_info *__info = isl_drm_modifier_info_list; \
+        __info->modifier != DRM_FORMAT_MOD_INVALID; \
+        ++__info)
+
 const struct isl_drm_modifier_info * ATTRIBUTE_CONST
 isl_drm_modifier_get_info(uint64_t modifier);
 
@@ -1873,10 +1900,23 @@ isl_drm_modifier_get_default_aux_state(uint64_t modifier)
       return ISL_AUX_STATE_AUX_INVALID;
 
    assert(mod_info->aux_usage == ISL_AUX_USAGE_CCS_E ||
-          mod_info->aux_usage == ISL_AUX_USAGE_GEN12_CCS_E);
+          mod_info->aux_usage == ISL_AUX_USAGE_GEN12_CCS_E ||
+          mod_info->aux_usage == ISL_AUX_USAGE_MC);
    return mod_info->supports_clear_color ? ISL_AUX_STATE_COMPRESSED_CLEAR :
                                            ISL_AUX_STATE_COMPRESSED_NO_CLEAR;
 }
+
+/**
+ * Return the modifier's score, which indicates the driver's preference for the
+ * modifier relative to others. A higher score is better. Zero means
+ * unsupported.
+ *
+ * Intended to assist selection of a modifier from an externally provided list,
+ * such as VkImageDrmFormatModifierListCreateInfoEXT.
+ */
+uint32_t
+isl_drm_modifier_get_score(const struct gen_device_info *devinfo,
+                           uint64_t modifier);
 
 struct isl_extent2d ATTRIBUTE_CONST
 isl_get_interleaved_msaa_px_size_sa(uint32_t samples);
@@ -1986,6 +2026,8 @@ struct isl_swizzle
 isl_swizzle_compose(struct isl_swizzle first, struct isl_swizzle second);
 struct isl_swizzle
 isl_swizzle_invert(struct isl_swizzle swizzle);
+
+uint32_t isl_mocs(const struct isl_device *dev, isl_surf_usage_flags_t usage);
 
 #define isl_surf_init(dev, surf, ...) \
    isl_surf_init_s((dev), (surf), \
@@ -2354,6 +2396,48 @@ isl_memcpy_tiled_to_linear(uint32_t xt1, uint32_t xt2,
                            enum isl_tiling tiling,
                            isl_memcpy_type copy_type);
 
+/**
+ * @brief computes the tile_w (in bytes) and tile_h (in rows) of
+ * different tiling patterns.
+ */
+static inline void
+isl_get_tile_dims(enum isl_tiling tiling, uint32_t cpp,
+                  uint32_t *tile_w, uint32_t *tile_h)
+{
+   switch (tiling) {
+   case ISL_TILING_X:
+      *tile_w = 512;
+      *tile_h = 8;
+      break;
+   case ISL_TILING_Y0:
+      *tile_w = 128;
+      *tile_h = 32;
+      break;
+   case ISL_TILING_LINEAR:
+      *tile_w = cpp;
+      *tile_h = 1;
+      break;
+   default:
+      unreachable("not reached");
+   }
+}
+
+/**
+ * @brief Computes masks that may be used to select the bits of the X
+ * and Y coordinates that indicate the offset within a tile.  If the BO is
+ * untiled, the masks are set to 0.
+ */
+static inline void
+isl_get_tile_masks(enum isl_tiling tiling, uint32_t cpp,
+                   uint32_t *mask_x, uint32_t *mask_y)
+{
+   uint32_t tile_w_bytes, tile_h;
+
+   isl_get_tile_dims(tiling, cpp, &tile_w_bytes, &tile_h);
+
+   *mask_x = tile_w_bytes / cpp - 1;
+   *mask_y = tile_h - 1;
+}
 #ifdef __cplusplus
 }
 #endif

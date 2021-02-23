@@ -29,6 +29,22 @@
 #include "compiler/brw_compiler.h"
 #include "compiler/brw_nir.h"
 
+const char *
+blorp_shader_type_to_name(enum blorp_shader_type type)
+{
+   static const char *shader_name[] = {
+      [BLORP_SHADER_TYPE_COPY]                = "BLORP-copy",
+      [BLORP_SHADER_TYPE_BLIT]                = "BLORP-blit",
+      [BLORP_SHADER_TYPE_CLEAR]               = "BLORP-clear",
+      [BLORP_SHADER_TYPE_MCS_PARTIAL_RESOLVE] = "BLORP-mcs-partial-resolve",
+      [BLORP_SHADER_TYPE_LAYER_OFFSET_VS]     = "BLORP-layer-offset-vs",
+      [BLORP_SHADER_TYPE_GEN4_SF]             = "BLORP-gen4-sf",
+   };
+   assert(type < ARRAY_SIZE(shader_name));
+
+   return shader_name[type];
+}
+
 void
 blorp_init(struct blorp_context *blorp, void *driver_ctx,
            struct isl_device *isl_dev)
@@ -63,7 +79,7 @@ void
 brw_blorp_surface_info_init(struct blorp_context *blorp,
                             struct brw_blorp_surface_info *info,
                             const struct blorp_surf *surf,
-                            unsigned int level, unsigned int layer,
+                            unsigned int level, float layer,
                             enum isl_format format, bool is_render_target)
 {
    memset(info, 0, sizeof(*info));
@@ -180,7 +196,6 @@ blorp_compile_fs(struct blorp_context *blorp, void *mem_ctx,
 
    memset(wm_prog_data, 0, sizeof(*wm_prog_data));
 
-   assert(exec_list_is_empty(&nir->uniforms));
    wm_prog_data->base.nr_params = 0;
    wm_prog_data->base.param = NULL;
 
@@ -366,35 +381,5 @@ blorp_hiz_op(struct blorp_batch *batch, struct blorp_surf *surf,
       params.num_samples = params.depth.surf.samples;
 
       batch->blorp->exec(batch, &params);
-   }
-}
-
-void
-blorp_hiz_stencil_op(struct blorp_batch *batch, struct blorp_surf *stencil,
-                     uint32_t level, uint32_t start_layer,
-                     uint32_t num_layers, enum isl_aux_op op)
-{
-   struct blorp_params params;
-   blorp_params_init(&params);
-
-   params.hiz_op = op;
-   params.full_surface_hiz_op = true;
-
-   for (uint32_t a = 0; a < num_layers; a++) {
-      const uint32_t layer = start_layer + a;
-
-         brw_blorp_surface_info_init(batch->blorp, &params.stencil, stencil, level,
-                                     layer, stencil->surf->format, true);
-         params.x1 = minify(params.stencil.surf.logical_level0_px.width,
-                            params.stencil.view.base_level);
-         params.y1 = minify(params.stencil.surf.logical_level0_px.height,
-                            params.stencil.view.base_level);
-         params.dst.surf.samples = params.stencil.surf.samples;
-         params.dst.surf.logical_level0_px =
-            params.stencil.surf.logical_level0_px;
-         params.dst.view = params.stencil.view;
-         params.num_samples = params.stencil.surf.samples;
-
-         batch->blorp->exec(batch, &params);
    }
 }

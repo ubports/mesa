@@ -52,7 +52,7 @@ bool r600_prepare_for_dma_blit(struct r600_common_context *rctx,
 			       unsigned src_level,
 			       const struct pipe_box *src_box)
 {
-	if (!rctx->dma.cs)
+	if (!rctx->dma.cs.priv)
 		return false;
 
 	if (rdst->surface.bpe != rsrc->surface.bpe)
@@ -830,7 +830,7 @@ void r600_print_texture_info(struct r600_common_screen *rscreen,
 	/* Common parameters. */
 	u_log_printf(log, "  Info: npix_x=%u, npix_y=%u, npix_z=%u, blk_w=%u, "
 		"blk_h=%u, array_size=%u, last_level=%u, "
-		"bpe=%u, nsamples=%u, flags=0x%x, %s\n",
+		"bpe=%u, nsamples=%u, flags=0x%"PRIx64", %s\n",
 		rtex->resource.b.b.width0, rtex->resource.b.b.height0,
 		rtex->resource.b.b.depth0, rtex->surface.blk_w,
 		rtex->surface.blk_h,
@@ -1259,7 +1259,7 @@ static bool r600_can_invalidate_texture(struct r600_common_screen *rscreen,
 	/* r600g doesn't react to dirty_tex_descriptor_counter */
 	return rscreen->chip_class >= GFX6 &&
 		!rtex->resource.b.is_shared &&
-		!(transfer_usage & PIPE_TRANSFER_READ) &&
+		!(transfer_usage & PIPE_MAP_READ) &&
 		rtex->resource.b.b.last_level == 0 &&
 		util_texrange_covers_whole_level(&rtex->resource.b.b, 0,
 						 box->x, box->y, box->z,
@@ -1336,7 +1336,7 @@ static void *r600_texture_transfer_map(struct pipe_context *ctx,
 		 */
 		if (!rtex->surface.is_linear)
 			use_staging_texture = true;
-		else if (usage & PIPE_TRANSFER_READ)
+		else if (usage & PIPE_MAP_READ)
 			use_staging_texture =
 				rtex->resource.domains & RADEON_DOMAIN_VRAM ||
 				rtex->resource.flags & RADEON_FLAG_GTT_WC;
@@ -1386,7 +1386,7 @@ static void *r600_texture_transfer_map(struct pipe_context *ctx,
 				return NULL;
 			}
 
-			if (usage & PIPE_TRANSFER_READ) {
+			if (usage & PIPE_MAP_READ) {
 				struct pipe_resource *temp = ctx->screen->resource_create(ctx->screen, &resource);
 				if (!temp) {
 					R600_ERR("failed to create a temporary depth texture\n");
@@ -1432,7 +1432,7 @@ static void *r600_texture_transfer_map(struct pipe_context *ctx,
 
 		r600_init_temp_resource_from_box(&resource, texture, box, level,
 						 R600_RESOURCE_FLAG_TRANSFER);
-		resource.usage = (usage & PIPE_TRANSFER_READ) ?
+		resource.usage = (usage & PIPE_MAP_READ) ?
 			PIPE_USAGE_STAGING : PIPE_USAGE_STREAM;
 
 		/* Create the temporary texture. */
@@ -1449,10 +1449,10 @@ static void *r600_texture_transfer_map(struct pipe_context *ctx,
 					&trans->b.b.stride,
 					&trans->b.b.layer_stride);
 
-		if (usage & PIPE_TRANSFER_READ)
+		if (usage & PIPE_MAP_READ)
 			r600_copy_to_staging_texture(ctx, trans);
 		else
-			usage |= PIPE_TRANSFER_UNSYNCHRONIZED;
+			usage |= PIPE_MAP_UNSYNCHRONIZED;
 
 		buf = trans->staging;
 	} else {
@@ -1481,7 +1481,7 @@ static void r600_texture_transfer_unmap(struct pipe_context *ctx,
 	struct pipe_resource *texture = transfer->resource;
 	struct r600_texture *rtex = (struct r600_texture*)texture;
 
-	if ((transfer->usage & PIPE_TRANSFER_WRITE) && rtransfer->staging) {
+	if ((transfer->usage & PIPE_MAP_WRITE) && rtransfer->staging) {
 		if (rtex->is_depth && rtex->resource.b.b.nr_samples <= 1) {
 			ctx->resource_copy_region(ctx, texture, transfer->level,
 						  transfer->box.x, transfer->box.y, transfer->box.z,

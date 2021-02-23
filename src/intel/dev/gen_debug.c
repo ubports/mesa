@@ -39,7 +39,7 @@
 #include "util/debug.h"
 #include "c11/threads.h"
 
-uint64_t INTEL_DEBUG = 0;
+uint64_t intel_debug = 0;
 
 static const struct debug_control debug_control[] = {
    { "tex",         DEBUG_TEXTURE},
@@ -94,6 +94,10 @@ static const struct debug_control debug_control[] = {
    { "pc",          DEBUG_PIPE_CONTROL },
    { "nofc",        DEBUG_NO_FAST_CLEAR },
    { "no32",        DEBUG_NO32 },
+   { "shaders",     DEBUG_WM | DEBUG_VS | DEBUG_TCS |
+                    DEBUG_TES | DEBUG_GS | DEBUG_CS |
+                    DEBUG_RT },
+   { "rt",          DEBUG_RT },
    { NULL,    0 }
 };
 
@@ -107,15 +111,21 @@ intel_debug_flag_for_shader_stage(gl_shader_stage stage)
       [MESA_SHADER_GEOMETRY] = DEBUG_GS,
       [MESA_SHADER_FRAGMENT] = DEBUG_WM,
       [MESA_SHADER_COMPUTE] = DEBUG_CS,
+
+      [MESA_SHADER_RAYGEN]       = DEBUG_RT,
+      [MESA_SHADER_ANY_HIT]      = DEBUG_RT,
+      [MESA_SHADER_CLOSEST_HIT]  = DEBUG_RT,
+      [MESA_SHADER_MISS]         = DEBUG_RT,
+      [MESA_SHADER_INTERSECTION] = DEBUG_RT,
+      [MESA_SHADER_CALLABLE]     = DEBUG_RT,
    };
-   STATIC_ASSERT(MESA_SHADER_STAGES == 6);
    return flags[stage];
 }
 
 static void
 brw_process_intel_debug_variable_once(void)
 {
-   INTEL_DEBUG = parse_debug_string(getenv("INTEL_DEBUG"), debug_control);
+   intel_debug = parse_debug_string(getenv("INTEL_DEBUG"), debug_control);
 }
 
 void
@@ -173,6 +183,18 @@ intel_debug_write_identifiers(void *_output,
          driver_desc.base.length = sizeof(driver_desc) + len + 1;
          memcpy(output, &driver_desc, sizeof(driver_desc));
          output += driver_desc.base.length;
+         break;
+      }
+
+      case GEN_DEBUG_BLOCK_TYPE_FRAME: {
+         struct gen_debug_block_frame frame_desc = {
+            .base = {
+               .type = GEN_DEBUG_BLOCK_TYPE_FRAME,
+               .length = sizeof(frame_desc),
+            },
+         };
+         memcpy(output, &frame_desc, sizeof(frame_desc));
+         output += sizeof(frame_desc);
          break;
       }
 

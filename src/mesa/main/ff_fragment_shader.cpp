@@ -286,7 +286,7 @@ static GLuint make_state_key( struct gl_context *ctx,  struct state_key *key )
       key->unit[i].source_index = texObj->TargetIndex;
 
       const struct gl_sampler_object *samp = _mesa_get_samplerobj(ctx, i);
-      if (samp->CompareMode == GL_COMPARE_R_TO_TEXTURE) {
+      if (samp->Attrib.CompareMode == GL_COMPARE_R_TO_TEXTURE) {
          const GLenum format = _mesa_texture_base_format(texObj);
          key->unit[i].shadow = (format == GL_DEPTH_COMPONENT ||
 				format == GL_DEPTH_STENCIL_EXT);
@@ -345,13 +345,6 @@ public:
    ir_variable *src_texture[MAX_TEXTURE_COORD_UNITS];
    /* Reg containing each texture unit's sampled texture color,
     * else undef.
-    */
-
-   /* Texcoord override from bumpmapping. */
-   ir_variable *texcoord_tex[MAX_TEXTURE_COORD_UNITS];
-
-   /* Reg containing texcoord for a texture unit,
-    * needed for bump mapping, else undef.
     */
 
    ir_rvalue *src_previous;	/**< Reg containing color from previous
@@ -735,8 +728,6 @@ static void load_texture( texenv_fragment_program *p, GLuint unit )
 
    if (!(p->state->inputs_available & (VARYING_BIT_TEX0 << unit))) {
       texcoord = get_current_attrib(p, VERT_ATTRIB_TEX0 + unit);
-   } else if (p->texcoord_tex[unit]) {
-      texcoord = new(p->mem_ctx) ir_dereference_variable(p->texcoord_tex[unit]);
    } else {
       ir_variable *tc_array = p->shader->symbols->get_variable("gl_TexCoord");
       assert(tc_array);
@@ -1089,10 +1080,8 @@ create_new_program(struct gl_context *ctx, struct state_key *key)
    _mesa_glsl_initialize_types(state);
    _mesa_glsl_initialize_variables(p.instructions, state);
 
-   for (unit = 0; unit < ctx->Const.MaxTextureUnits; unit++) {
+   for (unit = 0; unit < ctx->Const.MaxTextureUnits; unit++)
       p.src_texture[unit] = NULL;
-      p.texcoord_tex[unit] = NULL;
-   }
 
    p.src_previous = NULL;
 

@@ -18,9 +18,7 @@
 */
 
 #include "tessellator.hpp"
-#if defined(__MINGW32__) || defined(__MINGW64__)
-#include <cmath>
-#elif defined(_WIN32) || defined(_WIN64)
+#if defined(_MSC_VER)
 #include <math.h> // ceil
 #else
 #include <cmath>
@@ -195,10 +193,14 @@ INT32 floatToIDotF( const float& input )
         if (iShift >= 0)
         {
 //            assert( iShift < 32 );
-#if defined(_WIN32) || defined(_WIN64)
-#pragma warning( suppress : 4293 )
+#if defined(_MSC_VER)
+#pragma warning( push )
+#pragma warning( disable : 4293 26452 )
 #endif
             _fxpMaxPosValueFloat -= INT32( 1 ) << iShift;
+#if defined(_MSC_VER)
+#pragma warning( pop )
+#endif
         }
 
         // The maximum negative fixed point value is -2^(i-1).
@@ -217,10 +219,14 @@ INT32 floatToIDotF( const float& input )
         if (iShift >= 0)
         {
 //            assert( iShift < 32 );
-#if defined(_WIN32) || defined(_WIN64)
-#pragma warning( suppress : 4293 )
+#if defined(_MSC_VER)
+#pragma warning( push )
+#pragma warning( disable : 4293 26452 )
 #endif
             _fxpMaxPosValueFloat -= INT32( 1 ) << iShift;
+#if defined(_MSC_VER)
+#pragma warning( pop )
+#endif
         }
 
         // The maximum negative fixed point value is 0.

@@ -31,6 +31,22 @@
 #include <stdbool.h>
 #include <assert.h>
 
+void ir3_assert_handler(const char *expr, const char *file, int line,
+		const char *func) __attribute__((weak)) __attribute__ ((__noreturn__));
+
+/* A wrapper for assert() that allows overriding handling of a failed
+ * assert.  This is needed for tools like crashdec which can want to
+ * attempt to disassemble memory that might not actually be valid
+ * instructions.
+ */
+#define ir3_assert(expr) do { \
+		if (!(expr)) { \
+			if (ir3_assert_handler) { \
+				ir3_assert_handler(#expr, __FILE__, __LINE__, __func__); \
+			} \
+			assert(expr); \
+		} \
+	} while (0)
 /* size of largest OPC field of all the instruction categories: */
 #define NOPC_BITS 6
 
@@ -67,6 +83,7 @@ typedef enum {
 
 	/* category 1: */
 	OPC_MOV             = _OPC(1, 0),
+	OPC_MOVMSK          = _OPC(1, 3),
 
 	/* category 2: */
 	OPC_ADD_F           = _OPC(2, 0),
@@ -220,6 +237,13 @@ typedef enum {
 	OPC_STIB            = _OPC(6, 29),
 	OPC_LDC             = _OPC(6, 30),
 	OPC_LDLV            = _OPC(6, 31),
+	OPC_PIPR            = _OPC(6, 32), /* ??? */
+	OPC_PIPC            = _OPC(6, 33), /* ??? */
+	OPC_EMIT2           = _OPC(6, 34), /* ??? */
+	OPC_ENDLS           = _OPC(6, 35), /* ??? */
+	OPC_GETSPID         = _OPC(6, 36), /* SP ID */
+	OPC_GETWID          = _OPC(6, 37), /* wavefront ID */
+
 
 	/* category 7: */
 	OPC_BAR             = _OPC(7, 0),
@@ -249,6 +273,8 @@ typedef enum {
 #define opc_cat(opc) ((int)((opc) >> NOPC_BITS))
 #define opc_op(opc)  ((unsigned)((opc) & ((1 << NOPC_BITS) - 1)))
 
+const char *disasm_a3xx_instr_name(opc_t opc);
+
 typedef enum {
 	TYPE_F16 = 0,
 	TYPE_F32 = 1,
@@ -275,7 +301,7 @@ static inline uint32_t type_size(type_t type)
 	case TYPE_S8:
 		return 8;
 	default:
-		assert(0); /* invalid type */
+		ir3_assert(0); /* invalid type */
 		return 0;
 	}
 }
@@ -314,6 +340,21 @@ typedef union PACKED {
 	int32_t  idummy13  : 13;
 	int32_t  idummy8   : 8;
 } reg_t;
+
+/* comp:
+ *   0 - x
+ *   1 - y
+ *   2 - z
+ *   3 - w
+ */
+static inline uint32_t regid(int num, int comp)
+{
+	return (num << 2) | (comp & 0x3);
+}
+
+#define INVALID_REG      regid(63, 0)
+#define VALIDREG(r)      ((r) != INVALID_REG)
+#define CONDREG(r, val)  COND(VALIDREG(r), (val))
 
 /* special registers: */
 #define REG_A0 61       /* address register */
@@ -356,13 +397,13 @@ typedef struct PACKED {
 	uint32_t repeat   : 3;
 	uint32_t dummy3   : 1;
 	uint32_t ss       : 1;
-	uint32_t inv1     : 1;
-	uint32_t comp1    : 2;
+	uint32_t inv2     : 1;
+	uint32_t comp2    : 2;
 	uint32_t eq       : 1;
 	uint32_t opc_hi   : 1;  /* at least one bit */
 	uint32_t dummy4   : 2;
-	uint32_t inv0     : 1;
-	uint32_t comp0    : 2;  /* component for first src */
+	uint32_t inv1     : 1;
+	uint32_t comp1    : 2;  /* component for first src */
 	uint32_t opc      : 4;
 	uint32_t jmp_tgt  : 1;
 	uint32_t sync     : 1;
@@ -406,7 +447,7 @@ typedef struct PACKED {
 	uint32_t src_im     : 1;
 	uint32_t even       : 1;
 	uint32_t pos_inf    : 1;
-	uint32_t must_be_0  : 2;
+	uint32_t opc        : 2;
 	uint32_t jmp_tgt    : 1;
 	uint32_t sync       : 1;
 	uint32_t opc_cat    : 3;
@@ -432,7 +473,7 @@ typedef struct PACKED {
 		struct PACKED {
 			uint32_t src1         : 12;
 			uint32_t src1_c       : 1;   /* const */
-			uint32_t dummy        : 3;
+			int32_t dummy        : 3;
 		} c1;
 	};
 
@@ -697,15 +738,15 @@ typedef struct PACKED {
 	uint32_t opc_cat          : 3;
 } instr_cat5_t;
 
-/* dword0 encoding for src_off: [src1 + off], src2: */
+/* dword0 encoding for src_off: [src1 + off], src3: */
 typedef struct PACKED {
 	/* dword0: */
 	uint32_t mustbe1  : 1;
-	int32_t  off      : 13;
+	int32_t  off      : 13;   /* src2 */
 	uint32_t src1     : 8;
 	uint32_t src1_im  : 1;
-	uint32_t src2_im  : 1;
-	uint32_t src2     : 8;
+	uint32_t src3_im  : 1;
+	uint32_t src3     : 8;
 
 	/* dword1: */
 	uint32_t dword1;
@@ -855,23 +896,23 @@ typedef enum {
 /**
  * For atomic ops (which return a value):
  *
- *    pad1=1, pad3=c, pad5=3
+ *    pad1=1, pad3=6, pad5=3
  *    src1    - vecN offset/coords
  *    src2.x  - is actually dest register
  *    src2.y  - is 'data' except for cmpxchg where src2.y is 'compare'
  *              and src2.z is 'data'
  *
  * For stib (which does not return a value):
- *    pad1=0, pad3=c, pad5=2
+ *    pad1=0, pad3=6, pad5=2
  *    src1    - vecN offset/coords
  *    src2    - value to store
  *
  * For ldib:
- *    pad1=1, pad3=c, pad5=2
+ *    pad1=1, pad3=6, pad5=2
  *    src1    - vecN offset/coords
  *
  * for ldc (load from UBO using descriptor):
- *    pad1=0, pad3=8, pad5=2
+ *    pad1=0, pad3=4, pad5=2
  *
  * pad2 and pad5 are only observed to be 0.
  */
@@ -884,8 +925,8 @@ typedef struct PACKED {
 	uint32_t d        : 2;
 	uint32_t typed    : 1;
 	uint32_t type_size : 2;
-	uint32_t opc      : 5;
-	uint32_t pad3     : 5;
+	uint32_t opc      : 6;
+	uint32_t pad3     : 4;
 	uint32_t src1     : 8;  /* coordinate/offset */
 
 	/* dword1: */
@@ -973,14 +1014,16 @@ static inline bool is_cat6_legacy(instr_t *instr, unsigned gpu_id)
 {
 	instr_cat6_a6xx_t *cat6 = &instr->cat6_a6xx;
 
+	if (gpu_id < 600)
+		return true;
+
 	/* At least one of these two bits is pad in all the possible
 	 * "legacy" cat6 encodings, and a analysis of all the pre-a6xx
 	 * cmdstream traces I have indicates that the pad bit is zero
 	 * in all cases.  So we can use this to detect new encoding:
 	 */
-	if ((cat6->pad3 & 0x8) && (cat6->pad5 & 0x2)) {
-		assert(gpu_id >= 600);
-		assert(instr->cat6.opc == 0);
+	if ((cat6->pad3 & 0x4) && (cat6->pad5 & 0x2)) {
+		ir3_assert(instr->cat6.opc == 0);
 		return false;
 	}
 
@@ -991,7 +1034,7 @@ static inline uint32_t instr_opc(instr_t *instr, unsigned gpu_id)
 {
 	switch (instr->opc_cat) {
 	case 0:  return instr->cat0.opc | instr->cat0.opc_hi << 4;
-	case 1:  return 0;
+	case 1:  return instr->cat1.opc;
 	case 2:  return instr->cat2.opc;
 	case 3:  return instr->cat3.opc;
 	case 4:  return instr->cat4.opc;
@@ -1113,7 +1156,5 @@ static inline bool is_cat3_float(opc_t opc)
 		return false;
 	}
 }
-
-int disasm_a3xx(uint32_t *dwords, int sizedwords, int level, FILE *out, unsigned gpu_id);
 
 #endif /* INSTR_A3XX_H_ */

@@ -30,6 +30,7 @@
 #include "compiler/nir/nir.h"
 #include "etnaviv_asm.h"
 #include "etnaviv_compiler.h"
+#include "util/compiler.h"
 
 struct etna_compile {
    nir_shader *nir;
@@ -51,7 +52,6 @@ struct etna_compile {
 
    /* ra state */
    struct ra_graph *g;
-   struct ra_regs *regs;
    unsigned *live_map;
    unsigned num_nodes;
 
@@ -145,7 +145,7 @@ real_dest(nir_dest *dest, unsigned *swiz, unsigned *mask)
              nir_instr_as_alu(p_instr)->op == nir_op_mov) {
             break;
          }
-         /* fallthrough */
+         FALLTHROUGH;
       default:
          can_bypass_src = false;
          break;
@@ -318,6 +318,9 @@ static inline int reg_get_base(struct etna_compile *c, int virt_reg)
       return (virt_reg / NUM_REG_TYPES + 1) % ETNA_MAX_TEMPS;
    return virt_reg / NUM_REG_TYPES;
 }
+
+struct ra_regs *
+etna_ra_setup(void *mem_ctx);
 
 void
 etna_ra_assign(struct etna_compile *c, nir_shader *shader);

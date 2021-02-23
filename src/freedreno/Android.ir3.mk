@@ -42,6 +42,7 @@ LOCAL_C_INCLUDES := \
 	$(MESA_TOP)/src/gallium/include \
 	$(MESA_TOP)/src/gallium/auxiliary \
 	$(MESA_TOP)/prebuilt-intermediates/nir \
+	$(MESA_TOP)/src/freedreno/common \
 	$(MESA_TOP)/src/freedreno/ir3 \
 	$(intermediates)/ir3
 
@@ -77,11 +78,11 @@ $(intermediates)/ir3/ir3_lexer.c: $(ir3_lexer_deps)
 
 $(intermediates)/ir3/ir3_nir_imul.c: $(ir3_nir_imul_deps)
 	@mkdir -p $(dir $@)
-	$(hide) $(MESA_PYTHON2) $< -p $(MESA_TOP)/src/compiler/nir > $@
+	$(hide) $(MESA_PYTHON3) $< -p $(MESA_TOP)/src/compiler/nir > $@
 
 $(intermediates)/ir3/ir3_nir_trig.c: $(ir3_nir_trig_deps)
 	@mkdir -p $(dir $@)
-	$(hide) $(MESA_PYTHON2) $< -p $(MESA_TOP)/src/compiler/nir > $@
+	$(hide) $(MESA_PYTHON3) $< -p $(MESA_TOP)/src/compiler/nir > $@
 
 $(intermediates)/ir3/ir3_parser.c: $(ir3_parser_deps)
 	@mkdir -p $(dir $@)

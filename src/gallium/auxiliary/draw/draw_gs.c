@@ -132,6 +132,12 @@ static void tgsi_fetch_gs_input(struct draw_geometry_shader *shader,
    unsigned input_vertex_stride = shader->input_vertex_stride;
    const float (*input_ptr)[4];
 
+   int primid_sv = machine->SysSemanticToIndex[TGSI_SEMANTIC_PRIMID];
+   if (primid_sv != -1) {
+      for (unsigned j = 0; j < TGSI_QUAD_SIZE; j++)
+         machine->SystemValue[primid_sv].xyzw[0].i[j] = shader->in_prim_idx;
+   }
+
    input_ptr = shader->input;
 
    for (i = 0; i < num_vertices; ++i) {
@@ -212,30 +218,8 @@ static void tgsi_gs_run(struct draw_geometry_shader *shader,
    /* run interpreter */
    tgsi_exec_machine_run(machine, 0);
 
-   for (i = 0; i < 4; i++) {
-      int prim_i;
-      int prim_c;
-      switch (i) {
-      case 0:
-         prim_i = TGSI_EXEC_TEMP_PRIMITIVE_I;
-         prim_c = TGSI_EXEC_TEMP_PRIMITIVE_C;
-         break;
-      case 1:
-         prim_i = TGSI_EXEC_TEMP_PRIMITIVE_S1_I;
-         prim_c = TGSI_EXEC_TEMP_PRIMITIVE_S1_C;
-         break;
-      case 2:
-         prim_i = TGSI_EXEC_TEMP_PRIMITIVE_S2_I;
-         prim_c = TGSI_EXEC_TEMP_PRIMITIVE_S2_C;
-         break;
-      case 3:
-         prim_i = TGSI_EXEC_TEMP_PRIMITIVE_S3_I;
-         prim_c = TGSI_EXEC_TEMP_PRIMITIVE_S3_C;
-         break;
-      };
-
-      out_prims[i] = machine->Temps[prim_i].xyzw[prim_c].u[0];
-   }
+   for (i = 0; i < 4; i++)
+      out_prims[i] = machine->OutputPrimCount[i];
 }
 
 #ifdef LLVM_AVAILABLE
@@ -957,6 +941,9 @@ void draw_delete_geometry_shader(struct draw_context *draw,
       align_free(dgs->gs_input);
    }
 #endif
+
+   if (draw->gs.tgsi.machine && draw->gs.tgsi.machine->Tokens == dgs->state.tokens)
+      draw->gs.tgsi.machine->Tokens = NULL;
 
    for (i = 0; i < TGSI_MAX_VERTEX_STREAMS; i++)
       FREE(dgs->stream[i].primitive_lengths);

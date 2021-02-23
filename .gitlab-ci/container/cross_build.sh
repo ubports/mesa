@@ -21,6 +21,21 @@ apt-get install -y --no-remove \
         libffi-dev:$arch \
         libstdc++6:$arch \
         libtinfo-dev:$arch \
+        libvulkan-dev:$arch \
+        libx11-dev:$arch \
+        libx11-xcb-dev:$arch \
+        libxcb-dri2-0-dev:$arch \
+        libxcb-dri3-dev:$arch \
+        libxcb-glx0-dev:$arch \
+        libxcb-present-dev:$arch \
+        libxcb-randr0-dev:$arch \
+        libxcb-shm0-dev:$arch \
+        libxcb-xfixes0-dev:$arch \
+        libxdamage-dev:$arch \
+        libxext-dev:$arch \
+        libxrandr-dev:$arch \
+        libxshmfence-dev:$arch \
+        libxxf86vm-dev:$arch \
         wget
 
 if [[ $arch == "armhf" ]]; then
@@ -39,16 +54,8 @@ apt-get install -y --no-remove -t buster-backports \
 
 
 # dependencies where we want a specific version
-export LIBDRM_VERSION=libdrm-2.4.102
-
-wget https://dri.freedesktop.org/libdrm/$LIBDRM_VERSION.tar.xz
-tar -xvf $LIBDRM_VERSION.tar.xz && rm $LIBDRM_VERSION.tar.xz
-cd $LIBDRM_VERSION
-meson --cross-file=/cross_file-${arch}.txt build -D libdir=lib/$(dpkg-architecture -A $arch -qDEB_TARGET_MULTIARCH)
-ninja -C build install
-cd ..
-rm -rf $LIBDRM_VERSION
-
+EXTRA_MESON_ARGS="--cross-file=/cross_file-${arch}.txt -D libdir=lib/$(dpkg-architecture -A $arch -qDEB_TARGET_MULTIARCH)"
+. .gitlab-ci/build-libdrm.sh
 
 apt-get purge -y \
         $STABLE_EPHEMERAL

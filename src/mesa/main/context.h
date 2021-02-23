@@ -121,10 +121,6 @@ extern void
 _mesa_free_context_data(struct gl_context *ctx, bool destroy_debug_output);
 
 extern void
-_mesa_destroy_context( struct gl_context *ctx );
-
-
-extern void
 _mesa_copy_context(const struct gl_context *src, struct gl_context *dst, GLuint mask);
 
 extern GLboolean
@@ -356,7 +352,7 @@ static inline bool
 _mesa_has_half_float_textures(const struct gl_context *ctx)
 {
    return _mesa_has_ARB_texture_float(ctx) ||
-          _mesa_has_OES_texture_half_float(ctx) || _mesa_is_gles3(ctx);
+          _mesa_has_OES_texture_half_float(ctx);
 }
 
 static inline bool

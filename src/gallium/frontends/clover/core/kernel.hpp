@@ -23,9 +23,11 @@
 #ifndef CLOVER_CORE_KERNEL_HPP
 #define CLOVER_CORE_KERNEL_HPP
 
+#include <map>
 #include <memory>
 
 #include "core/object.hpp"
+#include "core/printf.hpp"
 #include "core/program.hpp"
 #include "core/memory.hpp"
 #include "core/sampler.hpp"
@@ -52,10 +54,12 @@ namespace clover {
 
          kernel &kern;
          intrusive_ptr<command_queue> q;
+         std::unique_ptr<printf_handler> print_handler;
 
          std::vector<uint8_t> input;
          std::vector<void *> samplers;
          std::vector<pipe_sampler_view *> sviews;
+         std::vector<pipe_image_view> iviews;
          std::vector<pipe_surface *> resources;
          std::vector<pipe_resource *> g_buffers;
          std::vector<size_t> g_handles;
@@ -140,6 +144,7 @@ namespace clover {
 
       argument_range args();
       const_argument_range args() const;
+      std::vector<clover::module::arg_info> args_infos();
 
       const intrusive_ref<clover::program> program;
 
@@ -224,9 +229,6 @@ namespace clover {
          virtual void bind(exec_context &ctx,
                            const module::argument &marg);
          virtual void unbind(exec_context &ctx);
-
-      private:
-         pipe_surface *st;
       };
 
       class sampler_argument : public argument {
@@ -242,6 +244,7 @@ namespace clover {
       };
 
       std::vector<std::unique_ptr<argument>> _args;
+      std::map<device *, std::unique_ptr<root_buffer> > _constant_buffers;
       std::string _name;
       exec_context exec;
       const ref_holder program_ref;

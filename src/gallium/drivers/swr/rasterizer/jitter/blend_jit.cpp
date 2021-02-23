@@ -185,7 +185,7 @@ struct BlendJit : public Builder
             break;
 
         case SWR_TYPE_UNKNOWN:
-            SWR_INVALID("Unsupport format type: %d", type);
+            SWR_INVALID("Unsupported format type: %d", type);
         }
     }
 
@@ -870,7 +870,9 @@ struct BlendJit : public Builder
         passes.add(createCFGSimplificationPass());
         passes.add(createEarlyCSEPass());
         passes.add(createInstructionCombiningPass());
+#if LLVM_VERSION_MAJOR <= 11
         passes.add(createConstantPropagationPass());
+#endif
         passes.add(createSCCPPass());
         passes.add(createAggressiveDCEPass());
 

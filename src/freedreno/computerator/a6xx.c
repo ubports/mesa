@@ -25,9 +25,9 @@
 
 #include "util/u_math.h"
 
-#include "registers/adreno_pm4.xml.h"
-#include "registers/adreno_common.xml.h"
-#include "registers/a6xx.xml.h"
+#include "adreno_pm4.xml.h"
+#include "adreno_common.xml.h"
+#include "a6xx.xml.h"
 
 #include "main.h"
 #include "ir3_asm.h"
@@ -116,6 +116,9 @@ cs_program_emit(struct fd_ringbuffer *ring, struct kernel *kernel)
 	struct ir3_shader_variant *v = ir3_kernel->v;
 	const struct ir3_info *i = &v->info;
 	enum a3xx_threadsize thrsz = FOUR_QUADS;
+
+	OUT_PKT4(ring, REG_A6XX_SP_MODE_CONTROL, 1);
+	OUT_RING(ring, A6XX_SP_MODE_CONTROL_CONSTANT_DEMOTION_ENABLE | 4);
 
 	OUT_PKT4(ring, REG_A6XX_HLSQ_INVALIDATE_CMD, 1);
 	OUT_RING(ring, A6XX_HLSQ_INVALIDATE_CMD_VS_STATE |
@@ -217,14 +220,14 @@ cs_const_emit(struct fd_ringbuffer *ring, struct kernel *kernel, uint32_t grid[3
 
 	const struct ir3_const_state *const_state = ir3_const_state(v);
 	uint32_t base = const_state->offsets.immediate;
-	int size = const_state->immediates_count;
+	int size = DIV_ROUND_UP(const_state->immediates_count, 4);
 
 	if (ir3_kernel->info.numwg != INVALID_REG) {
 		assert((ir3_kernel->info.numwg & 0x3) == 0);
 		int idx = ir3_kernel->info.numwg >> 2;
-		const_state->immediates[idx].val[0] = grid[0];
-		const_state->immediates[idx].val[1] = grid[1];
-		const_state->immediates[idx].val[2] = grid[2];
+		const_state->immediates[idx * 4 + 0] = grid[0];
+		const_state->immediates[idx * 4 + 1] = grid[1];
+		const_state->immediates[idx * 4 + 2] = grid[2];
 	}
 
 	/* truncate size to avoid writing constants that shader
@@ -237,7 +240,7 @@ cs_const_emit(struct fd_ringbuffer *ring, struct kernel *kernel, uint32_t grid[3
 	size *= 4;
 
 	if (size > 0) {
-		emit_const(ring, base, size, const_state->immediates[0].val);
+		emit_const(ring, base, size, const_state->immediates);
 	}
 }
 

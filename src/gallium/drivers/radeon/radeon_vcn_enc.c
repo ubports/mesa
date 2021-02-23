@@ -49,7 +49,7 @@ static void radeon_vcn_enc_get_param(struct radeon_encoder *enc, struct pipe_pic
       enc->enc_pic.ref_idx_l0 = pic->ref_idx_l0;
       enc->enc_pic.ref_idx_l1 = pic->ref_idx_l1;
       enc->enc_pic.not_referenced = pic->not_referenced;
-      enc->enc_pic.is_idr = (pic->picture_type == PIPE_H264_ENC_PICTURE_TYPE_IDR);
+      enc->enc_pic.is_idr = (pic->picture_type == PIPE_H2645_ENC_PICTURE_TYPE_IDR);
       if (pic->pic_ctrl.enc_frame_cropping_flag) {
          enc->enc_pic.crop_left = pic->pic_ctrl.enc_frame_crop_left_offset;
          enc->enc_pic.crop_right = pic->pic_ctrl.enc_frame_crop_right_offset;
@@ -80,15 +80,15 @@ static void radeon_vcn_enc_get_param(struct radeon_encoder *enc, struct pipe_pic
       enc->enc_pic.rc_per_pic.skip_frame_enable = false;
       enc->enc_pic.rc_per_pic.enforce_hrd = pic->rate_ctrl.enforce_hrd;
       switch (pic->rate_ctrl.rate_ctrl_method) {
-      case PIPE_H264_ENC_RATE_CONTROL_METHOD_DISABLE:
+      case PIPE_H2645_ENC_RATE_CONTROL_METHOD_DISABLE:
          enc->enc_pic.rc_session_init.rate_control_method = RENCODE_RATE_CONTROL_METHOD_NONE;
          break;
-      case PIPE_H264_ENC_RATE_CONTROL_METHOD_CONSTANT_SKIP:
-      case PIPE_H264_ENC_RATE_CONTROL_METHOD_CONSTANT:
+      case PIPE_H2645_ENC_RATE_CONTROL_METHOD_CONSTANT_SKIP:
+      case PIPE_H2645_ENC_RATE_CONTROL_METHOD_CONSTANT:
          enc->enc_pic.rc_session_init.rate_control_method = RENCODE_RATE_CONTROL_METHOD_CBR;
          break;
-      case PIPE_H264_ENC_RATE_CONTROL_METHOD_VARIABLE_SKIP:
-      case PIPE_H264_ENC_RATE_CONTROL_METHOD_VARIABLE:
+      case PIPE_H2645_ENC_RATE_CONTROL_METHOD_VARIABLE_SKIP:
+      case PIPE_H2645_ENC_RATE_CONTROL_METHOD_VARIABLE:
          enc->enc_pic.rc_session_init.rate_control_method =
             RENCODE_RATE_CONTROL_METHOD_PEAK_CONSTRAINED_VBR;
          break;
@@ -104,12 +104,21 @@ static void radeon_vcn_enc_get_param(struct radeon_encoder *enc, struct pipe_pic
       enc->enc_pic.ref_idx_l0 = pic->ref_idx_l0;
       enc->enc_pic.ref_idx_l1 = pic->ref_idx_l1;
       enc->enc_pic.not_referenced = pic->not_referenced;
-      enc->enc_pic.is_idr = (pic->picture_type == PIPE_H265_ENC_PICTURE_TYPE_IDR) ||
-                            (pic->picture_type == PIPE_H265_ENC_PICTURE_TYPE_I);
-      enc->enc_pic.crop_left = 0;
-      enc->enc_pic.crop_right = (align(enc->base.width, 16) - enc->base.width) / 2;
-      enc->enc_pic.crop_top = 0;
-      enc->enc_pic.crop_bottom = (align(enc->base.height, 16) - enc->base.height) / 2;
+      enc->enc_pic.is_idr = (pic->picture_type == PIPE_H2645_ENC_PICTURE_TYPE_IDR) ||
+                            (pic->picture_type == PIPE_H2645_ENC_PICTURE_TYPE_I);
+
+      if (pic->seq.conformance_window_flag) {
+          enc->enc_pic.crop_left = pic->seq.conf_win_left_offset;
+          enc->enc_pic.crop_right = pic->seq.conf_win_right_offset;
+          enc->enc_pic.crop_top = pic->seq.conf_win_top_offset;
+          enc->enc_pic.crop_bottom = pic->seq.conf_win_bottom_offset;
+      } else {
+          enc->enc_pic.crop_left = 0;
+          enc->enc_pic.crop_right = (align(enc->base.width, 16) - enc->base.width) / 2;
+          enc->enc_pic.crop_top = 0;
+          enc->enc_pic.crop_bottom = (align(enc->base.height, 16) - enc->base.height) / 2;
+      }
+
       enc->enc_pic.general_tier_flag = pic->seq.general_tier_flag;
       enc->enc_pic.general_profile_idc = pic->seq.general_profile_idc;
       enc->enc_pic.general_level_idc = pic->seq.general_level_idc;
@@ -175,15 +184,15 @@ static void radeon_vcn_enc_get_param(struct radeon_encoder *enc, struct pipe_pic
       enc->enc_pic.rc_per_pic.skip_frame_enable = false;
       enc->enc_pic.rc_per_pic.enforce_hrd = pic->rc.enforce_hrd;
       switch (pic->rc.rate_ctrl_method) {
-      case PIPE_H265_ENC_RATE_CONTROL_METHOD_DISABLE:
+      case PIPE_H2645_ENC_RATE_CONTROL_METHOD_DISABLE:
          enc->enc_pic.rc_session_init.rate_control_method = RENCODE_RATE_CONTROL_METHOD_NONE;
          break;
-      case PIPE_H265_ENC_RATE_CONTROL_METHOD_CONSTANT_SKIP:
-      case PIPE_H265_ENC_RATE_CONTROL_METHOD_CONSTANT:
+      case PIPE_H2645_ENC_RATE_CONTROL_METHOD_CONSTANT_SKIP:
+      case PIPE_H2645_ENC_RATE_CONTROL_METHOD_CONSTANT:
          enc->enc_pic.rc_session_init.rate_control_method = RENCODE_RATE_CONTROL_METHOD_CBR;
          break;
-      case PIPE_H265_ENC_RATE_CONTROL_METHOD_VARIABLE_SKIP:
-      case PIPE_H265_ENC_RATE_CONTROL_METHOD_VARIABLE:
+      case PIPE_H2645_ENC_RATE_CONTROL_METHOD_VARIABLE_SKIP:
+      case PIPE_H2645_ENC_RATE_CONTROL_METHOD_VARIABLE:
          enc->enc_pic.rc_session_init.rate_control_method =
             RENCODE_RATE_CONTROL_METHOD_PEAK_CONSTRAINED_VBR;
          break;
@@ -195,7 +204,7 @@ static void radeon_vcn_enc_get_param(struct radeon_encoder *enc, struct pipe_pic
 
 static void flush(struct radeon_encoder *enc)
 {
-   enc->ws->cs_flush(enc->cs, PIPE_FLUSH_ASYNC, NULL);
+   enc->ws->cs_flush(&enc->cs, PIPE_FLUSH_ASYNC, NULL);
 }
 
 static void radeon_enc_flush(struct pipe_video_codec *encoder)
@@ -271,7 +280,9 @@ static void radeon_enc_begin_frame(struct pipe_video_codec *encoder,
    if (u_reduce_video_profile(enc->base.profile) == PIPE_VIDEO_FORMAT_MPEG4_AVC) {
       struct pipe_h264_enc_picture_desc *pic = (struct pipe_h264_enc_picture_desc *)picture;
       need_rate_control =
-         enc->enc_pic.rc_layer_init.target_bit_rate != pic->rate_ctrl.target_bitrate;
+         (enc->enc_pic.rc_layer_init.target_bit_rate != pic->rate_ctrl.target_bitrate) ||
+         (enc->enc_pic.rc_layer_init.frame_rate_num != pic->rate_ctrl.frame_rate_num) ||
+         (enc->enc_pic.rc_layer_init.frame_rate_den != pic->rate_ctrl.frame_rate_den);
    } else if (u_reduce_video_profile(picture->profile) == PIPE_VIDEO_FORMAT_HEVC) {
       struct pipe_h265_enc_picture_desc *pic = (struct pipe_h265_enc_picture_desc *)picture;
       need_rate_control = enc->enc_pic.rc_layer_init.target_bit_rate != pic->rc.target_bitrate;
@@ -342,7 +353,7 @@ static void radeon_enc_destroy(struct pipe_video_codec *encoder)
    }
 
    si_vid_destroy_buffer(&enc->cpb);
-   enc->ws->cs_destroy(enc->cs);
+   enc->ws->cs_destroy(&enc->cs);
    FREE(enc);
 }
 
@@ -353,8 +364,8 @@ static void radeon_enc_get_feedback(struct pipe_video_codec *encoder, void *feed
    struct rvid_buffer *fb = feedback;
 
    if (size) {
-      uint32_t *ptr = enc->ws->buffer_map(fb->res->buf, enc->cs,
-                                          PIPE_TRANSFER_READ_WRITE | RADEON_TRANSFER_TEMPORARY);
+      uint32_t *ptr = enc->ws->buffer_map(fb->res->buf, &enc->cs,
+                                          PIPE_MAP_READ_WRITE | RADEON_MAP_TEMPORARY);
       if (ptr[1])
          *size = ptr[6];
       else
@@ -396,9 +407,8 @@ struct pipe_video_codec *radeon_create_encoder(struct pipe_context *context,
    enc->bits_in_shifter = 0;
    enc->screen = context->screen;
    enc->ws = ws;
-   enc->cs = ws->cs_create(sctx->ctx, RING_VCN_ENC, radeon_enc_cs_flush, enc, false);
 
-   if (!enc->cs) {
+   if (!ws->cs_create(&enc->cs, sctx->ctx, RING_VCN_ENC, radeon_enc_cs_flush, enc, false)) {
       RVID_ERR("Can't get command submission context.\n");
       goto error;
    }
@@ -441,7 +451,7 @@ struct pipe_video_codec *radeon_create_encoder(struct pipe_context *context,
       goto error;
    }
 
-   if (sscreen->info.family >= CHIP_SIENNA)
+   if (sscreen->info.family >= CHIP_SIENNA_CICHLID)
       radeon_enc_3_0_init(enc);
    else if (sscreen->info.family >= CHIP_RENOIR)
       radeon_enc_2_0_init(enc);
@@ -451,8 +461,7 @@ struct pipe_video_codec *radeon_create_encoder(struct pipe_context *context,
    return &enc->base;
 
 error:
-   if (enc->cs)
-      enc->ws->cs_destroy(enc->cs);
+   enc->ws->cs_destroy(&enc->cs);
 
    si_vid_destroy_buffer(&enc->cpb);
 
@@ -463,7 +472,7 @@ error:
 void radeon_enc_add_buffer(struct radeon_encoder *enc, struct pb_buffer *buf,
                            enum radeon_bo_usage usage, enum radeon_bo_domain domain, signed offset)
 {
-   enc->ws->cs_add_buffer(enc->cs, buf, usage | RADEON_USAGE_SYNCHRONIZED, domain, 0);
+   enc->ws->cs_add_buffer(&enc->cs, buf, usage | RADEON_USAGE_SYNCHRONIZED, domain, 0);
    uint64_t addr;
    addr = enc->ws->buffer_get_virtual_address(buf);
    addr = addr + offset;
@@ -482,21 +491,22 @@ void radeon_enc_set_emulation_prevention(struct radeon_encoder *enc, bool set)
 void radeon_enc_output_one_byte(struct radeon_encoder *enc, unsigned char byte)
 {
    if (enc->byte_index == 0)
-      enc->cs->current.buf[enc->cs->current.cdw] = 0;
-   enc->cs->current.buf[enc->cs->current.cdw] |=
+      enc->cs.current.buf[enc->cs.current.cdw] = 0;
+   enc->cs.current.buf[enc->cs.current.cdw] |=
       ((unsigned int)(byte) << index_to_shifts[enc->byte_index]);
    enc->byte_index++;
 
    if (enc->byte_index >= 4) {
       enc->byte_index = 0;
-      enc->cs->current.cdw++;
+      enc->cs.current.cdw++;
    }
 }
 
 void radeon_enc_emulation_prevention(struct radeon_encoder *enc, unsigned char byte)
 {
    if (enc->emulation_prevention) {
-      if ((enc->num_zeros >= 2) && ((byte == 0x00) || (byte == 0x01) || (byte == 0x03))) {
+      if ((enc->num_zeros >= 2) && ((byte == 0x00) || (byte == 0x01) ||
+         (byte == 0x02) || (byte == 0x03))) {
          radeon_enc_output_one_byte(enc, 0x03);
          enc->bits_output += 8;
          enc->num_zeros = 0;
@@ -564,7 +574,7 @@ void radeon_enc_flush_headers(struct radeon_encoder *enc)
    }
 
    if (enc->byte_index > 0) {
-      enc->cs->current.cdw++;
+      enc->cs.current.cdw++;
       enc->byte_index = 0;
    }
 }

@@ -219,6 +219,8 @@ struct InstrPred {
 
       switch (a->format) {
          case Format::SOPK: {
+            if (a->opcode == aco_opcode::s_getreg_b32)
+               return false;
             SOPK_instruction* aK = static_cast<SOPK_instruction*>(a);
             SOPK_instruction* bK = static_cast<SOPK_instruction*>(b);
             return aK->imm == bK->imm;
@@ -228,8 +230,9 @@ struct InstrPred {
             SMEM_instruction* bS = static_cast<SMEM_instruction*>(b);
             /* isel shouldn't be creating situations where this assertion fails */
             assert(aS->prevent_overflow == bS->prevent_overflow);
-            return aS->can_reorder && bS->can_reorder &&
-                   aS->glc == bS->glc && aS->nv == bS->nv &&
+            return aS->sync.can_reorder() && bS->sync.can_reorder() &&
+                   aS->sync == bS->sync && aS->glc == bS->glc && aS->dlc == bS->dlc &&
+                   aS->nv == bS->nv && aS->disable_wqm == bS->disable_wqm &&
                    aS->prevent_overflow == bS->prevent_overflow;
          }
          case Format::VINTRP: {
@@ -241,6 +244,18 @@ struct InstrPred {
                return false;
             return true;
          }
+         case Format::VOP3P: {
+            VOP3P_instruction* a3P = static_cast<VOP3P_instruction*>(a);
+            VOP3P_instruction* b3P = static_cast<VOP3P_instruction*>(b);
+            for (unsigned i = 0; i < 3; i++) {
+               if (a3P->neg_lo[i] != b3P->neg_lo[i] ||
+                   a3P->neg_hi[i] != b3P->neg_hi[i])
+                  return false;
+            }
+            return a3P->opsel_lo == b3P->opsel_lo &&
+                   a3P->opsel_hi == b3P->opsel_hi &&
+                   a3P->clamp == b3P->clamp;
+         }
          case Format::PSEUDO_REDUCTION: {
             Pseudo_reduction_instruction *aR = static_cast<Pseudo_reduction_instruction*>(a);
             Pseudo_reduction_instruction *bR = static_cast<Pseudo_reduction_instruction*>(b);
@@ -251,8 +266,8 @@ struct InstrPred {
          case Format::MTBUF: {
             MTBUF_instruction* aM = static_cast<MTBUF_instruction *>(a);
             MTBUF_instruction* bM = static_cast<MTBUF_instruction *>(b);
-            return aM->can_reorder && bM->can_reorder &&
-                   aM->barrier == bM->barrier &&
+            return aM->sync.can_reorder() && bM->sync.can_reorder() &&
+                   aM->sync == bM->sync &&
                    aM->dfmt == bM->dfmt &&
                    aM->nfmt == bM->nfmt &&
                    aM->offset == bM->offset &&
@@ -267,8 +282,8 @@ struct InstrPred {
          case Format::MUBUF: {
             MUBUF_instruction* aM = static_cast<MUBUF_instruction *>(a);
             MUBUF_instruction* bM = static_cast<MUBUF_instruction *>(b);
-            return aM->can_reorder && bM->can_reorder &&
-                   aM->barrier == bM->barrier &&
+            return aM->sync.can_reorder() && bM->sync.can_reorder() &&
+                   aM->sync == bM->sync &&
                    aM->offset == bM->offset &&
                    aM->offen == bM->offen &&
                    aM->idxen == bM->idxen &&
@@ -295,7 +310,9 @@ struct InstrPred {
                return false;
             DS_instruction* aD = static_cast<DS_instruction *>(a);
             DS_instruction* bD = static_cast<DS_instruction *>(b);
-            return aD->pass_flags == bD->pass_flags &&
+            return aD->sync.can_reorder() && bD->sync.can_reorder() &&
+                   aD->sync == bD->sync &&
+                   aD->pass_flags == bD->pass_flags &&
                    aD->gds == bD->gds &&
                    aD->offset0 == bD->offset0 &&
                    aD->offset1 == bD->offset1;
@@ -303,8 +320,8 @@ struct InstrPred {
          case Format::MIMG: {
             MIMG_instruction* aM = static_cast<MIMG_instruction*>(a);
             MIMG_instruction* bM = static_cast<MIMG_instruction*>(b);
-            return aM->can_reorder && bM->can_reorder &&
-                   aM->barrier == bM->barrier &&
+            return aM->sync.can_reorder() && bM->sync.can_reorder() &&
+                   aM->sync == bM->sync &&
                    aM->dmask == bM->dmask &&
                    aM->unrm == bM->unrm &&
                    aM->glc == bM->glc &&
@@ -337,7 +354,7 @@ struct vn_ctx {
     */
    uint32_t exec_id = 1;
 
-   vn_ctx(Program* program) : program(program) {
+   vn_ctx(Program* program_) : program(program_) {
       static_assert(sizeof(Temp) == 4, "Temp must fit in 32bits");
       unsigned size = 0;
       for (Block& block : program->blocks)
@@ -378,16 +395,18 @@ void process_block(vn_ctx& ctx, Block& block)
           instr->opcode == aco_opcode::p_demote_to_helper)
          ctx.exec_id++;
 
-      if (instr->definitions.empty() || instr->opcode == aco_opcode::p_phi || instr->opcode == aco_opcode::p_linear_phi) {
+      if (instr->definitions.empty() || is_phi(instr) || instr->definitions[0].isNoCSE()) {
          new_instructions.emplace_back(std::move(instr));
          continue;
       }
 
       /* simple copy-propagation through renaming */
-      if ((instr->opcode == aco_opcode::s_mov_b32 || instr->opcode == aco_opcode::s_mov_b64 || instr->opcode == aco_opcode::v_mov_b32) &&
-          !instr->definitions[0].isFixed() && instr->operands[0].isTemp() && instr->operands[0].regClass() == instr->definitions[0].regClass() &&
-          !instr->isDPP() && !((int)instr->format & (int)Format::SDWA)) {
+      bool copy_instr = instr->opcode == aco_opcode::p_parallelcopy ||
+                        (instr->opcode == aco_opcode::p_create_vector && instr->operands.size() == 1);
+      if (copy_instr && !instr->definitions[0].isFixed() && instr->operands[0].isTemp() &&
+          instr->operands[0].regClass() == instr->definitions[0].regClass()) {
          ctx.renames[instr->definitions[0].tempId()] = instr->operands[0].getTemp();
+         continue;
       }
 
       instr->pass_flags = ctx.exec_id;

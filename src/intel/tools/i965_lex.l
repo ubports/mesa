@@ -3,6 +3,7 @@
 %{
 #include <string.h>
 #include "i965_asm.h"
+#undef ALIGN16
 #include "i965_gram.tab.h"
 
 /* Locations */
@@ -24,6 +25,7 @@ extern char *input_filename;
 %x CHANNEL
 %x REG
 %x DOTSEL
+%x LABEL
 %%
 
  /* eat up single line comment */
@@ -333,7 +335,7 @@ m[0-9]+ 	{ yylval.integer = atoi(yytext + 1); BEGIN(REG); return MSGREG; }
 sr[0-9]+ 	{ yylval.integer = atoi(yytext + 2); return STATEREG; }
 
  /* notification registers */
-"n"[0-2]+ 	{ yylval.integer = atoi(yytext + 1); BEGIN(REG); return NOTIFYREG; }
+"n0"  		{ BEGIN(REG); return NOTIFYREG; }
 
  /* IP register */
 "ip" 		{ return IPREG; }
@@ -367,8 +369,8 @@ sr[0-9]+ 	{ yylval.integer = atoi(yytext + 2); return STATEREG; }
  /* Eat up JIP and UIP token, their values will be parsed
   * in numeric section
   */
-"JIP: "		{ }
-"UIP: "		{ }
+"JIP: "		{ BEGIN(LABEL); }
+"UIP: "		{ BEGIN(LABEL); }
 "Jump: "       	{ }
 "Pop: "		{ }
 [ \t]+ 		{ }
@@ -382,6 +384,21 @@ sr[0-9]+ 	{ yylval.integer = atoi(yytext + 2); return STATEREG; }
 			   yylval.llint = strtoll(yytext, NULL, 10);
 			   return LONG;
 			}
+
+ /* jump label target */
+[a-zA-Z_][0-9a-zA-Z_]*":" {
+	yylval.string = ralloc_strdup(p->mem_ctx, yytext);
+	/* Stomp the trailing ':' */
+	yylval.string[yyleng - 1] = '\0';
+	return JUMP_LABEL_TARGET;
+}
+
+ /* jump label */
+<LABEL>[a-zA-Z_][0-9a-zA-Z_]* {
+	yylval.string = ralloc_strdup(p->mem_ctx, yytext);
+	BEGIN(INITIAL);
+	return JUMP_LABEL;
+}
 
 \n 	{ yycolumn = 1; }
 

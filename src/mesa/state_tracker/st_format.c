@@ -62,7 +62,7 @@ enum pipe_format
 st_mesa_format_to_pipe_format(const struct st_context *st,
                               mesa_format mesaFormat)
 {
-   struct pipe_screen *screen = st->pipe->screen;
+   struct pipe_screen *screen = st->screen;
 
    /* The destination RGBA format mustn't be changed, because it's also
     * a destination format of the unpack/decompression function.
@@ -234,19 +234,19 @@ static const struct format_mapping format_map[] = {
         DEFAULT_RGB_FORMATS }
    },
    {
-      { GL_RGB4 },
+      { GL_RGB4, 0 },
       { PIPE_FORMAT_B4G4R4X4_UNORM, PIPE_FORMAT_B4G4R4A4_UNORM,
         PIPE_FORMAT_A4B4G4R4_UNORM,
         DEFAULT_RGB_FORMATS }
    },
    {
-      { GL_RGB5 },
+      { GL_RGB5, 0 },
       { PIPE_FORMAT_B5G5R5X1_UNORM, PIPE_FORMAT_X1B5G5R5_UNORM,
         PIPE_FORMAT_B5G5R5A1_UNORM, PIPE_FORMAT_A1B5G5R5_UNORM,
         DEFAULT_RGB_FORMATS }
    },
    {
-      { GL_RGB565 },
+      { GL_RGB565, 0 },
       { PIPE_FORMAT_B5G6R5_UNORM, DEFAULT_RGB_FORMATS }
    },
 
@@ -426,6 +426,10 @@ static const struct format_mapping format_map[] = {
    {
       { GL_SR8_EXT, 0 },
       { PIPE_FORMAT_R8_SRGB, 0 }
+   },
+   {
+      { GL_SRG8_EXT, 0 },
+      { PIPE_FORMAT_R8G8_SRGB, 0 }
    },
 
    /* 16-bit float formats */
@@ -1101,7 +1105,7 @@ st_choose_format(struct st_context *st, GLenum internalFormat,
                  unsigned storage_sample_count,
                  unsigned bindings, bool swap_bytes, bool allow_dxt)
 {
-   struct pipe_screen *screen = st->pipe->screen;
+   struct pipe_screen *screen = st->screen;
    unsigned i;
    int j;
    enum pipe_format pf;
@@ -1215,7 +1219,7 @@ enum pipe_format
 st_choose_matching_format(struct st_context *st, unsigned bind,
                           GLenum format, GLenum type, GLboolean swapBytes)
 {
-   struct pipe_screen *screen = st->pipe->screen;
+   struct pipe_screen *screen = st->screen;
 
    if (swapBytes && !_mesa_swap_bytes_in_type_enum(&type))
       return PIPE_FORMAT_NONE;

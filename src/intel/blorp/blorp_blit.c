@@ -56,7 +56,7 @@ brw_blorp_blit_vars_init(nir_builder *b, struct brw_blorp_blit_vars *v,
    LOAD_INPUT(discard_rect, glsl_vec4_type())
    LOAD_INPUT(rect_grid, glsl_vec4_type())
    LOAD_INPUT(coord_transform, glsl_vec4_type())
-   LOAD_INPUT(src_z, glsl_uint_type())
+   LOAD_INPUT(src_z, glsl_float_type())
    LOAD_INPUT(src_offset, glsl_vector_type(GLSL_TYPE_UINT, 2))
    LOAD_INPUT(dst_offset, glsl_vector_type(GLSL_TYPE_UINT, 2))
    LOAD_INPUT(src_inv_size, glsl_vector_type(GLSL_TYPE_FLOAT, 2))
@@ -125,11 +125,7 @@ blorp_nir_discard_if_outside_rect(nir_builder *b, nir_ssa_def *pos,
    c3 = nir_uge(b, nir_channel(b, pos, 1), dst_y1);
 
    nir_ssa_def *oob = nir_ior(b, nir_ior(b, c0, c1), nir_ior(b, c2, c3));
-
-   nir_intrinsic_instr *discard =
-      nir_intrinsic_instr_create(b->shader, nir_intrinsic_discard_if);
-   discard->src[0] = nir_src_for_ssa(oob);
-   nir_builder_instr_insert(b, &discard->instr);
+   nir_discard_if(b, oob);
 }
 
 static nir_tex_instr *
@@ -154,8 +150,13 @@ blorp_create_nir_tex_instr(nir_builder *b, struct brw_blorp_blit_vars *v,
     * more explicit in the future.
     */
    assert(pos->num_components >= 2);
-   pos = nir_vec3(b, nir_channel(b, pos, 0), nir_channel(b, pos, 1),
-                     nir_load_var(b, v->v_src_z));
+   if (op == nir_texop_txf || op == nir_texop_txf_ms || op == nir_texop_txf_ms_mcs) {
+      pos = nir_vec3(b, nir_channel(b, pos, 0), nir_channel(b, pos, 1),
+                        nir_f2i32(b, nir_load_var(b, v->v_src_z)));
+   } else {
+      pos = nir_vec3(b, nir_channel(b, pos, 0), nir_channel(b, pos, 1),
+                        nir_load_var(b, v->v_src_z));
+   }
 
    tex->src[0].src_type = nir_tex_src_coord;
    tex->src[0].src = nir_src_for_ssa(pos);
@@ -564,9 +565,6 @@ blorp_nir_combine_samples(nir_builder *b, struct brw_blorp_blit_vars *v,
                           nir_alu_type dst_type,
                           enum blorp_filter filter)
 {
-   /* If non-null, this is the outer-most if statement */
-   nir_if *outer_if = NULL;
-
    nir_variable *color =
       nir_local_variable_create(b->impl, glsl_vec4_type(), "color");
 
@@ -602,6 +600,10 @@ blorp_nir_combine_samples(nir_builder *b, struct brw_blorp_blit_vars *v,
    default:
       unreachable("Invalid filter");
    }
+
+   /* If true, we inserted an if statement that we need to pop at at the end.
+    */
+   bool inserted_if = false;
 
    /* We add together samples using a binary tree structure, e.g. for 4x MSAA:
     *
@@ -665,24 +667,19 @@ blorp_nir_combine_samples(nir_builder *b, struct brw_blorp_blit_vars *v,
           * clear color and we can skip the remaining fetches just like we do
           * when MCS == 0.
           */
-         nir_ssa_def *mcs_zero =
-            nir_ieq(b, nir_channel(b, mcs, 0), nir_imm_int(b, 0));
+         nir_ssa_def *mcs_zero = nir_ieq_imm(b, nir_channel(b, mcs, 0), 0);
          if (tex_samples == 16) {
             mcs_zero = nir_iand(b, mcs_zero,
-               nir_ieq(b, nir_channel(b, mcs, 1), nir_imm_int(b, 0)));
+               nir_ieq_imm(b, nir_channel(b, mcs, 1), 0));
          }
          nir_ssa_def *mcs_clear =
             blorp_nir_mcs_is_clear_color(b, mcs, tex_samples);
 
-         nir_if *if_stmt = nir_if_create(b->shader);
-         if_stmt->condition = nir_src_for_ssa(nir_ior(b, mcs_zero, mcs_clear));
-         nir_cf_node_insert(b->cursor, &if_stmt->cf_node);
-
-         b->cursor = nir_after_cf_list(&if_stmt->then_list);
+         nir_push_if(b, nir_ior(b, mcs_zero, mcs_clear));
          nir_store_var(b, color, texture_data[0], 0xf);
 
-         b->cursor = nir_after_cf_list(&if_stmt->else_list);
-         outer_if = if_stmt;
+         nir_push_else(b, NULL);
+         inserted_if = true;
       }
 
       for (int j = 0; j < count_trailing_one_bits(i); j++) {
@@ -708,8 +705,8 @@ blorp_nir_combine_samples(nir_builder *b, struct brw_blorp_blit_vars *v,
 
    nir_store_var(b, color, texture_data[0], 0xf);
 
-   if (outer_if)
-      b->cursor = nir_after_cf_node(&outer_if->cf_node);
+   if (inserted_if)
+      nir_pop_if(b, NULL);
 
    return nir_load_var(b, color);
 }
@@ -1440,9 +1437,9 @@ brw_blorp_build_nir_shader(struct blorp_context *blorp, void *mem_ctx,
       assert(dst_pos->num_components == 2);
 
       nir_ssa_def *color_component =
-         nir_bcsel(&b, nir_ieq(&b, comp, nir_imm_int(&b, 0)),
+         nir_bcsel(&b, nir_ieq_imm(&b, comp, 0),
                        nir_channel(&b, color, 0),
-                       nir_bcsel(&b, nir_ieq(&b, comp, nir_imm_int(&b, 1)),
+                       nir_bcsel(&b, nir_ieq_imm(&b, comp, 1),
                                      nir_channel(&b, color, 1),
                                      nir_channel(&b, color, 2)));
 
@@ -1492,7 +1489,7 @@ brw_blorp_get_blit_kernel(struct blorp_batch *batch,
    struct brw_wm_prog_data prog_data;
 
    nir_shader *nir = brw_blorp_build_nir_shader(blorp, mem_ctx, prog_key);
-   nir->info.name = ralloc_strdup(nir, "BLORP-blit");
+   nir->info.name = ralloc_strdup(nir, blorp_shader_type_to_name(prog_key->shader_type));
 
    struct brw_wm_prog_key wm_key;
    brw_blorp_init_wm_prog_key(&wm_key);
@@ -2319,7 +2316,7 @@ do_blorp_blit(struct blorp_batch *batch,
 void
 blorp_blit(struct blorp_batch *batch,
            const struct blorp_surf *src_surf,
-           unsigned src_level, unsigned src_layer,
+           unsigned src_level, float src_layer,
            enum isl_format src_format, struct isl_swizzle src_swizzle,
            const struct blorp_surf *dst_surf,
            unsigned dst_level, unsigned dst_layer,
@@ -2647,7 +2644,7 @@ blorp_copy(struct blorp_batch *batch,
                                dst_layer, ISL_FORMAT_UNSUPPORTED, true);
 
    struct brw_blorp_blit_prog_key wm_prog_key = {
-      .shader_type = BLORP_SHADER_TYPE_BLIT,
+      .shader_type = BLORP_SHADER_TYPE_COPY,
       .filter = BLORP_FILTER_NONE,
       .need_src_offset = src_surf->tile_x_sa || src_surf->tile_y_sa,
       .need_dst_offset = dst_surf->tile_x_sa || dst_surf->tile_y_sa,
@@ -2704,42 +2701,6 @@ blorp_copy(struct blorp_batch *batch,
    } else {
       params.dst.view.format = get_copy_format_for_bpb(isl_dev, dst_fmtl->bpb);
       params.src.view.format = get_copy_format_for_bpb(isl_dev, src_fmtl->bpb);
-   }
-
-   if (params.src.aux_usage == ISL_AUX_USAGE_CCS_E) {
-      /* It's safe to do a blorp_copy between things which are sRGB with CCS_E
-       * enabled even though CCS_E doesn't technically do sRGB on SKL because
-       * we stomp everything to UINT anyway.  The one thing we have to be
-       * careful of is clear colors.  Because fast clear colors for sRGB on
-       * gen9 are encoded as the float values between format conversion and
-       * sRGB curve application, a given clear color float will convert to the
-       * same bits regardless of whether the format is UNORM or sRGB.
-       * Therefore, we can handle sRGB without any special cases.
-       */
-      UNUSED enum isl_format linear_src_format =
-         isl_format_srgb_to_linear(src_surf->surf->format);
-      assert(isl_formats_are_ccs_e_compatible(batch->blorp->isl_dev->info,
-                                              linear_src_format,
-                                              params.src.view.format));
-      uint32_t packed[4];
-      isl_color_value_pack(&params.src.clear_color,
-                           linear_src_format, packed);
-      isl_color_value_unpack(&params.src.clear_color,
-                             params.src.view.format, packed);
-   }
-
-   if (params.dst.aux_usage == ISL_AUX_USAGE_CCS_E) {
-      /* See above where we handle linear_src_format */
-      UNUSED enum isl_format linear_dst_format =
-         isl_format_srgb_to_linear(dst_surf->surf->format);
-      assert(isl_formats_are_ccs_e_compatible(batch->blorp->isl_dev->info,
-                                              linear_dst_format,
-                                              params.dst.view.format));
-      uint32_t packed[4];
-      isl_color_value_pack(&params.dst.clear_color,
-                           linear_dst_format, packed);
-      isl_color_value_unpack(&params.dst.clear_color,
-                             params.dst.view.format, packed);
    }
 
    if (params.src.view.format != params.dst.view.format) {

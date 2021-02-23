@@ -68,7 +68,7 @@ struct etna_sampler_view {
    uint32_t TE_SAMPLER_SIZE;
    uint32_t TE_SAMPLER_LOG_SIZE;
    uint32_t TE_SAMPLER_ASTC0;
-   uint32_t TE_SAMPLER_LINEAR_STRIDE[VIVS_TE_SAMPLER_LINEAR_STRIDE__LEN];
+   uint32_t TE_SAMPLER_LINEAR_STRIDE;  /* only LOD0 */
    struct etna_reloc TE_SAMPLER_LOD_ADDR[VIVS_TE_SAMPLER_LOD_ADDR__LEN];
    unsigned min_lod, max_lod; /* 5.5 fixp */
 
@@ -89,9 +89,12 @@ etna_create_sampler_state_state(struct pipe_context *pipe,
    struct etna_context *ctx = etna_context(pipe);
    struct etna_screen *screen = ctx->screen;
    const bool ansio = ss->max_anisotropy > 1;
+   const bool mipmap = ss->min_mip_filter != PIPE_TEX_MIPFILTER_NONE;
 
    if (!cs)
       return NULL;
+
+   cs->base = *ss;
 
    cs->TE_SAMPLER_CONFIG0 =
       VIVS_TE_SAMPLER_CONFIG0_UWRAP(translate_texture_wrapmode(ss->wrap_s)) |
@@ -111,19 +114,19 @@ etna_create_sampler_state_state(struct pipe_context *pipe,
       COND(ss->seamless_cube_map, VIVS_TE_SAMPLER_CONFIG1_SEAMLESS_CUBE_MAP) : 0;
 
    cs->TE_SAMPLER_LOD_CONFIG =
-      COND(ss->lod_bias != 0.0, VIVS_TE_SAMPLER_LOD_CONFIG_BIAS_ENABLE) |
+      COND(ss->lod_bias != 0.0 && mipmap, VIVS_TE_SAMPLER_LOD_CONFIG_BIAS_ENABLE) |
       VIVS_TE_SAMPLER_LOD_CONFIG_BIAS(etna_float_to_fixp55(ss->lod_bias));
 
    cs->TE_SAMPLER_3D_CONFIG =
       VIVS_TE_SAMPLER_3D_CONFIG_WRAP(translate_texture_wrapmode(ss->wrap_r));
 
-   if (ss->min_mip_filter != PIPE_TEX_MIPFILTER_NONE) {
+   if (mipmap) {
       cs->min_lod = etna_float_to_fixp55(ss->min_lod);
       cs->max_lod = etna_float_to_fixp55(ss->max_lod);
    } else {
       /* when not mipmapping, we need to set max/min lod so that always
        * lowest LOD is selected */
-      cs->min_lod = cs->max_lod = etna_float_to_fixp55(ss->min_lod);
+      cs->min_lod = cs->max_lod = etna_float_to_fixp55(0.0f);
    }
 
    /* if max_lod is 0, MIN filter will never be used (GC3000)
@@ -211,12 +214,11 @@ etna_create_sampler_view_state(struct pipe_context *pctx, struct pipe_resource *
    if (res->layout == ETNA_LAYOUT_LINEAR && !util_format_is_compressed(so->format)) {
       sv->TE_SAMPLER_CONFIG0 |= VIVS_TE_SAMPLER_CONFIG0_ADDRESSING_MODE(TEXTURE_ADDRESSING_MODE_LINEAR);
 
-      for (int lod = 0; lod <= res->base.last_level; ++lod)
-         sv->TE_SAMPLER_LINEAR_STRIDE[lod] = res->levels[lod].stride;
-
+      assert(res->base.last_level == 0);
+      sv->TE_SAMPLER_LINEAR_STRIDE = res->levels[0].stride;
    } else {
       sv->TE_SAMPLER_CONFIG0 |= VIVS_TE_SAMPLER_CONFIG0_ADDRESSING_MODE(TEXTURE_ADDRESSING_MODE_TILED);
-      memset(&sv->TE_SAMPLER_LINEAR_STRIDE, 0, sizeof(sv->TE_SAMPLER_LINEAR_STRIDE));
+      sv->TE_SAMPLER_LINEAR_STRIDE = 0;
    }
 
    sv->TE_SAMPLER_CONFIG1 |= COND(ext, VIVS_TE_SAMPLER_CONFIG1_FORMAT_EXT(format)) |
@@ -349,11 +351,12 @@ etna_emit_texture_state(struct etna_context *ctx)
          if ((1 << x) & active_samplers) {
             ss = etna_sampler_state(ctx->sampler[x]);
             sv = etna_sampler_view(ctx->sampler_view[x]);
+            uint32_t TE_SAMPLER_LOG_SIZE = sv->TE_SAMPLER_LOG_SIZE;
 
             if (texture_use_int_filter(&sv->base, &ss->base, false))
-               sv->TE_SAMPLER_LOG_SIZE |= VIVS_TE_SAMPLER_LOG_SIZE_INT_FILTER;
+               TE_SAMPLER_LOG_SIZE |= VIVS_TE_SAMPLER_LOG_SIZE_INT_FILTER;
 
-            /*02080*/ EMIT_STATE(TE_SAMPLER_LOG_SIZE(x), sv->TE_SAMPLER_LOG_SIZE);
+            /*02080*/ EMIT_STATE(TE_SAMPLER_LOG_SIZE(x), TE_SAMPLER_LOG_SIZE);
          }
       }
    }
@@ -366,13 +369,14 @@ etna_emit_texture_state(struct etna_context *ctx)
             ss = etna_sampler_state(ctx->sampler[x]);
             sv = etna_sampler_view(ctx->sampler_view[x]);
 
-            unsigned max_lod = MAX2(MIN2(ss->max_lod, sv->max_lod), ss->max_lod_min);
+            unsigned max_lod = MAX2(MIN2(ss->max_lod + sv->min_lod, sv->max_lod), ss->max_lod_min);
+            unsigned min_lod = MIN2(MAX2(ss->min_lod + sv->min_lod, sv->min_lod), max_lod);
 
             /* min and max lod is determined both by the sampler and the view */
             /*020C0*/ EMIT_STATE(TE_SAMPLER_LOD_CONFIG(x),
                                  ss->TE_SAMPLER_LOD_CONFIG |
                                  VIVS_TE_SAMPLER_LOD_CONFIG_MAX(max_lod) |
-                                 VIVS_TE_SAMPLER_LOD_CONFIG_MIN(MAX2(ss->min_lod, sv->min_lod)));
+                                 VIVS_TE_SAMPLER_LOD_CONFIG_MIN(min_lod));
          }
       }
       for (int x = 0; x < VIVS_TE_SAMPLER__LEN; ++x) {
@@ -406,12 +410,11 @@ etna_emit_texture_state(struct etna_context *ctx)
       }
    }
    if (unlikely(dirty & (ETNA_DIRTY_SAMPLER_VIEWS))) {
-      for (int y = 0; y < VIVS_TE_SAMPLER_LINEAR_STRIDE__LEN; ++y) {
-         for (int x = 0; x < VIVS_TE_SAMPLER__LEN; ++x) {
-            if ((1 << x) & active_samplers) {
-               struct etna_sampler_view *sv = etna_sampler_view(ctx->sampler_view[x]);
-               /*02C00*/ EMIT_STATE(TE_SAMPLER_LINEAR_STRIDE(x, y), sv->TE_SAMPLER_LINEAR_STRIDE[y]);
-            }
+      /* only LOD0 is valid for this register */
+      for (int x = 0; x < VIVS_TE_SAMPLER__LEN; ++x) {
+         if ((1 << x) & active_samplers) {
+            struct etna_sampler_view *sv = etna_sampler_view(ctx->sampler_view[x]);
+            /*02C00*/ EMIT_STATE(TE_SAMPLER_LINEAR_STRIDE(0, x), sv->TE_SAMPLER_LINEAR_STRIDE);
          }
       }
    }

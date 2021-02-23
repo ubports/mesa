@@ -99,9 +99,9 @@ NineBaseTexture9_dtor( struct NineBaseTexture9 *This )
     pipe_sampler_view_reference(&This->view[0], NULL);
     pipe_sampler_view_reference(&This->view[1], NULL);
 
-    if (This->list.prev != NULL && This->list.next != NULL)
+    if (list_is_linked(&This->list))
         list_del(&This->list);
-    if (This->list2.prev != NULL && This->list2.next != NULL)
+    if (list_is_linked(&This->list2))
         list_del(&This->list2);
 
     NineResource9_dtor(&This->base);
@@ -563,7 +563,7 @@ NineBaseTexture9_UpdateSamplerView( struct NineBaseTexture9 *This,
         templ.format = resource->format;
     templ.u.tex.first_layer = 0;
     templ.u.tex.last_layer = resource->target == PIPE_TEXTURE_3D ?
-                             resource->depth0 - 1 : resource->array_size - 1;
+                             0 : resource->array_size - 1;
     templ.u.tex.first_level = 0;
     templ.u.tex.last_level = resource->last_level;
     templ.swizzle_r = swizzle[0];

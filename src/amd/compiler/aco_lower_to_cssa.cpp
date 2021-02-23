@@ -46,10 +46,8 @@ typedef std::map<uint32_t, std::vector<std::pair<Definition, Operand>>> phi_info
 struct cssa_ctx {
    Program* program;
    live& live_vars;
-   phi_info logical_phi_info;
-   phi_info linear_phi_info;
-
-   cssa_ctx(Program* program, live& live_vars) : program(program), live_vars(live_vars) {}
+   phi_info logical_phi_info {};
+   phi_info linear_phi_info {};
 };
 
 bool collect_phi_info(cssa_ctx& ctx)
@@ -88,7 +86,7 @@ bool collect_phi_info(cssa_ctx& ctx)
                          ctx.program->blocks[pred].logical_idom :
                          ctx.program->blocks[pred].linear_idom;
                } while (def_points[i] != pred &&
-                        ctx.live_vars.live_out[pred].find(op.getTemp()) != ctx.live_vars.live_out[pred].end());
+                        ctx.live_vars.live_out[pred].count(op.tempId()));
             }
          }
 
@@ -118,7 +116,7 @@ bool collect_phi_info(cssa_ctx& ctx)
             } else if (def_points[i] == block.index) {
                interferes = true;
             /* operand might interfere with phi-def */
-            } else if (ctx.live_vars.live_out[idom].count(phi->definitions[0].getTemp())) {
+            } else if (ctx.live_vars.live_out[idom].count(phi->definitions[0].tempId())) {
                interferes = true;
             /* else check for interferences with other operands */
             } else {
@@ -146,7 +144,7 @@ bool collect_phi_info(cssa_ctx& ctx)
             progress = true;
 
             /* create new temporary and rename operands */
-            Temp new_tmp = Temp{ctx.program->allocateId(), phi->definitions[0].regClass()};
+            Temp new_tmp = ctx.program->allocateTmp(phi->definitions[0].regClass());
             if (is_logical)
                ctx.logical_phi_info[preds[i]].emplace_back(Definition(new_tmp), op);
             else
@@ -194,7 +192,7 @@ void insert_parallelcopies(cssa_ctx& ctx)
 } /* end namespace */
 
 
-void lower_to_cssa(Program* program, live& live_vars, const struct radv_nir_compiler_options *options)
+void lower_to_cssa(Program* program, live& live_vars)
 {
    cssa_ctx ctx = {program, live_vars};
    /* collect information about all interfering phi operands */
@@ -206,7 +204,7 @@ void lower_to_cssa(Program* program, live& live_vars, const struct radv_nir_comp
    insert_parallelcopies(ctx);
 
    /* update live variable information */
-   live_vars = live_var_analysis(program, options);
+   live_vars = live_var_analysis(program);
 }
 }
 

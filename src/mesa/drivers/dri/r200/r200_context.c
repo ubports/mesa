@@ -216,7 +216,7 @@ GLboolean r200CreateContext( gl_api api,
     * the default textures.
     */
    driParseConfigFiles (&rmesa->radeon.optionCache, &screen->optionCache,
-			screen->driScreen->myNum, "r200", NULL, NULL, 0);
+			screen->driScreen->myNum, "r200", NULL, NULL, 0, NULL, 0);
    rmesa->radeon.initialMaxAnisotropy = driQueryOptionf(&rmesa->radeon.optionCache,
 							"def_max_anisotropy");
 
@@ -351,7 +351,6 @@ GLboolean r200CreateContext( gl_api api,
    ctx->Extensions.EXT_texture_env_dot3 = true;
    ctx->Extensions.EXT_texture_filter_anisotropic = true;
    ctx->Extensions.EXT_texture_mirror_clamp = true;
-   ctx->Extensions.MESA_pack_invert = true;
    ctx->Extensions.NV_fog_distance = true;
    ctx->Extensions.NV_texture_rectangle = true;
    ctx->Extensions.OES_EGL_image = true;
@@ -409,13 +408,5 @@ GLboolean r200CreateContext( gl_api api,
 
 void r200DestroyContext( __DRIcontext *driContextPriv )
 {
-	int i;
-	r200ContextPtr rmesa = (r200ContextPtr)driContextPriv->driverPrivate;
-	if (rmesa)
-	{
-		for ( i = 0 ; i < R200_MAX_TEXTURE_UNITS ; i++ ) {
-			_math_matrix_dtr( &rmesa->TexGenMatrix[i] );
-		}
-	}
 	radeonDestroyContext(driContextPriv);
 }

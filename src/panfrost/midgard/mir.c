@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2019 Alyssa Rosenzweig <alyssa@rosenzweig.io>
+ * Copyright (C) 2019-2020 Collabora, Ltd.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -26,7 +27,7 @@
 
 void mir_rewrite_index_src_single(midgard_instruction *ins, unsigned old, unsigned new)
 {
-        for (unsigned i = 0; i < ARRAY_SIZE(ins->src); ++i) {
+        mir_foreach_src(ins, i) {
                 if (ins->src[i] == old)
                         ins->src[i] = new;
         }
@@ -116,7 +117,7 @@ mir_single_use(compiler_context *ctx, unsigned value)
 bool
 mir_nontrivial_mod(midgard_instruction *ins, unsigned i, bool check_swizzle)
 {
-        bool is_int = midgard_is_integer_op(ins->alu.op);
+        bool is_int = midgard_is_integer_op(ins->op);
 
         if (is_int) {
                 if (ins->src_shift[i]) return true;
@@ -140,8 +141,8 @@ mir_nontrivial_mod(midgard_instruction *ins, unsigned i, bool check_swizzle)
 bool
 mir_nontrivial_outmod(midgard_instruction *ins)
 {
-        bool is_int = midgard_is_integer_op(ins->alu.op);
-        unsigned mod = ins->alu.outmod;
+        bool is_int = midgard_is_integer_op(ins->op);
+        unsigned mod = ins->outmod;
 
         if (ins->dest_type != ins->src_types[1])
                 return true;
@@ -286,7 +287,7 @@ mir_bytemask_of_read_components_index(midgard_instruction *ins, unsigned i)
 
         /* Handle dot products and things */
         if (ins->type == TAG_ALU_4 && !ins->compact_branch) {
-                unsigned props = alu_opcode_props[ins->alu.op].props;
+                unsigned props = alu_opcode_props[ins->op].props;
 
                 unsigned channel_override = GET_CHANNEL_COUNT(props);
 
@@ -335,7 +336,7 @@ mir_bundle_for_op(compiler_context *ctx, midgard_instruction ins)
         };
 
         if (bundle.tag == TAG_ALU_4) {
-                assert(OP_IS_MOVE(u->alu.op));
+                assert(OP_IS_MOVE(u->op));
                 u->unit = UNIT_VMUL;
 
                 size_t bytes_emitted = sizeof(uint32_t) + sizeof(midgard_reg_info) + sizeof(midgard_vector_alu);
@@ -423,10 +424,6 @@ mir_flip(midgard_instruction *ins)
         ins->src[1] = temp;
 
         assert(ins->type == TAG_ALU_4);
-
-        temp = ins->alu.src1;
-        ins->alu.src1 = ins->alu.src2;
-        ins->alu.src2 = temp;
 
         temp = ins->src_types[0];
         ins->src_types[0] = ins->src_types[1];

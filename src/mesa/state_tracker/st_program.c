@@ -52,6 +52,7 @@
 #include "tgsi/tgsi_emulate.h"
 #include "tgsi/tgsi_parse.h"
 #include "tgsi/tgsi_ureg.h"
+#include "nir/nir_to_tgsi.h"
 
 #include "util/u_memory.h"
 
@@ -62,8 +63,7 @@
 #include "st_tgsi_lower_depth_clamp.h"
 #include "st_tgsi_lower_yuv.h"
 #include "st_program.h"
-#include "st_mesa_to_tgsi.h"
-#include "st_atifs_to_tgsi.h"
+#include "st_atifs_to_nir.h"
 #include "st_nir.h"
 #include "st_shader_cache.h"
 #include "st_util.h"
@@ -354,8 +354,6 @@ st_release_program(struct st_context *st, struct st_program **p)
 void
 st_finalize_nir_before_variants(struct nir_shader *nir)
 {
-   NIR_PASS_V(nir, nir_opt_access);
-
    NIR_PASS_V(nir, nir_split_var_copies);
    NIR_PASS_V(nir, nir_lower_var_copies);
    if (nir->options->lower_all_io_to_temps ||
@@ -367,27 +365,24 @@ st_finalize_nir_before_variants(struct nir_shader *nir)
       NIR_PASS_V(nir, nir_lower_io_arrays_to_elements_no_indirects, true);
    }
 
+   /* st_nir_assign_vs_in_locations requires correct shader info. */
+   nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+
    st_nir_assign_vs_in_locations(nir);
 }
 
-/**
- * Translate ARB (asm) program to NIR
- */
-static nir_shader *
-st_translate_prog_to_nir(struct st_context *st, struct gl_program *prog,
-                         gl_shader_stage stage)
+static void
+st_prog_to_nir_postprocess(struct st_context *st, nir_shader *nir,
+                           struct gl_program *prog)
 {
-   struct pipe_screen *screen = st->pipe->screen;
-   const struct gl_shader_compiler_options *options =
-      &st->ctx->Const.ShaderCompilerOptions[stage];
+   struct pipe_screen *screen = st->screen;
 
-   /* Translate to NIR */
-   nir_shader *nir = prog_to_nir(prog, options->NirOptions);
-   NIR_PASS_V(nir, nir_lower_regs_to_ssa); /* turn registers into SSA */
+   NIR_PASS_V(nir, nir_lower_regs_to_ssa);
    nir_validate_shader(nir, "after st/ptn lower_regs_to_ssa");
 
    NIR_PASS_V(nir, st_nir_lower_wpos_ytransform, prog, screen);
    NIR_PASS_V(nir, nir_lower_system_values);
+   NIR_PASS_V(nir, nir_lower_compute_system_values, NULL);
 
    /* Optimise NIR */
    NIR_PASS_V(nir, nir_opt_constant_folding);
@@ -398,6 +393,22 @@ st_translate_prog_to_nir(struct st_context *st, struct gl_program *prog,
       st_finalize_nir(st, prog, NULL, nir, true);
 
    nir_validate_shader(nir, "after st/glsl finalize_nir");
+}
+
+/**
+ * Translate ARB (asm) program to NIR
+ */
+static nir_shader *
+st_translate_prog_to_nir(struct st_context *st, struct gl_program *prog,
+                         gl_shader_stage stage)
+{
+   const struct nir_shader_compiler_options *options =
+      st_get_nir_compiler_options(st, prog->info.stage);
+
+   /* Translate to NIR */
+   nir_shader *nir = prog_to_nir(prog, options);
+
+   st_prog_to_nir_postprocess(st, nir, prog);
 
    return nir;
 }
@@ -509,47 +520,21 @@ st_translate_vertex_program(struct st_context *st,
       if (stp->Base.Parameters->NumParameters)
          stp->affected_states |= ST_NEW_VS_CONSTANTS;
 
-      /* Translate to NIR if preferred. */
-      if (st->pipe->screen->get_shader_param(st->pipe->screen,
-                                             PIPE_SHADER_VERTEX,
-                                             PIPE_SHADER_CAP_PREFERRED_IR)) {
-         assert(!stp->glsl_to_tgsi);
+      if (stp->Base.nir)
+         ralloc_free(stp->Base.nir);
 
-         if (stp->Base.nir)
-            ralloc_free(stp->Base.nir);
-
-         if (stp->serialized_nir) {
-            free(stp->serialized_nir);
-            stp->serialized_nir = NULL;
-         }
-
-         stp->state.type = PIPE_SHADER_IR_NIR;
-         stp->Base.nir = st_translate_prog_to_nir(st, &stp->Base,
-                                                  MESA_SHADER_VERTEX);
-
-         /* We must update stp->Base.info after translation and before
-          * st_prepare_vertex_program is called, because inputs_read
-          * may become outdated after NIR optimization passes.
-          *
-          * For ffvp/ARB_vp inputs_read is populated based
-          * on declared attributes without taking their usage into
-          * consideration. When creating shader variants we expect
-          * that their inputs_read would match the base ones for
-          * input mapping to work properly.
-          */
-         nir_shader_gather_info(stp->Base.nir,
-                                nir_shader_get_entrypoint(stp->Base.nir));
-         st_nir_assign_vs_in_locations(stp->Base.nir);
-         stp->Base.info = stp->Base.nir->info;
-
-         /* For st_draw_feedback, we need to generate TGSI too if draw doesn't
-          * use LLVM.
-          */
-         if (draw_has_llvm()) {
-            st_prepare_vertex_program(stp);
-            return true;
-         }
+      if (stp->serialized_nir) {
+         free(stp->serialized_nir);
+         stp->serialized_nir = NULL;
       }
+
+      stp->state.type = PIPE_SHADER_IR_NIR;
+      stp->Base.nir = st_translate_prog_to_nir(st, &stp->Base,
+                                               MESA_SHADER_VERTEX);
+      stp->Base.info = stp->Base.nir->info;
+
+      st_prepare_vertex_program(stp);
+      return true;
    }
 
    st_prepare_vertex_program(stp);
@@ -569,16 +554,11 @@ st_translate_vertex_program(struct st_context *st,
    output_semantic_name[num_outputs] = TGSI_SEMANTIC_EDGEFLAG;
    output_semantic_index[num_outputs] = 0;
 
-   ureg = ureg_create_with_screen(PIPE_SHADER_VERTEX, st->pipe->screen);
+   ureg = ureg_create_with_screen(PIPE_SHADER_VERTEX, st->screen);
    if (ureg == NULL)
       return false;
 
-   if (stp->Base.info.clip_distance_array_size)
-      ureg_property(ureg, TGSI_PROPERTY_NUM_CLIPDIST_ENABLED,
-                    stp->Base.info.clip_distance_array_size);
-   if (stp->Base.info.cull_distance_array_size)
-      ureg_property(ureg, TGSI_PROPERTY_NUM_CULLDIST_ENABLED,
-                    stp->Base.info.cull_distance_array_size);
+   ureg_setup_shader_info(ureg, &stp->Base.info);
 
    if (ST_DEBUG & DEBUG_MESA) {
       _mesa_print_program(&stp->Base);
@@ -588,47 +568,30 @@ st_translate_vertex_program(struct st_context *st,
 
    struct st_vertex_program *stvp = (struct st_vertex_program *)stp;
 
-   if (stp->glsl_to_tgsi) {
-      error = st_translate_program(st->ctx,
-                                   PIPE_SHADER_VERTEX,
-                                   ureg,
-                                   stp->glsl_to_tgsi,
-                                   &stp->Base,
-                                   /* inputs */
-                                   stvp->num_inputs,
-                                   stvp->input_to_index,
-                                   NULL, /* inputSlotToAttr */
-                                   NULL, /* input semantic name */
-                                   NULL, /* input semantic index */
-                                   NULL, /* interp mode */
-                                   /* outputs */
-                                   num_outputs,
-                                   stvp->result_to_output,
-                                   output_semantic_name,
-                                   output_semantic_index);
+   error = st_translate_program(st->ctx,
+                                PIPE_SHADER_VERTEX,
+                                ureg,
+                                stp->glsl_to_tgsi,
+                                &stp->Base,
+                                /* inputs */
+                                stvp->num_inputs,
+                                stvp->input_to_index,
+                                NULL, /* inputSlotToAttr */
+                                NULL, /* input semantic name */
+                                NULL, /* input semantic index */
+                                NULL, /* interp mode */
+                                /* outputs */
+                                num_outputs,
+                                stvp->result_to_output,
+                                output_semantic_name,
+                                output_semantic_index);
 
-      st_translate_stream_output_info(&stp->Base);
+   st_translate_stream_output_info(&stp->Base);
 
-      free_glsl_to_tgsi_visitor(stp->glsl_to_tgsi);
-   } else
-      error = st_translate_mesa_program(st->ctx,
-                                        PIPE_SHADER_VERTEX,
-                                        ureg,
-                                        &stp->Base,
-                                        /* inputs */
-                                        stvp->num_inputs,
-                                        stvp->input_to_index,
-                                        NULL, /* input semantic name */
-                                        NULL, /* input semantic index */
-                                        NULL,
-                                        /* outputs */
-                                        num_outputs,
-                                        stvp->result_to_output,
-                                        output_semantic_name,
-                                        output_semantic_index);
+   free_glsl_to_tgsi_visitor(stp->glsl_to_tgsi);
 
    if (error) {
-      debug_printf("%s: failed to translate Mesa program:\n", __func__);
+      debug_printf("%s: failed to translate GLSL IR program:\n", __func__);
       _mesa_print_program(&stp->Base);
       debug_assert(0);
       return false;
@@ -637,10 +600,8 @@ st_translate_vertex_program(struct st_context *st,
    stp->state.tokens = ureg_get_tokens(ureg, NULL);
    ureg_destroy(ureg);
 
-   if (stp->glsl_to_tgsi) {
-      stp->glsl_to_tgsi = NULL;
-      st_store_ir_in_disk_cache(st, &stp->Base, false);
-   }
+   stp->glsl_to_tgsi = NULL;
+   st_store_ir_in_disk_cache(st, &stp->Base, false);
 
    return stp->state.tokens != NULL;
 }
@@ -662,10 +623,51 @@ get_nir_shader(struct st_context *st, struct st_program *stp)
 
    struct blob_reader blob_reader;
    const struct nir_shader_compiler_options *options =
-      st->ctx->Const.ShaderCompilerOptions[stp->Base.info.stage].NirOptions;
+      st_get_nir_compiler_options(st, stp->Base.info.stage);
 
    blob_reader_init(&blob_reader, stp->serialized_nir, stp->serialized_nir_size);
    return nir_deserialize(NULL, options, &blob_reader);
+}
+
+static void
+lower_ucp(struct st_context *st,
+          struct nir_shader *nir,
+          unsigned ucp_enables,
+          struct gl_program_parameter_list *params)
+{
+   if (nir->info.outputs_written & VARYING_BIT_CLIP_DIST0)
+      NIR_PASS_V(nir, nir_lower_clip_disable, ucp_enables);
+   else {
+      struct pipe_screen *screen = st->screen;
+      bool can_compact = screen->get_param(screen,
+                                           PIPE_CAP_NIR_COMPACT_ARRAYS);
+      bool use_eye = st->ctx->_Shader->CurrentProgram[MESA_SHADER_VERTEX] != NULL;
+
+      gl_state_index16 clipplane_state[MAX_CLIP_PLANES][STATE_LENGTH] = {{0}};
+      for (int i = 0; i < MAX_CLIP_PLANES; ++i) {
+         if (use_eye) {
+            clipplane_state[i][0] = STATE_CLIPPLANE;
+            clipplane_state[i][1] = i;
+         } else {
+            clipplane_state[i][0] = STATE_INTERNAL;
+            clipplane_state[i][1] = STATE_CLIP_INTERNAL;
+            clipplane_state[i][2] = i;
+         }
+         _mesa_add_state_reference(params, clipplane_state[i]);
+      }
+
+      if (nir->info.stage == MESA_SHADER_VERTEX) {
+         NIR_PASS_V(nir, nir_lower_clip_vs, ucp_enables,
+                    true, can_compact, clipplane_state);
+      } else if (nir->info.stage == MESA_SHADER_GEOMETRY) {
+         NIR_PASS_V(nir, nir_lower_clip_gs, ucp_enables,
+                    can_compact, clipplane_state);
+      }
+
+      NIR_PASS_V(nir, nir_lower_io_to_temporaries,
+                 nir_shader_get_entrypoint(nir), true, false);
+      NIR_PASS_V(nir, nir_lower_global_vars_to_local);
+   }
 }
 
 static const gl_state_index16 depth_range_state[STATE_LENGTH] =
@@ -678,7 +680,6 @@ st_create_vp_variant(struct st_context *st,
 {
    struct st_common_variant *vpv = CALLOC_STRUCT(st_common_variant);
    struct pipe_context *pipe = st->pipe;
-   struct pipe_screen *screen = pipe->screen;
    struct pipe_shader_state state = {0};
 
    static const gl_state_index16 point_size_state[STATE_LENGTH] =
@@ -689,8 +690,7 @@ st_create_vp_variant(struct st_context *st,
 
    state.stream_output = stvp->state.stream_output;
 
-   if (stvp->state.type == PIPE_SHADER_IR_NIR &&
-       (!key->is_draw_shader || draw_has_llvm())) {
+   if (stvp->state.type == PIPE_SHADER_IR_NIR) {
       bool finalize = false;
 
       state.type = PIPE_SHADER_IR_NIR;
@@ -708,38 +708,12 @@ st_create_vp_variant(struct st_context *st,
          _mesa_add_state_reference(params, point_size_state);
          NIR_PASS_V(state.ir.nir, nir_lower_point_size_mov,
                     point_size_state);
+         stvp->affected_states |= ST_NEW_VS_CONSTANTS;
          finalize = true;
       }
 
       if (key->lower_ucp) {
-         bool can_compact = screen->get_param(screen,
-                                              PIPE_CAP_NIR_COMPACT_ARRAYS);
-
-         bool use_eye = st->ctx->_Shader->CurrentProgram[MESA_SHADER_VERTEX] != NULL;
-         struct nir_shader *nir = state.ir.nir;
-
-         if (nir->info.outputs_written & VARYING_BIT_CLIP_DIST0)
-            NIR_PASS_V(state.ir.nir, nir_lower_clip_disable, key->lower_ucp);
-         else {
-            gl_state_index16 clipplane_state[MAX_CLIP_PLANES][STATE_LENGTH];
-            for (int i = 0; i < MAX_CLIP_PLANES; ++i) {
-               if (use_eye) {
-                  clipplane_state[i][0] = STATE_CLIPPLANE;
-                  clipplane_state[i][1] = i;
-               } else {
-                  clipplane_state[i][0] = STATE_INTERNAL;
-                  clipplane_state[i][1] = STATE_CLIP_INTERNAL;
-                  clipplane_state[i][2] = i;
-               }
-               _mesa_add_state_reference(params, clipplane_state[i]);
-            }
-
-            NIR_PASS_V(state.ir.nir, nir_lower_clip_vs, key->lower_ucp,
-                       true, can_compact, clipplane_state);
-            NIR_PASS_V(state.ir.nir, nir_lower_io_to_temporaries,
-                       nir_shader_get_entrypoint(state.ir.nir), true, false);
-            NIR_PASS_V(state.ir.nir, nir_lower_global_vars_to_local);
-         }
+         lower_ucp(st, state.ir.nir, key->lower_ucp, params);
          finalize = true;
       }
 
@@ -755,10 +729,24 @@ st_create_vp_variant(struct st_context *st,
       if (ST_DEBUG & DEBUG_PRINT_IR)
          nir_print_shader(state.ir.nir, stderr);
 
+      /* If the driver wants TGSI, then translate before handing off. */
+
+      if (st->pipe->screen->get_shader_param(st->pipe->screen,
+                                             PIPE_SHADER_VERTEX,
+                                             PIPE_SHADER_CAP_PREFERRED_IR) !=
+          PIPE_SHADER_IR_NIR) {
+         nir_shader *s = state.ir.nir;
+         state.tokens = nir_to_tgsi(s, st->pipe->screen);
+         state.type = PIPE_SHADER_IR_TGSI;
+      }
+
       if (key->is_draw_shader)
          vpv->base.driver_shader = draw_create_vertex_shader(st->draw, &state);
       else
          vpv->base.driver_shader = pipe->create_vs_state(pipe, &state);
+
+      if (state.type == PIPE_SHADER_IR_TGSI)
+         tgsi_free_tokens(state.tokens);
 
       return vpv;
    }
@@ -887,11 +875,8 @@ st_translate_fragment_program(struct st_context *st,
                                      ST_NEW_FS_SAMPLERS;
       }
 
-      /* Translate to NIR. */
-      if (!stfp->ati_fs &&
-          st->pipe->screen->get_shader_param(st->pipe->screen,
-                                             PIPE_SHADER_FRAGMENT,
-                                             PIPE_SHADER_CAP_PREFERRED_IR)) {
+      /* Translate to NIR.  ATI_fs translates at variant time. */
+      if (!stfp->ati_fs) {
          nir_shader *nir =
             st_translate_prog_to_nir(st, &stfp->Base, MESA_SHADER_FRAGMENT);
 
@@ -903,8 +888,9 @@ st_translate_fragment_program(struct st_context *st,
          }
          stfp->state.type = PIPE_SHADER_IR_NIR;
          stfp->Base.nir = nir;
-         return true;
       }
+
+      return true;
    }
 
    ubyte outputMapping[2 * FRAG_RESULT_MAX];
@@ -1018,7 +1004,7 @@ st_translate_fragment_program(struct st_context *st,
                interpMode[slot] = TGSI_INTERPOLATE_LINEAR;
                break;
             }
-            /* fall through */
+            FALLTHROUGH;
          case VARYING_SLOT_TEX0:
          case VARYING_SLOT_TEX1:
          case VARYING_SLOT_TEX2:
@@ -1034,7 +1020,7 @@ st_translate_fragment_program(struct st_context *st,
                   TGSI_INTERPOLATE_COUNT : TGSI_INTERPOLATE_PERSPECTIVE;
                break;
             }
-            /* fall through */
+            FALLTHROUGH;
          case VARYING_SLOT_VAR0:
          default:
             /* Semantic indices should be zero-based because drivers may choose
@@ -1110,7 +1096,8 @@ st_translate_fragment_program(struct st_context *st,
             assert(0);
             break;
          case FRAG_RESULT_COLOR:
-            write_all = GL_TRUE; /* fallthrough */
+            write_all = GL_TRUE;
+            FALLTHROUGH;
          default: {
             int index;
             assert(loc == FRAG_RESULT_COLOR ||
@@ -1135,9 +1122,11 @@ st_translate_fragment_program(struct st_context *st,
       }
    }
 
-   ureg = ureg_create_with_screen(PIPE_SHADER_FRAGMENT, st->pipe->screen);
+   ureg = ureg_create_with_screen(PIPE_SHADER_FRAGMENT, st->screen);
    if (ureg == NULL)
       return false;
+
+   ureg_setup_shader_info(ureg, &stfp->Base.info);
 
    if (ST_DEBUG & DEBUG_MESA) {
       _mesa_print_program(&stfp->Base);
@@ -1146,29 +1135,6 @@ st_translate_fragment_program(struct st_context *st,
    }
    if (write_all == GL_TRUE)
       ureg_property(ureg, TGSI_PROPERTY_FS_COLOR0_WRITES_ALL_CBUFS, 1);
-
-   if (stfp->Base.info.fs.depth_layout != FRAG_DEPTH_LAYOUT_NONE) {
-      switch (stfp->Base.info.fs.depth_layout) {
-      case FRAG_DEPTH_LAYOUT_ANY:
-         ureg_property(ureg, TGSI_PROPERTY_FS_DEPTH_LAYOUT,
-                       TGSI_FS_DEPTH_LAYOUT_ANY);
-         break;
-      case FRAG_DEPTH_LAYOUT_GREATER:
-         ureg_property(ureg, TGSI_PROPERTY_FS_DEPTH_LAYOUT,
-                       TGSI_FS_DEPTH_LAYOUT_GREATER);
-         break;
-      case FRAG_DEPTH_LAYOUT_LESS:
-         ureg_property(ureg, TGSI_PROPERTY_FS_DEPTH_LAYOUT,
-                       TGSI_FS_DEPTH_LAYOUT_LESS);
-         break;
-      case FRAG_DEPTH_LAYOUT_UNCHANGED:
-         ureg_property(ureg, TGSI_PROPERTY_FS_DEPTH_LAYOUT,
-                       TGSI_FS_DEPTH_LAYOUT_UNCHANGED);
-         break;
-      default:
-         assert(0);
-      }
-   }
 
    if (stfp->glsl_to_tgsi) {
       st_translate_program(st->ctx,
@@ -1190,37 +1156,7 @@ st_translate_fragment_program(struct st_context *st,
                            fs_output_semantic_index);
 
       free_glsl_to_tgsi_visitor(stfp->glsl_to_tgsi);
-   } else if (stfp->ati_fs)
-      st_translate_atifs_program(ureg,
-                                 stfp->ati_fs,
-                                 &stfp->Base,
-                                 /* inputs */
-                                 fs_num_inputs,
-                                 inputMapping,
-                                 input_semantic_name,
-                                 input_semantic_index,
-                                 interpMode,
-                                 /* outputs */
-                                 fs_num_outputs,
-                                 outputMapping,
-                                 fs_output_semantic_name,
-                                 fs_output_semantic_index);
-   else
-      st_translate_mesa_program(st->ctx,
-                                PIPE_SHADER_FRAGMENT,
-                                ureg,
-                                &stfp->Base,
-                                /* inputs */
-                                fs_num_inputs,
-                                inputMapping,
-                                input_semantic_name,
-                                input_semantic_index,
-                                interpMode,
-                                /* outputs */
-                                fs_num_outputs,
-                                outputMapping,
-                                fs_output_semantic_name,
-                                fs_output_semantic_index);
+   }
 
    stfp->state.tokens = ureg_get_tokens(ureg, NULL);
    ureg_destroy(ureg);
@@ -1254,11 +1190,26 @@ st_create_fp_variant(struct st_context *st,
    if (!variant)
       return NULL;
 
-   if (stfp->state.type == PIPE_SHADER_IR_NIR) {
-      bool finalize = false;
+   /* Translate ATI_fs to NIR at variant time because that's when we have the
+    * texture types.
+    */
+   if (stfp->ati_fs) {
+      const struct nir_shader_compiler_options *options =
+         st_get_nir_compiler_options(st, MESA_SHADER_FRAGMENT);
+
+      nir_shader *s = st_translate_atifs_program(stfp->ati_fs, key, &stfp->Base, options);
+
+      st_prog_to_nir_postprocess(st, s, &stfp->Base);
 
       state.type = PIPE_SHADER_IR_NIR;
+      state.ir.nir = s;
+   } else if (stfp->state.type == PIPE_SHADER_IR_NIR) {
+      state.type = PIPE_SHADER_IR_NIR;
       state.ir.nir = get_nir_shader(st, stfp);
+   }
+
+   if (state.type == PIPE_SHADER_IR_NIR) {
+      bool finalize = false;
 
       if (key->clamp_color) {
          NIR_PASS_V(state.ir.nir, nir_lower_clamp_color_outputs);
@@ -1270,7 +1221,7 @@ st_create_fp_variant(struct st_context *st,
          finalize = true;
       }
 
-      if (key->lower_alpha_func != COMPARE_FUNC_NEVER) {
+      if (key->lower_alpha_func != COMPARE_FUNC_ALWAYS) {
          _mesa_add_state_reference(params, alpha_ref_state);
          NIR_PASS_V(state.ir.nir, nir_lower_alpha_test, key->lower_alpha_func,
                     false, alpha_ref_state);
@@ -1285,7 +1236,7 @@ st_create_fp_variant(struct st_context *st,
 
       if (key->persample_shading) {
           nir_shader *shader = state.ir.nir;
-          nir_foreach_variable(var, &shader->inputs)
+          nir_foreach_shader_in_variable(var, shader)
              var->data.sample = true;
           finalize = true;
       }
@@ -1340,9 +1291,10 @@ st_create_fp_variant(struct st_context *st,
 
       if (unlikely(key->external.lower_nv12 || key->external.lower_iyuv ||
                    key->external.lower_xy_uxvx || key->external.lower_yx_xuxv ||
-                   key->external.lower_ayuv || key->external.lower_xyuv)) {
+                   key->external.lower_ayuv || key->external.lower_xyuv ||
+                   key->external.lower_yuv)) {
 
-         st_nir_lower_samplers(pipe->screen, state.ir.nir,
+         st_nir_lower_samplers(st->screen, state.ir.nir,
                                stfp->shader_program, &stfp->Base);
 
          nir_lower_tex_options options = {0};
@@ -1352,6 +1304,7 @@ st_create_fp_variant(struct st_context *st,
          options.lower_yx_xuxv_external = key->external.lower_yx_xuxv;
          options.lower_ayuv_external = key->external.lower_ayuv;
          options.lower_xyuv_external = key->external.lower_xyuv;
+         options.lower_yuv_external = key->external.lower_yuv;
          NIR_PASS_V(state.ir.nir, nir_lower_tex, &options);
          finalize = true;
       }
@@ -1364,7 +1317,8 @@ st_create_fp_variant(struct st_context *st,
       /* This pass needs to happen *after* nir_lower_sampler */
       if (unlikely(key->external.lower_nv12 || key->external.lower_iyuv ||
                    key->external.lower_xy_uxvx || key->external.lower_yx_xuxv ||
-                   key->external.lower_ayuv || key->external.lower_xyuv)) {
+                   key->external.lower_ayuv || key->external.lower_xyuv ||
+                   key->external.lower_yuv)) {
          NIR_PASS_V(state.ir.nir, st_nir_lower_tex_src_plane,
                     ~stfp->Base.SamplersUsed,
                     key->external.lower_nv12 || key->external.lower_xy_uxvx ||
@@ -1378,7 +1332,7 @@ st_create_fp_variant(struct st_context *st,
          nir_shader_gather_info(state.ir.nir,
                                 nir_shader_get_entrypoint(state.ir.nir));
 
-         struct pipe_screen *screen = pipe->screen;
+         struct pipe_screen *screen = st->screen;
          if (screen->finalize_nir)
             screen->finalize_nir(screen, state.ir.nir, false);
       }
@@ -1386,8 +1340,21 @@ st_create_fp_variant(struct st_context *st,
       if (ST_DEBUG & DEBUG_PRINT_IR)
          nir_print_shader(state.ir.nir, stderr);
 
+      /* If the driver wants TGSI, then translate before handing off. */
+      if (st->pipe->screen->get_shader_param(st->pipe->screen,
+                                             PIPE_SHADER_FRAGMENT,
+                                             PIPE_SHADER_CAP_PREFERRED_IR) !=
+          PIPE_SHADER_IR_NIR) {
+         nir_shader *s = state.ir.nir;
+         state.tokens = nir_to_tgsi(s, st->pipe->screen);
+         state.type = PIPE_SHADER_IR_TGSI;
+      }
+
       variant->base.driver_shader = pipe->create_fs_state(pipe, &state);
       variant->key = *key;
+
+      if (state.type == PIPE_SHADER_IR_TGSI)
+         tgsi_free_tokens(state.tokens);
 
       return variant;
    }
@@ -1395,16 +1362,6 @@ st_create_fp_variant(struct st_context *st,
    state.tokens = stfp->state.tokens;
 
    assert(!(key->bitmap && key->drawpixels));
-
-   /* Fix texture targets and add fog for ATI_fs */
-   if (stfp->ati_fs) {
-      const struct tgsi_token *tokens = st_fixup_atifs(state.tokens, key);
-
-      if (tokens)
-         state.tokens = tokens;
-      else
-         fprintf(stderr, "mesa: cannot post-process ATI_fs\n");
-   }
 
    /* Emulate features. */
    if (key->clamp_color || key->persample_shading) {
@@ -1586,53 +1543,12 @@ st_translate_common_program(struct st_context *st,
    struct gl_program *prog = &stp->Base;
    enum pipe_shader_type stage =
       pipe_shader_type_from_mesa(stp->Base.info.stage);
-   struct ureg_program *ureg = ureg_create_with_screen(stage, st->pipe->screen);
+   struct ureg_program *ureg = ureg_create_with_screen(stage, st->screen);
 
    if (ureg == NULL)
       return false;
 
-   switch (stage) {
-   case PIPE_SHADER_TESS_CTRL:
-      ureg_property(ureg, TGSI_PROPERTY_TCS_VERTICES_OUT,
-                    stp->Base.info.tess.tcs_vertices_out);
-      break;
-
-   case PIPE_SHADER_TESS_EVAL:
-      if (stp->Base.info.tess.primitive_mode == GL_ISOLINES)
-         ureg_property(ureg, TGSI_PROPERTY_TES_PRIM_MODE, GL_LINES);
-      else
-         ureg_property(ureg, TGSI_PROPERTY_TES_PRIM_MODE,
-                       stp->Base.info.tess.primitive_mode);
-
-      STATIC_ASSERT((TESS_SPACING_EQUAL + 1) % 3 == PIPE_TESS_SPACING_EQUAL);
-      STATIC_ASSERT((TESS_SPACING_FRACTIONAL_ODD + 1) % 3 ==
-                    PIPE_TESS_SPACING_FRACTIONAL_ODD);
-      STATIC_ASSERT((TESS_SPACING_FRACTIONAL_EVEN + 1) % 3 ==
-                    PIPE_TESS_SPACING_FRACTIONAL_EVEN);
-
-      ureg_property(ureg, TGSI_PROPERTY_TES_SPACING,
-                    (stp->Base.info.tess.spacing + 1) % 3);
-
-      ureg_property(ureg, TGSI_PROPERTY_TES_VERTEX_ORDER_CW,
-                    !stp->Base.info.tess.ccw);
-      ureg_property(ureg, TGSI_PROPERTY_TES_POINT_MODE,
-                    stp->Base.info.tess.point_mode);
-      break;
-
-   case PIPE_SHADER_GEOMETRY:
-      ureg_property(ureg, TGSI_PROPERTY_GS_INPUT_PRIM,
-                    stp->Base.info.gs.input_primitive);
-      ureg_property(ureg, TGSI_PROPERTY_GS_OUTPUT_PRIM,
-                    stp->Base.info.gs.output_primitive);
-      ureg_property(ureg, TGSI_PROPERTY_GS_MAX_OUTPUT_VERTICES,
-                    stp->Base.info.gs.vertices_out);
-      ureg_property(ureg, TGSI_PROPERTY_GS_INVOCATIONS,
-                    stp->Base.info.gs.invocations);
-      break;
-
-   default:
-      break;
-   }
+   ureg_setup_shader_info(ureg, &stp->Base.info);
 
    ubyte inputSlotToAttr[VARYING_SLOT_TESS_MAX];
    ubyte inputMapping[VARYING_SLOT_TESS_MAX];
@@ -1653,13 +1569,6 @@ st_translate_common_program(struct st_context *st,
    memset(inputMapping, 0, sizeof(inputMapping));
    memset(outputMapping, 0, sizeof(outputMapping));
    memset(&stp->state, 0, sizeof(stp->state));
-
-   if (prog->info.clip_distance_array_size)
-      ureg_property(ureg, TGSI_PROPERTY_NUM_CLIPDIST_ENABLED,
-                    prog->info.clip_distance_array_size);
-   if (prog->info.cull_distance_array_size)
-      ureg_property(ureg, TGSI_PROPERTY_NUM_CULLDIST_ENABLED,
-                    prog->info.cull_distance_array_size);
 
    /*
     * Convert Mesa program inputs to TGSI input register semantics.
@@ -1775,6 +1684,7 @@ st_get_common_variant(struct st_context *st,
    struct pipe_context *pipe = st->pipe;
    struct st_variant *v;
    struct pipe_shader_state state = {0};
+   struct gl_program_parameter_list *params = prog->Base.Parameters;
 
    /* Search for existing variant */
    for (v = prog->variants; v; v = v->next) {
@@ -1786,17 +1696,34 @@ st_get_common_variant(struct st_context *st,
       /* create new */
       v = (struct st_variant*)CALLOC_STRUCT(st_common_variant);
       if (v) {
-	 if (prog->state.type == PIPE_SHADER_IR_NIR) {
+         if (prog->state.type == PIPE_SHADER_IR_NIR) {
             bool finalize = false;
 
-	    state.type = PIPE_SHADER_IR_NIR;
-	    state.ir.nir = get_nir_shader(st, prog);
+            state.type = PIPE_SHADER_IR_NIR;
+            state.ir.nir = get_nir_shader(st, prog);
 
             if (key->clamp_color) {
                NIR_PASS_V(state.ir.nir, nir_lower_clamp_color_outputs);
                finalize = true;
             }
 
+            if (key->lower_ucp) {
+               lower_ucp(st, state.ir.nir, key->lower_ucp, params);
+               finalize = true;
+            }
+
+            if (key->lower_point_size) {
+               static const gl_state_index16 point_size_state[STATE_LENGTH] =
+                  { STATE_INTERNAL, STATE_POINT_SIZE_CLAMPED, 0 };
+               _mesa_add_state_reference(params, point_size_state);
+               NIR_PASS_V(state.ir.nir, nir_lower_point_size_mov,
+                          point_size_state);
+               if (prog->Base.info.stage == MESA_SHADER_TESS_EVAL)
+                  prog->affected_states |= ST_NEW_TES_CONSTANTS;
+               else if (prog->Base.info.stage == MESA_SHADER_GEOMETRY)
+                  prog->affected_states |= ST_NEW_GS_CONSTANTS;
+               finalize = true;
+            }
             state.stream_output = prog->state.stream_output;
 
             if (finalize || !st->allow_st_finalize_nir_twice) {
@@ -1912,7 +1839,7 @@ destroy_program_variants(struct st_context *st, struct gl_program *target)
  * which match the given context.
  */
 static void
-destroy_shader_program_variants_cb(GLuint key, void *data, void *userData)
+destroy_shader_program_variants_cb(void *data, void *userData)
 {
    struct st_context *st = (struct st_context *) userData;
    struct gl_shader *shader = (struct gl_shader *) data;
@@ -1923,10 +1850,10 @@ destroy_shader_program_variants_cb(GLuint key, void *data, void *userData)
          struct gl_shader_program *shProg = (struct gl_shader_program *) data;
          GLuint i;
 
-	 for (i = 0; i < ARRAY_SIZE(shProg->_LinkedShaders); i++) {
-	    if (shProg->_LinkedShaders[i])
+         for (i = 0; i < ARRAY_SIZE(shProg->_LinkedShaders); i++) {
+            if (shProg->_LinkedShaders[i])
                destroy_program_variants(st, shProg->_LinkedShaders[i]->Program);
-	 }
+         }
       }
       break;
    case GL_VERTEX_SHADER:
@@ -1947,7 +1874,7 @@ destroy_shader_program_variants_cb(GLuint key, void *data, void *userData)
  * the given context.
  */
 static void
-destroy_program_variants_cb(GLuint key, void *data, void *userData)
+destroy_program_variants_cb(void *data, void *userData)
 {
    struct st_context *st = (struct st_context *) userData;
    struct gl_program *program = (struct gl_program *) data;
@@ -2005,6 +1932,11 @@ st_precompile_shader_variant(struct st_context *st,
       memset(&key, 0, sizeof(key));
 
       key.st = st->has_shareable_shaders ? NULL : st;
+      key.lower_alpha_func = COMPARE_FUNC_ALWAYS;
+      if (p->ati_fs) {
+         for (int i = 0; i < ARRAY_SIZE(key.texture_index); i++)
+            key.texture_index[i] = TEXTURE_2D_INDEX;
+      }
       st_get_fp_variant(st, p, &key);
       break;
    }
@@ -2019,6 +1951,7 @@ st_precompile_shader_variant(struct st_context *st,
       memset(&key, 0, sizeof(key));
 
       key.st = st->has_shareable_shaders ? NULL : st;
+
       st_get_common_variant(st, p, &key);
       break;
    }

@@ -79,8 +79,8 @@ anv_gen_files = files(
 )
 foreach g : [['70', ['gen7_cmd_buffer.c']], ['75', ['gen7_cmd_buffer.c']],
              ['80', ['gen8_cmd_buffer.c']], ['90', ['gen8_cmd_buffer.c']],
-             ['100', ['gen8_cmd_buffer.c']], ['110', ['gen8_cmd_buffer.c']],
-             ['120', ['gen8_cmd_buffer.c']]]
+             ['110', ['gen8_cmd_buffer.c']], ['120', ['gen8_cmd_buffer.c']],
+             ['125', ['gen8_cmd_buffer.c']]]
   _gen = g[0]
   libanv_gen_libs += static_library(
     'anv_gen@0@'.format(_gen),
@@ -132,6 +132,7 @@ libanv_files = files(
 anv_deps = [
   dep_libdrm,
   dep_valgrind,
+  idep_genxml,
   idep_nir_headers,
   idep_vulkan_util_headers,
 ]
@@ -161,7 +162,7 @@ if system_has_kms_drm and not with_platform_android
 endif
 
 if with_xlib_lease
-  anv_deps += [dep_xcb_xrandr, dep_xlib_xrandr]
+  anv_deps += [dep_xlib_xrandr]
   anv_flags += '-DVK_USE_PLATFORM_XLIB_XRANDR_EXT'
 endif
 
@@ -204,17 +205,27 @@ libvulkan_intel = shared_library(
   ],
   c_args : anv_flags,
   gnu_symbol_visibility : 'hidden',
-  link_args : ['-Wl,--build-id=sha1', ld_args_bsymbolic, ld_args_gc_sections],
+  link_args : [ld_args_build_id, ld_args_bsymbolic, ld_args_gc_sections],
   install : true,
 )
 
 if with_symbols_check
+  if get_option('buildtype') == 'debug'  # Same rule as `-DDEBUG` in /meson.build
+    _extra_args = [
+      '--ignore-symbol', 'anv_dump_start',
+      '--ignore-symbol', 'anv_dump_finish',
+    ]
+  else
+    _extra_args = []
+  endif
+
   test(
     'anv symbols check',
     symbols_check,
     args : [
       '--lib', libvulkan_intel,
       '--symbols-file', vulkan_icd_symbols,
+      _extra_args,
       symbols_check_args,
     ],
     suite : ['intel'],

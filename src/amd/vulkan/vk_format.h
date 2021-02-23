@@ -3,7 +3,7 @@
  * Copyright © 2016 Bas Nieuwenhuizen
  *
  * Based on u_format.h which is:
- * Copyright 2009-2010 Vmware, Inc.
+ * Copyright 2009-2010 VMware, Inc.
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
  * to deal in the Software without restriction, including without limitation
@@ -30,6 +30,7 @@
 #include <assert.h>
 #include <vulkan/vulkan.h>
 #include <util/macros.h>
+#include <vulkan/util/vk_format.h>
 
 enum vk_format_layout {
 	/**
@@ -147,7 +148,15 @@ struct vk_format_description
 
 extern const struct vk_format_description vk_format_description_table[];
 
+/* Silence warnings triggered by sharing function/struct names */
+#ifdef __GNUC__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wshadow"
+#endif
 const struct vk_format_description *vk_format_description(VkFormat format);
+#ifdef __GNUC__
+#pragma GCC diagnostic pop
+#endif
 
 /**
  * Return total bits needed for the pixel format per block.
@@ -430,6 +439,24 @@ vk_format_is_int(VkFormat format)
 	int channel =  vk_format_get_first_non_void_channel(format);
 
 	return channel >= 0 && desc->channel[channel].pure_integer;
+}
+
+static inline bool
+vk_format_is_uint(VkFormat format)
+{
+	return util_format_is_pure_uint(vk_format_to_pipe_format(format));
+}
+
+static inline bool
+vk_format_is_sint(VkFormat format)
+{
+	return util_format_is_pure_sint(vk_format_to_pipe_format(format));
+}
+
+static inline bool
+vk_format_is_unorm(VkFormat format)
+{
+	return util_format_is_unorm(vk_format_to_pipe_format(format));
 }
 
 static inline bool

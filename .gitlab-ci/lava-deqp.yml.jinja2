@@ -1,5 +1,7 @@
 job_name: mesa-deqp-{{ deqp_version }}-{{ gpu_version }} {{ pipeline_info }}
 device_type: {{ device_type }}
+context:
+  extra_nfsroot_args: " init=/init rootwait"
 timeouts:
   job:
     minutes: 40
@@ -27,11 +29,13 @@ actions:
 {% if kernel_image_type %}
       {{ kernel_image_type }}
 {% endif %}
-    ramdisk:
-      url: {{ base_artifacts_url }}/lava-rootfs.cpio.gz
+    nfsrootfs:
+      url: {{ base_artifacts_url }}/lava-rootfs.tgz
       compression: gz
+{% if dtb %}
     dtb:
-      url: {{ base_artifacts_url }}/{{ device_type }}.dtb
+      url: {{ base_artifacts_url }}/{{ dtb }}.dtb
+{% endif %}
     os: oe
 - boot:
     timeout:
@@ -46,7 +50,7 @@ actions:
       download_command: wget -S --progress=dot:giga
       unpack_command: tar -C / -xzf
 {% else %}
-    commands: ramdisk
+    commands: nfs
 {% endif %}
     prompts:
       - 'lava-shell:'
@@ -71,8 +75,15 @@ actions:
           - mkdir -p /dev/pts
           - mount -t devpts devpts /dev/pts
           - echo "nameserver 8.8.8.8" > /etc/resolv.conf
-          - date "+%Y%m%d %H%M" -s "{{ date }}"
+          - for i in 1 2 3; do sntp -sS pool.ntp.org && break || sleep 2; done
 
+          - modprobe amdgpu || true
+
+          - DEVFREQ_GOVERNOR=`find /sys/devices -name governor | grep gpu || true`
+          - echo performance > $DEVFREQ_GOVERNOR || true
+
+          - GPU_AUTOSUSPEND=`find /sys/devices -name autosuspend_delay_ms | grep gpu | head -1`
+          - echo -1 > $GPU_AUTOSUSPEND || true
 
 {% if env_vars %}
           - export {{ env_vars }}
@@ -84,9 +95,7 @@ actions:
           - wget -S --progress=dot:giga -O- {{ mesa_url }} | tar -xz
 
           - export DEQP_NO_SAVE_RESULTS=1
-          - 'export DEQP_RUNNER_OPTIONS="--shuffle false"'
-          - export DEQP_EXPECTED_FAILS=deqp-{{ gpu_version }}-fails.txt
-          - export DEQP_SKIPS=deqp-{{ gpu_version }}-skips.txt
+          - export GPU_VERSION={{ gpu_version }}
           - export DEQP_VER={{ deqp_version }}
           - export LIBGL_DRIVERS_PATH=`pwd`/install/lib/dri
 

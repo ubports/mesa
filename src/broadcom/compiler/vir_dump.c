@@ -30,7 +30,6 @@ vir_dump_uniform(enum quniform_contents contents,
                  uint32_t data)
 {
         static const char *quniform_names[] = {
-                [QUNIFORM_ALPHA_REF] = "alpha_ref",
                 [QUNIFORM_LINE_WIDTH] = "line_width",
                 [QUNIFORM_AA_LINE_WIDTH] = "aa_line_width",
                 [QUNIFORM_VIEWPORT_X_SCALE] = "vp_x_scale",
@@ -118,8 +117,12 @@ vir_dump_uniform(enum quniform_contents contents,
                 fprintf(stderr, "ssbo[%d]", data);
                 break;
 
-        case QUNIFORM_GET_BUFFER_SIZE:
+        case QUNIFORM_GET_SSBO_SIZE:
                 fprintf(stderr, "ssbo_size[%d]", data);
+                break;
+
+        case QUNIFORM_GET_UBO_SIZE:
+                fprintf(stderr, "ubo_size[%d]", data);
                 break;
 
         case QUNIFORM_NUM_WORK_GROUPS:

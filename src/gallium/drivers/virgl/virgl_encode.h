@@ -27,7 +27,7 @@
 #include "pipe/p_state.h"
 
 #include "virgl_winsys.h"
-#include "virgl_protocol.h"
+#include "virtio-gpu/virgl_protocol.h"
 
 struct tgsi_token;
 
@@ -135,7 +135,9 @@ int virgl_encoder_set_viewport_states(struct virgl_context *ctx,
                                       const struct pipe_viewport_state *states);
 
 int virgl_encoder_draw_vbo(struct virgl_context *ctx,
-                          const struct pipe_draw_info *info);
+                           const struct pipe_draw_info *info,
+                           const struct pipe_draw_indirect_info *indirect,
+                           const struct pipe_draw_start_count *draw);
 
 
 int virgl_encoder_create_surface(struct virgl_context *ctx,

@@ -31,9 +31,13 @@ namespace aco {
 uint64_t debug_flags = 0;
 
 static const struct debug_control aco_debug_options[] = {
-   {"validateir", DEBUG_VALIDATE},
+   {"validateir", DEBUG_VALIDATE_IR},
    {"validatera", DEBUG_VALIDATE_RA},
    {"perfwarn", DEBUG_PERFWARN},
+   {"force-waitcnt", DEBUG_FORCE_WAITCNT},
+   {"novn", DEBUG_NO_VN},
+   {"noopt", DEBUG_NO_OPT},
+   {"nosched", DEBUG_NO_SCHED},
    {NULL, 0}
 };
 
@@ -45,7 +49,7 @@ static void init_once()
 
    #ifndef NDEBUG
    /* enable some flags by default on debug builds */
-   debug_flags |= aco::DEBUG_VALIDATE;
+   debug_flags |= aco::DEBUG_VALIDATE_IR;
    #endif
 }
 
@@ -101,7 +105,10 @@ void init_program(Program *program, Stage stage, struct radv_shader_info *info,
       program->physical_sgprs = 2560; /* doesn't matter as long as it's at least 128 * 20 */
       program->sgpr_alloc_granule = 127;
       program->sgpr_limit = 106;
-      program->vgpr_alloc_granule = program->wave_size == 32 ? 7 : 3;
+      if (chip_class >= GFX10_3)
+         program->vgpr_alloc_granule = program->wave_size == 32 ? 15 : 7;
+      else
+         program->vgpr_alloc_granule = program->wave_size == 32 ? 7 : 3;
    } else if (program->chip_class >= GFX8) {
       program->physical_sgprs = 800;
       program->sgpr_alloc_granule = 15;
@@ -125,6 +132,28 @@ void init_program(Program *program, Stage stage, struct radv_shader_info *info,
    program->next_fp_mode.denorm32 = 0;
    program->next_fp_mode.round16_64 = fp_round_ne;
    program->next_fp_mode.round32 = fp_round_ne;
+}
+
+memory_sync_info get_sync_info(const Instruction* instr)
+{
+   switch (instr->format) {
+   case Format::SMEM:
+      return static_cast<const SMEM_instruction*>(instr)->sync;
+   case Format::MUBUF:
+      return static_cast<const MUBUF_instruction*>(instr)->sync;
+   case Format::MIMG:
+      return static_cast<const MIMG_instruction*>(instr)->sync;
+   case Format::MTBUF:
+      return static_cast<const MTBUF_instruction*>(instr)->sync;
+   case Format::FLAT:
+   case Format::GLOBAL:
+   case Format::SCRATCH:
+      return static_cast<const FLAT_instruction*>(instr)->sync;
+   case Format::DS:
+      return static_cast<const DS_instruction*>(instr)->sync;
+   default:
+      return memory_sync_info();
+   }
 }
 
 bool can_use_SDWA(chip_class chip, const aco_ptr<Instruction>& instr)
@@ -212,6 +241,10 @@ aco_ptr<Instruction> convert_to_SDWA(chip_class chip, aco_ptr<Instruction>& inst
    }
 
    for (unsigned i = 0; i < instr->operands.size(); i++) {
+      /* SDWA only uses operands 0 and 1. */
+      if (i >= 2)
+         break;
+
       switch (instr->operands[i].bytes()) {
       case 1:
          sdwa->sel[i] = sdwa_ubyte;
@@ -277,14 +310,14 @@ bool can_use_opsel(chip_class chip, aco_opcode op, int idx, bool high)
    case aco_opcode::v_sub_i16:
    case aco_opcode::v_add_u16_e64:
    case aco_opcode::v_sub_u16_e64:
-   case aco_opcode::v_cvt_pknorm_i16_f16:
-   case aco_opcode::v_cvt_pknorm_u16_f16:
    case aco_opcode::v_lshlrev_b16_e64:
    case aco_opcode::v_lshrrev_b16_e64:
    case aco_opcode::v_ashrrev_i16_e64:
    case aco_opcode::v_mul_lo_u16_e64:
       return true;
    case aco_opcode::v_pack_b32_f16:
+   case aco_opcode::v_cvt_pknorm_i16_f16:
+   case aco_opcode::v_cvt_pknorm_u16_f16:
       return idx != -1;
    case aco_opcode::v_mad_u32_u16:
    case aco_opcode::v_mad_i32_i16:
@@ -292,6 +325,120 @@ bool can_use_opsel(chip_class chip, aco_opcode op, int idx, bool high)
    default:
       return false;
    }
+}
+
+uint32_t get_reduction_identity(ReduceOp op, unsigned idx)
+{
+   switch (op) {
+   case iadd8:
+   case iadd16:
+   case iadd32:
+   case iadd64:
+   case fadd16:
+   case fadd32:
+   case fadd64:
+   case ior8:
+   case ior16:
+   case ior32:
+   case ior64:
+   case ixor8:
+   case ixor16:
+   case ixor32:
+   case ixor64:
+   case umax8:
+   case umax16:
+   case umax32:
+   case umax64:
+      return 0;
+   case imul8:
+   case imul16:
+   case imul32:
+   case imul64:
+      return idx ? 0 : 1;
+   case fmul16:
+      return 0x3c00u; /* 1.0 */
+   case fmul32:
+      return 0x3f800000u; /* 1.0 */
+   case fmul64:
+      return idx ? 0x3ff00000u : 0u; /* 1.0 */
+   case imin8:
+      return INT8_MAX;
+   case imin16:
+      return INT16_MAX;
+   case imin32:
+      return INT32_MAX;
+   case imin64:
+      return idx ? 0x7fffffffu : 0xffffffffu;
+   case imax8:
+      return INT8_MIN;
+   case imax16:
+      return INT16_MIN;
+   case imax32:
+      return INT32_MIN;
+   case imax64:
+      return idx ? 0x80000000u : 0;
+   case umin8:
+   case umin16:
+   case iand8:
+   case iand16:
+      return 0xffffffffu;
+   case umin32:
+   case umin64:
+   case iand32:
+   case iand64:
+      return 0xffffffffu;
+   case fmin16:
+      return 0x7c00u; /* infinity */
+   case fmin32:
+      return 0x7f800000u; /* infinity */
+   case fmin64:
+      return idx ? 0x7ff00000u : 0u; /* infinity */
+   case fmax16:
+      return 0xfc00u; /* negative infinity */
+   case fmax32:
+      return 0xff800000u; /* negative infinity */
+   case fmax64:
+      return idx ? 0xfff00000u : 0u; /* negative infinity */
+   default:
+      unreachable("Invalid reduction operation");
+      break;
+   }
+   return 0;
+}
+
+bool needs_exec_mask(const Instruction* instr) {
+   if (instr->isSALU())
+      return instr->reads_exec();
+   if (instr->format == Format::SMEM || instr->isSALU())
+      return false;
+   if (instr->format == Format::PSEUDO_BARRIER)
+      return false;
+
+   if (instr->format == Format::PSEUDO) {
+      switch (instr->opcode) {
+      case aco_opcode::p_create_vector:
+      case aco_opcode::p_extract_vector:
+      case aco_opcode::p_split_vector:
+         for (Definition def : instr->definitions) {
+            if (def.getTemp().type() == RegType::vgpr)
+               return true;
+         }
+         return false;
+      case aco_opcode::p_spill:
+      case aco_opcode::p_reload:
+         return false;
+      default:
+         break;
+      }
+   }
+
+   if (instr->opcode == aco_opcode::v_readlane_b32 ||
+       instr->opcode == aco_opcode::v_readlane_b32_e64 ||
+       instr->opcode == aco_opcode::v_writelane_b32 ||
+       instr->opcode == aco_opcode::v_writelane_b32_e64)
+      return false;
+
+   return true;
 }
 
 }

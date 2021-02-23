@@ -105,8 +105,8 @@ required_stream_size(struct etna_context *ctx)
    size += ctx->vertex_elements->num_elements + 1;
 
    /* uniforms - worst case (2 words per uniform load) */
-   size += ctx->shader.vs->uniforms.imm_count * 2;
-   size += ctx->shader.fs->uniforms.imm_count * 2;
+   size += ctx->shader.vs->uniforms.count * 2;
+   size += ctx->shader.fs->uniforms.count * 2;
 
    /* shader */
    size += ctx->shader_state.vs_inst_mem_size + 1;
@@ -233,6 +233,8 @@ etna_emit_state(struct etna_context *ctx)
    uint32_t to_flush = 0;
    if (unlikely(dirty & (ETNA_DIRTY_BLEND)))
       to_flush |= VIVS_GL_FLUSH_CACHE_COLOR;
+   if (unlikely(dirty & ETNA_DIRTY_ZSA))
+      to_flush |= VIVS_GL_FLUSH_CACHE_DEPTH;
    if (unlikely(dirty & (ETNA_DIRTY_TEXTURE_CACHES)))
       to_flush |= VIVS_GL_FLUSH_CACHE_TEXTURE;
    if (unlikely(dirty & (ETNA_DIRTY_FRAMEBUFFER))) /* Framebuffer config changed? */
@@ -411,6 +413,9 @@ etna_emit_state(struct etna_context *ctx)
    if (unlikely(dirty & (ETNA_DIRTY_SHADER))) {
       /*00E00*/ EMIT_STATE(RA_CONTROL, ctx->shader_state.RA_CONTROL);
    }
+   if (unlikely(dirty & (ETNA_DIRTY_ZSA))) {
+      /*00E08*/ EMIT_STATE(RA_EARLY_DEPTH, etna_zsa_state(ctx->zsa)->RA_DEPTH_CONFIG);
+   }
    if (unlikely(dirty & (ETNA_DIRTY_SHADER | ETNA_DIRTY_FRAMEBUFFER))) {
       /*01004*/ EMIT_STATE(PS_OUTPUT_REG, ctx->shader_state.PS_OUTPUT_REG);
       /*01008*/ EMIT_STATE(PS_INPUT_COUNT,
@@ -426,8 +431,7 @@ etna_emit_state(struct etna_context *ctx)
    }
    if (unlikely(dirty & (ETNA_DIRTY_ZSA | ETNA_DIRTY_FRAMEBUFFER | ETNA_DIRTY_SHADER))) {
       /*01400*/ EMIT_STATE(PE_DEPTH_CONFIG, (etna_zsa_state(ctx->zsa)->PE_DEPTH_CONFIG |
-                                             ctx->framebuffer.PE_DEPTH_CONFIG) &
-                                            ctx->shader_state.PE_DEPTH_CONFIG);
+                                             ctx->framebuffer.PE_DEPTH_CONFIG));
    }
    if (unlikely(dirty & (ETNA_DIRTY_VIEWPORT))) {
       /*01404*/ EMIT_STATE(PE_DEPTH_NEAR, ctx->viewport.PE_DEPTH_NEAR);

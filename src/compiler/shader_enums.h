@@ -51,8 +51,19 @@ typedef enum
    MESA_SHADER_GEOMETRY = 3,
    MESA_SHADER_FRAGMENT = 4,
    MESA_SHADER_COMPUTE = 5,
+
+   /* Vulkan-only stages. */
+   MESA_SHADER_TASK         = 6,
+   MESA_SHADER_MESH         = 7,
+   MESA_SHADER_RAYGEN       = 8,
+   MESA_SHADER_ANY_HIT      = 9,
+   MESA_SHADER_CLOSEST_HIT  = 10,
+   MESA_SHADER_MISS         = 11,
+   MESA_SHADER_INTERSECTION = 12,
+   MESA_SHADER_CALLABLE     = 13,
+
    /* must be last so it doesn't affect the GL pipeline */
-   MESA_SHADER_KERNEL = 6,
+   MESA_SHADER_KERNEL = 14,
 } gl_shader_stage;
 
 static inline bool
@@ -61,11 +72,21 @@ gl_shader_stage_is_compute(gl_shader_stage stage)
    return stage == MESA_SHADER_COMPUTE || stage == MESA_SHADER_KERNEL;
 }
 
+static inline bool
+gl_shader_stage_is_callable(gl_shader_stage stage)
+{
+   return stage == MESA_SHADER_ANY_HIT ||
+          stage == MESA_SHADER_CLOSEST_HIT ||
+          stage == MESA_SHADER_MISS ||
+          stage == MESA_SHADER_INTERSECTION ||
+          stage == MESA_SHADER_CALLABLE;
+}
+
 /**
  * Number of STATE_* values we need to address any GL state.
  * Used to dimension arrays.
  */
-#define STATE_LENGTH 5
+#define STATE_LENGTH 4
 
 typedef short gl_state_index16; /* see enum gl_state_index */
 
@@ -87,6 +108,11 @@ const char *_mesa_shader_stage_to_abbrev(unsigned stage);
  * GL related stages (not including CL)
  */
 #define MESA_SHADER_STAGES (MESA_SHADER_COMPUTE + 1)
+
+/**
+ * Vulkan stages (not including CL)
+ */
+#define MESA_VULKAN_SHADER_STAGES (MESA_SHADER_CALLABLE + 1)
 
 /**
  * All stages
@@ -262,7 +288,8 @@ typedef enum
    VARYING_SLOT_BOUNDING_BOX1, /* Only appears as TCS output. */
    VARYING_SLOT_VIEW_INDEX,
    VARYING_SLOT_VIEWPORT_MASK, /* Does not appear in FS */
-   VARYING_SLOT_VAR0, /* First generic varying slot */
+   VARYING_SLOT_PRIMITIVE_SHADING_RATE = VARYING_SLOT_FACE, /* Does not appear in FS. */
+   VARYING_SLOT_VAR0 = 32, /* First generic varying slot */
    /* the remaining are simply for the benefit of gl_varying_slot_name()
     * and not to be construed as an upper bound:
     */
@@ -306,6 +333,9 @@ typedef enum
 #define MAX_VARYINGS_INCL_PATCH (VARYING_SLOT_TESS_MAX - VARYING_SLOT_VAR0)
 
 const char *gl_varying_slot_name(gl_varying_slot slot);
+const char *gl_varying_slot_name_for_stage(gl_varying_slot slot,
+                                           gl_shader_stage stage);
+
 
 /**
  * Bitflags for varying slots.
@@ -351,14 +381,6 @@ const char *gl_varying_slot_name(gl_varying_slot slot);
 #define VARYING_BIT_VIEWPORT_MASK BITFIELD64_BIT(VARYING_SLOT_VIEWPORT_MASK)
 #define VARYING_BIT_VAR(V) BITFIELD64_BIT(VARYING_SLOT_VAR0 + (V))
 /*@}*/
-
-/**
- * Bitflags for system values.
- */
-#define SYSTEM_BIT_SAMPLE_ID ((uint64_t)1 << SYSTEM_VALUE_SAMPLE_ID)
-#define SYSTEM_BIT_SAMPLE_POS ((uint64_t)1 << SYSTEM_VALUE_SAMPLE_POS)
-#define SYSTEM_BIT_SAMPLE_MASK_IN ((uint64_t)1 << SYSTEM_VALUE_SAMPLE_MASK_IN)
-#define SYSTEM_BIT_LOCAL_INVOCATION_ID ((uint64_t)1 << SYSTEM_VALUE_LOCAL_INVOCATION_ID)
 
 /**
  * If the gl_register_file is PROGRAM_SYSTEM_VALUE, the register index will be
@@ -615,6 +637,7 @@ typedef enum
    SYSTEM_VALUE_LOCAL_INVOCATION_ID,
    SYSTEM_VALUE_LOCAL_INVOCATION_INDEX,
    SYSTEM_VALUE_GLOBAL_INVOCATION_ID,
+   SYSTEM_VALUE_BASE_GLOBAL_INVOCATION_ID,
    SYSTEM_VALUE_GLOBAL_INVOCATION_INDEX,
    SYSTEM_VALUE_WORK_GROUP_ID,
    SYSTEM_VALUE_NUM_WORK_GROUPS,
@@ -653,12 +676,37 @@ typedef enum
    SYSTEM_VALUE_BARYCENTRIC_PULL_MODEL,
 
    /**
+    * \name Ray tracing shader system values
+    */
+   /*@{*/
+   SYSTEM_VALUE_RAY_LAUNCH_ID,
+   SYSTEM_VALUE_RAY_LAUNCH_SIZE,
+   SYSTEM_VALUE_RAY_WORLD_ORIGIN,
+   SYSTEM_VALUE_RAY_WORLD_DIRECTION,
+   SYSTEM_VALUE_RAY_OBJECT_ORIGIN,
+   SYSTEM_VALUE_RAY_OBJECT_DIRECTION,
+   SYSTEM_VALUE_RAY_T_MIN,
+   SYSTEM_VALUE_RAY_T_MAX,
+   SYSTEM_VALUE_RAY_OBJECT_TO_WORLD,
+   SYSTEM_VALUE_RAY_WORLD_TO_OBJECT,
+   SYSTEM_VALUE_RAY_HIT_KIND,
+   SYSTEM_VALUE_RAY_FLAGS,
+   SYSTEM_VALUE_RAY_GEOMETRY_INDEX,
+   SYSTEM_VALUE_RAY_INSTANCE_CUSTOM_INDEX,
+   /*@}*/
+
+   /**
     * IR3 specific geometry shader and tesselation control shader system
     * values that packs invocation id, thread id and vertex id.  Having this
     * as a nir level system value lets us do the unpacking in nir.
     */
    SYSTEM_VALUE_GS_HEADER_IR3,
    SYSTEM_VALUE_TCS_HEADER_IR3,
+
+   /**
+    * Fragment shading rate used for KHR_fragment_shading_rate (Vulkan).
+    */
+   SYSTEM_VALUE_FRAG_SHADING_RATE,
 
    SYSTEM_VALUE_MAX             /**< Number of values */
 } gl_system_value;
@@ -679,6 +727,7 @@ enum glsl_interp_mode
    INTERP_MODE_FLAT,
    INTERP_MODE_NOPERSPECTIVE,
    INTERP_MODE_EXPLICIT,
+   INTERP_MODE_COLOR, /**< glShadeModel determines the interp mode */
    INTERP_MODE_COUNT /**< Number of interpolation qualifiers */
 };
 
@@ -749,7 +798,11 @@ enum gl_access_qualifier
    ACCESS_COHERENT      = (1 << 0),
    ACCESS_RESTRICT      = (1 << 1),
    ACCESS_VOLATILE      = (1 << 2),
+
+   /* The memory used by the access/variable is not read. */
    ACCESS_NON_READABLE  = (1 << 3),
+
+   /* The memory used by the access/variable is not written. */
    ACCESS_NON_WRITEABLE = (1 << 4),
 
    /** The access may use a non-uniform buffer or image index */
@@ -758,8 +811,7 @@ enum gl_access_qualifier
    /* This has the same semantics as NIR_INTRINSIC_CAN_REORDER, only to be
     * used with loads. In other words, it means that the load can be
     * arbitrarily reordered, or combined with other loads to the same address.
-    * It is implied by ACCESS_NON_WRITEABLE together with ACCESS_RESTRICT, and
-    * a lack of ACCESS_COHERENT and ACCESS_VOLATILE.
+    * It is implied by ACCESS_NON_WRITEABLE and a lack of ACCESS_VOLATILE.
     */
    ACCESS_CAN_REORDER = (1 << 6),
 
@@ -897,6 +949,23 @@ enum float_controls
    FLOAT_CONTROLS_ROUNDING_MODE_RTZ_FP16            = 0x1000,
    FLOAT_CONTROLS_ROUNDING_MODE_RTZ_FP32            = 0x2000,
    FLOAT_CONTROLS_ROUNDING_MODE_RTZ_FP64            = 0x4000,
+};
+
+/**
+* Enums to describe sampler properties used by OpenCL's inline constant samplers.
+* These values match the meanings described in the SPIR-V spec.
+*/
+enum cl_sampler_addressing_mode {
+   SAMPLER_ADDRESSING_MODE_NONE = 0,
+   SAMPLER_ADDRESSING_MODE_CLAMP_TO_EDGE = 1,
+   SAMPLER_ADDRESSING_MODE_CLAMP = 2,
+   SAMPLER_ADDRESSING_MODE_REPEAT = 3,
+   SAMPLER_ADDRESSING_MODE_REPEAT_MIRRORED = 4,
+};
+
+enum cl_sampler_filter_mode {
+   SAMPLER_FILTER_MODE_NEAREST = 0,
+   SAMPLER_FILTER_MODE_LINEAR = 1,
 };
 
 #ifdef __cplusplus

@@ -16,23 +16,37 @@ apt-get -y install \
 	bison \
 	ccache \
 	cmake \
-	cpio \
 	debootstrap \
 	fastboot \
 	flex \
 	g++ \
 	git \
+	kmod \
 	lavacli \
 	libdrm-dev \
 	libelf-dev \
 	libexpat1-dev \
+	libx11-dev \
+	libx11-xcb-dev \
+	libxcb-dri2-0-dev \
+	libxcb-dri3-dev \
+	libxcb-glx0-dev \
+	libxcb-present-dev \
+	libxcb-randr0-dev \
+	libxcb-shm0-dev \
+	libxcb-xfixes0-dev \
+	libxdamage-dev \
+	libxext-dev \
+	libxrandr-dev \
+	libxshmfence-dev \
+	libxxf86vm-dev \
 	llvm-8-dev \
 	pkg-config \
 	python \
 	python3-mako \
 	python3-pil \
-	python3-requests \
 	python3-pip \
+	python3-requests \
 	python3-setuptools \
 	unzip \
 	wget \
@@ -50,11 +64,7 @@ arch=armhf
 . .gitlab-ci/container/container_pre_build.sh
 
 # dependencies where we want a specific version
-export LIBDRM_VERSION=libdrm-2.4.102
-
-wget https://dri.freedesktop.org/libdrm/$LIBDRM_VERSION.tar.xz
-tar -xvf $LIBDRM_VERSION.tar.xz && rm $LIBDRM_VERSION.tar.xz
-cd $LIBDRM_VERSION; meson build -D vc4=true -D freedreno=true -D etnaviv=true; ninja -C build install; cd ..
-rm -rf $LIBDRM_VERSION
+EXTRA_MESON_ARGS=
+. .gitlab-ci/build-libdrm.sh
 
 . .gitlab-ci/container/container_post_build.sh

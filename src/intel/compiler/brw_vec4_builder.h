@@ -403,7 +403,6 @@ namespace brw {
       ALU3(BFI2)
       ALU1(BFREV)
       ALU1(CBIT)
-      ALU2(CMPN)
       ALU3(CSEL)
       ALU1(DIM)
       ALU2(DP2)
@@ -471,6 +470,31 @@ namespace brw {
       }
 
       /**
+       * CMPN: Behaves like CMP, but produces true if src1 is NaN.
+       */
+      instruction *
+      CMPN(const dst_reg &dst, const src_reg &src0, const src_reg &src1,
+          brw_conditional_mod condition) const
+      {
+         /* Take the instruction:
+          *
+          * CMPN null<d> src0<f> src1<f>
+          *
+          * Original gen4 does type conversion to the destination type
+          * before comparison, producing garbage results for floating
+          * point comparisons.
+          *
+          * The destination type doesn't matter on newer generations,
+          * so we set the type to match src0 so we can compact the
+          * instruction.
+          */
+         return set_condmod(condition,
+                            emit(BRW_OPCODE_CMPN, retype(dst, src0.type),
+                                 fix_unsigned_negate(src0),
+                                 fix_unsigned_negate(src1)));
+      }
+
+      /**
        * Gen4 predicated IF.
        */
       instruction *
@@ -501,23 +525,11 @@ namespace brw {
       LRP(const dst_reg &dst, const src_reg &x, const src_reg &y,
           const src_reg &a) const
       {
-         if (shader->devinfo->gen >= 6 && shader->devinfo->gen <= 10) {
-            /* The LRP instruction actually does op1 * op0 + op2 * (1 - op0), so
-             * we need to reorder the operands.
-             */
-            return emit(BRW_OPCODE_LRP, dst, a, y, x);
-
-         } else {
-            /* We can't use the LRP instruction.  Emit x*(1-a) + y*a. */
-            const dst_reg y_times_a = vgrf(dst.type);
-            const dst_reg one_minus_a = vgrf(dst.type);
-            const dst_reg x_times_one_minus_a = vgrf(dst.type);
-
-            MUL(y_times_a, y, a);
-            ADD(one_minus_a, negate(a), brw_imm_f(1.0f));
-            MUL(x_times_one_minus_a, x, src_reg(one_minus_a));
-            return ADD(dst, src_reg(x_times_one_minus_a), src_reg(y_times_a));
-         }
+         /* The LRP instruction actually does op1 * op0 + op2 * (1 - op0), so
+          * we need to reorder the operands.
+          */
+         assert(shader->devinfo->gen >= 6 && shader->devinfo->gen <= 9);
+         return emit(BRW_OPCODE_LRP, dst, a, y, x);
       }
 
       backend_shader *shader;

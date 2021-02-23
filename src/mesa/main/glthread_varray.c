@@ -159,7 +159,7 @@ _mesa_glthread_GenVertexArrays(struct gl_context *ctx,
 
       vao->Name = id;
       _mesa_glthread_reset_vao(vao);
-      _mesa_HashInsertLocked(glthread->VAOs, id, vao);
+      _mesa_HashInsertLocked(glthread->VAOs, id, vao, true);
    }
 }
 
@@ -332,6 +332,15 @@ void _mesa_glthread_AttribDivisor(struct gl_context *ctx, const GLuint *vaobj,
       vao->NonZeroDivisorMask &= ~(1u << attrib);
 }
 
+static unsigned
+element_size(GLint size, GLenum type)
+{
+   if (size == GL_BGRA)
+      size = 4;
+
+   return _mesa_bytes_per_vertex_attrib(size, type);
+}
+
 static void
 attrib_pointer(struct glthread_state *glthread, struct glthread_vao *vao,
                GLuint buffer, gl_vert_attrib attrib,
@@ -341,7 +350,7 @@ attrib_pointer(struct glthread_state *glthread, struct glthread_vao *vao,
    if (attrib >= VERT_ATTRIB_MAX)
       return;
 
-   unsigned elem_size = _mesa_bytes_per_vertex_attrib(size, type);
+   unsigned elem_size = element_size(size, type);
 
    vao->Attrib[attrib].ElementSize = elem_size;
    vao->Attrib[attrib].Stride = stride ? stride : elem_size;
@@ -393,7 +402,7 @@ attrib_format(struct glthread_state *glthread, struct glthread_vao *vao,
    if (attribindex >= VERT_ATTRIB_GENERIC_MAX)
       return;
 
-   unsigned elem_size = _mesa_bytes_per_vertex_attrib(size, type);
+   unsigned elem_size = element_size(size, type);
 
    unsigned i = VERT_ATTRIB_GENERIC(attribindex);
    vao->Attrib[i].ElementSize = elem_size;
@@ -645,4 +654,55 @@ _mesa_glthread_ClientAttribDefault(struct gl_context *ctx, GLbitfield mask)
    glthread->PrimitiveRestartFixedIndex = false;
    glthread->CurrentVAO = &glthread->DefaultVAO;
    _mesa_glthread_reset_vao(glthread->CurrentVAO);
+}
+
+void
+_mesa_glthread_InterleavedArrays(struct gl_context *ctx, GLenum format,
+                                 GLsizei stride, const GLvoid *pointer)
+{
+   struct gl_interleaved_layout layout;
+   unsigned tex = VERT_ATTRIB_TEX(ctx->GLThread.ClientActiveTexture);
+
+   if (stride < 0 || !_mesa_get_interleaved_layout(format, &layout))
+      return;
+
+   if (!stride)
+      stride = layout.defstride;
+
+   _mesa_glthread_ClientState(ctx, NULL, VERT_ATTRIB_EDGEFLAG, false);
+   _mesa_glthread_ClientState(ctx, NULL, VERT_ATTRIB_COLOR_INDEX, false);
+   /* XXX also disable secondary color and generic arrays? */
+
+   /* Texcoords */
+   if (layout.tflag) {
+      _mesa_glthread_ClientState(ctx, NULL, tex, true);
+      _mesa_glthread_AttribPointer(ctx, tex, layout.tcomps, GL_FLOAT, stride,
+                                   (GLubyte *) pointer + layout.toffset);
+   } else {
+      _mesa_glthread_ClientState(ctx, NULL, tex, false);
+   }
+
+   /* Color */
+   if (layout.cflag) {
+      _mesa_glthread_ClientState(ctx, NULL, VERT_ATTRIB_COLOR0, true);
+      _mesa_glthread_AttribPointer(ctx, VERT_ATTRIB_COLOR0, layout.ccomps,
+                                   layout.ctype, stride,
+                                   (GLubyte *) pointer + layout.coffset);
+   } else {
+      _mesa_glthread_ClientState(ctx, NULL, VERT_ATTRIB_COLOR0, false);
+   }
+
+   /* Normals */
+   if (layout.nflag) {
+      _mesa_glthread_ClientState(ctx, NULL, VERT_ATTRIB_NORMAL, true);
+      _mesa_glthread_AttribPointer(ctx, VERT_ATTRIB_NORMAL, 3, GL_FLOAT,
+                                   stride, (GLubyte *) pointer + layout.noffset);
+   } else {
+      _mesa_glthread_ClientState(ctx, NULL, VERT_ATTRIB_NORMAL, false);
+   }
+
+   /* Vertices */
+   _mesa_glthread_ClientState(ctx, NULL, VERT_ATTRIB_POS, true);
+   _mesa_glthread_AttribPointer(ctx, VERT_ATTRIB_POS, layout.vcomps, GL_FLOAT,
+                                stride, (GLubyte *) pointer + layout.voffset);
 }

@@ -27,31 +27,28 @@
 #include "compiler/nir/nir_builder.h"
 #include "util/u_math.h"
 
-static bool
-ubo_is_gl_uniforms(const struct ir3_ubo_info *ubo)
+static inline bool
+get_ubo_load_range(nir_shader *nir, nir_intrinsic_instr *instr, uint32_t alignment, struct ir3_ubo_range *r)
 {
-	return !ubo->bindless && ubo->block == 0;
-}
+	uint32_t offset = nir_intrinsic_range_base(instr);
+	uint32_t size = nir_intrinsic_range(instr);
 
-static inline struct ir3_ubo_range
-get_ubo_load_range(nir_shader *nir, nir_intrinsic_instr *instr, uint32_t alignment)
-{
-	struct ir3_ubo_range r;
-
+	/* If the offset is constant, the range is trivial (and NIR may not have
+	 * figured it out).
+	 */
 	if (nir_src_is_const(instr->src[1])) {
-		int offset = nir_src_as_uint(instr->src[1]);
-		const int bytes = nir_intrinsic_dest_components(instr) * 4;
-
-		r.start = ROUND_DOWN_TO(offset, alignment * 16);
-		r.end = ALIGN(offset + bytes, alignment * 16);
-	} else {
-		/* The other valid place to call this is on the GL default uniform block */
-		assert(nir_src_as_uint(instr->src[0]) == 0);
-		r.start = 0;
-		r.end = ALIGN(nir->num_uniforms * 16, alignment * 16);
+		offset = nir_src_as_uint(instr->src[1]);
+		size = nir_intrinsic_dest_components(instr) * 4;
 	}
 
-	return r;
+	/* If we haven't figured out the range accessed in the UBO, bail. */
+	if (size == ~0)
+		return false;
+
+	r->start = ROUND_DOWN_TO(offset, alignment * 16);
+	r->end = ALIGN(offset + size, alignment * 16);
+
+	return true;
 }
 
 static bool
@@ -75,23 +72,23 @@ get_ubo_info(nir_intrinsic_instr *instr, struct ir3_ubo_info *ubo)
 }
 
 /**
- * Get an existing range, but don't create a new range associated with
- * the ubo, but don't create a new one if one does not already exist.
+ * Finds the given instruction's UBO load in the UBO upload plan, if any.
  */
 static const struct ir3_ubo_range *
 get_existing_range(nir_intrinsic_instr *instr,
-				   const struct ir3_ubo_analysis_state *state)
+		const struct ir3_ubo_analysis_state *state,
+		struct ir3_ubo_range *r)
 {
 	struct ir3_ubo_info ubo = {};
 
 	if (!get_ubo_info(instr, &ubo))
 		return NULL;
 
-	for (int i = 0; i < IR3_MAX_UBO_PUSH_RANGES; i++) {
+	for (int i = 0; i < state->num_enabled; i++) {
 		const struct ir3_ubo_range *range = &state->range[i];
-		if (range->end < range->start) {
-			break;
-		} else if (!memcmp(&range->ubo, &ubo, sizeof(ubo))) {
+		if (!memcmp(&range->ubo, &ubo, sizeof(ubo)) &&
+				r->start >= range->start &&
+				r->end <= range->end) {
 			return range;
 		}
 	}
@@ -100,54 +97,96 @@ get_existing_range(nir_intrinsic_instr *instr,
 }
 
 /**
- * Get an existing range, or create a new one if necessary/possible.
+ * Merges together neighboring/overlapping ranges in the range plan with a
+ * newly updated range.
  */
-static struct ir3_ubo_range *
-get_range(nir_intrinsic_instr *instr, struct ir3_ubo_analysis_state *state)
+static void
+merge_neighbors(struct ir3_ubo_analysis_state *state, int index)
 {
-	struct ir3_ubo_info ubo = {};
+	struct ir3_ubo_range *a = &state->range[index];
 
-	if (!get_ubo_info(instr, &ubo))
-		return NULL;
+	/* index is always the first slot that would have neighbored/overlapped with
+	 * the new range.
+	 */
+	for (int i = index + 1; i < state->num_enabled; i++) {
+		struct ir3_ubo_range *b = &state->range[i];
+		if (memcmp(&a->ubo, &b->ubo, sizeof(a->ubo)))
+			continue;
 
-	for (int i = 0; i < IR3_MAX_UBO_PUSH_RANGES; i++) {
-		struct ir3_ubo_range *range = &state->range[i];
-		if (range->end < range->start) {
-			/* We don't have a matching range, but there are more available.
-			 */
-			range->ubo = ubo;
-			return range;
-		} else if (!memcmp(&range->ubo, &ubo, sizeof(ubo))) {
-			return range;
-		}
+		if (a->start > b->end || a->end < b->start)
+			continue;
+
+		/* Merge B into A. */
+		a->start = MIN2(a->start, b->start);
+		a->end = MAX2(a->end, b->end);
+
+		/* Swap the last enabled range into B's now unused slot */
+		*b = state->range[--state->num_enabled];
 	}
-
-	return NULL;
 }
 
+/**
+ * During the first pass over the shader, makes the plan of which UBO upload
+ * should include the range covering this UBO load.
+ *
+ * We are passed in an upload_remaining of how much space is left for us in
+ * the const file, and we make sure our plan doesn't exceed that.
+ */
 static void
 gather_ubo_ranges(nir_shader *nir, nir_intrinsic_instr *instr,
-				  struct ir3_ubo_analysis_state *state, uint32_t alignment)
+		struct ir3_ubo_analysis_state *state, uint32_t alignment,
+		uint32_t *upload_remaining)
 {
 	if (ir3_shader_debug & IR3_DBG_NOUBOOPT)
 		return;
 
-	struct ir3_ubo_range *old_r = get_range(instr, state);
-	if (!old_r)
+	struct ir3_ubo_info ubo = {};
+	if (!get_ubo_info(instr, &ubo))
 		return;
 
-	/* We don't know how to get the size of UBOs being indirected on, other
-	 * than on the GL uniforms where we have some other shader_info data.
-	 */
-	if (!nir_src_is_const(instr->src[1]) && !ubo_is_gl_uniforms(&old_r->ubo))
+	struct ir3_ubo_range r;
+	if (!get_ubo_load_range(nir, instr, alignment, &r))
 		return;
 
-	const struct ir3_ubo_range r = get_ubo_load_range(nir, instr, alignment);
+	/* See if there's an existing range for this UBO we want to merge into. */
+	for (int i = 0; i < state->num_enabled; i++) {
+		struct ir3_ubo_range *plan_r = &state->range[i];
+		if (memcmp(&plan_r->ubo, &ubo, sizeof(ubo)))
+			continue;
 
-	if (r.start < old_r->start)
-		old_r->start = r.start;
-	if (old_r->end < r.end)
-		old_r->end = r.end;
+		/* Don't extend existing uploads unless they're
+		 * neighboring/overlapping.
+		 */
+		if (r.start > plan_r->end || r.end < plan_r->start)
+			continue;
+
+		r.start = MIN2(r.start, plan_r->start);
+		r.end = MAX2(r.end, plan_r->end);
+
+		uint32_t added = (plan_r->start - r.start) + (r.end - plan_r->end);
+		if (added >= *upload_remaining)
+			return;
+
+		plan_r->start = r.start;
+		plan_r->end = r.end;
+		*upload_remaining -= added;
+
+		merge_neighbors(state, i);
+		return;
+	}
+
+	if (state->num_enabled == ARRAY_SIZE(state->range))
+		return;
+
+	uint32_t added = r.end - r.start;
+	if (added >= *upload_remaining)
+		return;
+
+	struct ir3_ubo_range *plan_r = &state->range[state->num_enabled++];
+	plan_r->ubo = ubo;
+	plan_r->start = r.start;
+	plan_r->end = r.end;
+	*upload_remaining -= added;
 }
 
 /* For indirect offset, it is common to see a pattern of multiple
@@ -236,28 +275,18 @@ lower_ubo_load_to_uniform(nir_intrinsic_instr *instr, nir_builder *b,
 {
 	b->cursor = nir_before_instr(&instr->instr);
 
-	/* We don't lower dynamic block index UBO loads to load_uniform, but we
-	 * could probably with some effort determine a block stride in number of
-	 * registers.
-	 */
-	const struct ir3_ubo_range *range = get_existing_range(instr, state);
-	if (!range) {
+	struct ir3_ubo_range r;
+	if (!get_ubo_load_range(b->shader, instr, alignment, &r)) {
 		track_ubo_use(instr, b, num_ubos);
 		return false;
 	}
 
-	/* We don't have a good way of determining the range of the dynamic
-	 * access in general, so for now just fall back to pulling.
+	/* We don't lower dynamic block index UBO loads to load_uniform, but we
+	 * could probably with some effort determine a block stride in number of
+	 * registers.
 	 */
-	if (!nir_src_is_const(instr->src[1]) && !ubo_is_gl_uniforms(&range->ubo))
-		return false;
-
-	/* After gathering the UBO access ranges, we limit the total
-	 * upload. Don't lower if this load is outside the range.
-	 */
-	const struct ir3_ubo_range r = get_ubo_load_range(b->shader,
-			instr, alignment);
-	if (!(range->start <= r.start && r.end <= range->end)) {
+	const struct ir3_ubo_range *range = get_existing_range(instr, state, &r);
+	if (!range) {
 		track_ubo_use(instr, b, num_ubos);
 		return false;
 	}
@@ -300,17 +329,11 @@ lower_ubo_load_to_uniform(nir_intrinsic_instr *instr, nir_builder *b,
 		const_offset = 0;
 	}
 
-	nir_intrinsic_instr *uniform =
-		nir_intrinsic_instr_create(b->shader, nir_intrinsic_load_uniform);
-	uniform->num_components = instr->num_components;
-	uniform->src[0] = nir_src_for_ssa(uniform_offset);
-	nir_intrinsic_set_base(uniform, const_offset);
-	nir_ssa_dest_init(&uniform->instr, &uniform->dest,
-					  uniform->num_components, instr->dest.ssa.bit_size,
-					  instr->dest.ssa.name);
-	nir_builder_instr_insert(b, &uniform->instr);
+	nir_ssa_def *uniform =
+		nir_load_uniform(b, instr->num_components, instr->dest.ssa.bit_size, uniform_offset, .base = const_offset);
+
 	nir_ssa_def_rewrite_uses(&instr->dest.ssa,
-							 nir_src_for_ssa(&uniform->dest.ssa));
+							 nir_src_for_ssa(uniform));
 
 	nir_instr_remove(&instr->instr);
 
@@ -325,8 +348,8 @@ instr_is_load_ubo(nir_instr *instr)
 
 	nir_intrinsic_op op = nir_instr_as_intrinsic(instr)->intrinsic;
 
-	/* ir3_nir_lower_io_offsets happens after this pass. */
-	assert(op != nir_intrinsic_load_ubo_ir3);
+	/* nir_lower_ubo_vec4 happens after this pass. */
+	assert(op != nir_intrinsic_load_ubo_vec4);
 
 	return op == nir_intrinsic_load_ubo;
 }
@@ -338,18 +361,28 @@ ir3_nir_analyze_ubo_ranges(nir_shader *nir, struct ir3_shader_variant *v)
 	struct ir3_ubo_analysis_state *state = &const_state->ubo_state;
 	struct ir3_compiler *compiler = v->shader->compiler;
 
-	memset(state, 0, sizeof(*state));
-	for (int i = 0; i < IR3_MAX_UBO_PUSH_RANGES; i++) {
-		state->range[i].start = UINT32_MAX;
-	}
+	/* Limit our uploads to the amount of constant buffer space available in
+	 * the hardware, minus what the shader compiler may need for various
+	 * driver params.  We do this UBO-to-push-constant before the real
+	 * allocation of the driver params' const space, because UBO pointers can
+	 * be driver params but this pass usually eliminatings them.
+	 */
+	struct ir3_const_state worst_case_const_state = { };
+	ir3_setup_const_state(nir, v, &worst_case_const_state);
+	const uint32_t max_upload = (ir3_max_const(v) -
+			worst_case_const_state.offsets.immediate) * 16;
 
+	memset(state, 0, sizeof(*state));
+
+	uint32_t upload_remaining = max_upload;
 	nir_foreach_function (function, nir) {
 		if (function->impl) {
 			nir_foreach_block (block, function->impl) {
 				nir_foreach_instr (instr, block) {
 					if (instr_is_load_ubo(instr))
 						gather_ubo_ranges(nir, nir_instr_as_intrinsic(instr),
-								state, compiler->const_upload_unit);
+								state, compiler->const_upload_unit,
+								&upload_remaining);
 				}
 			}
 		}
@@ -364,33 +397,13 @@ ir3_nir_analyze_ubo_ranges(nir_shader *nir, struct ir3_shader_variant *v)
 	 * first.
 	 */
 
-	/* Limit our uploads to the amount of constant buffer space available in
-	 * the hardware, minus what the shader compiler may need for various
-	 * driver params.  We do this UBO-to-push-constant before the real
-	 * allocation of the driver params' const space, because UBO pointers can
-	 * be driver params but this pass usually eliminatings them.
-	 */
-	struct ir3_const_state worst_case_const_state = { };
-	ir3_setup_const_state(nir, v, &worst_case_const_state);
-	const uint32_t max_upload = (ir3_max_const(v) -
-			worst_case_const_state.offsets.immediate) * 16;
-
 	uint32_t offset = v->shader->num_reserved_user_consts * 16;
-	state->num_enabled = ARRAY_SIZE(state->range);
-	for (uint32_t i = 0; i < ARRAY_SIZE(state->range); i++) {
-		if (state->range[i].start >= state->range[i].end) {
-			state->num_enabled = i;
-			break;
-		}
-
+	for (uint32_t i = 0; i < state->num_enabled; i++) {
 		uint32_t range_size = state->range[i].end - state->range[i].start;
 
 		debug_assert(offset <= max_upload);
 		state->range[i].offset = offset;
-		if (offset + range_size > max_upload) {
-			range_size = max_upload - offset;
-			state->range[i].end = state->range[i].start + range_size;
-		}
+		assert(offset <= max_upload);
 		offset += range_size;
 
 	}
@@ -435,6 +448,159 @@ ir3_nir_lower_ubo_loads(nir_shader *nir, struct ir3_shader_variant *v)
 	 */
 	if (nir->info.first_ubo_is_default_ubo)
 	    nir->info.num_ubos = num_ubos;
+
+	return progress;
+}
+
+
+static bool
+fixup_load_uniform_filter(const nir_instr *instr, const void *arg)
+{
+	if (instr->type != nir_instr_type_intrinsic)
+		return false;
+	return nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_uniform;
+}
+
+static nir_ssa_def *
+fixup_load_uniform_instr(struct nir_builder *b, nir_instr *instr, void *arg)
+{
+	nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+
+	/* We don't need to worry about non-indirect case: */
+	if (nir_src_is_const(intr->src[0]))
+		return NULL;
+
+	const unsigned base_offset_limit = (1 << 10);  /* 10 bits */
+	unsigned base_offset = nir_intrinsic_base(intr);
+
+	/* Or cases were base offset is lower than the hw limit: */
+	if (base_offset < base_offset_limit)
+		return NULL;
+
+	b->cursor = nir_before_instr(instr);
+
+	nir_ssa_def *offset = nir_ssa_for_src(b, intr->src[0], 1);
+
+	/* We'd like to avoid a sequence like:
+	 *
+	 *   vec4 32 ssa_18 = intrinsic load_uniform (ssa_4) (1024, 0, 0)
+	 *   vec4 32 ssa_19 = intrinsic load_uniform (ssa_4) (1072, 0, 0)
+	 *   vec4 32 ssa_20 = intrinsic load_uniform (ssa_4) (1120, 0, 0)
+	 *
+	 * From turning into a unique offset value (which requires reloading
+	 * a0.x for each instruction).  So instead of just adding the constant
+	 * base_offset to the non-const offset, be a bit more clever and only
+	 * extract the part that cannot be encoded.  Afterwards CSE should
+	 * turn the result into:
+	 *
+	 *   vec1 32 ssa_5 = load_const (1024)
+	 *   vec4 32 ssa_6  = iadd ssa4_, ssa_5
+	 *   vec4 32 ssa_18 = intrinsic load_uniform (ssa_5) (0, 0, 0)
+	 *   vec4 32 ssa_19 = intrinsic load_uniform (ssa_5) (48, 0, 0)
+	 *   vec4 32 ssa_20 = intrinsic load_uniform (ssa_5) (96, 0, 0)
+	 */
+	unsigned new_base_offset = base_offset % base_offset_limit;
+
+	nir_intrinsic_set_base(intr, new_base_offset);
+	offset = nir_iadd_imm(b, offset, base_offset - new_base_offset);
+
+	nir_instr_rewrite_src(instr, &intr->src[0], nir_src_for_ssa(offset));
+
+	return NIR_LOWER_INSTR_PROGRESS;
+}
+
+/**
+ * For relative CONST file access, we can only encode 10b worth of fixed offset,
+ * so in cases where the base offset is larger, we need to peel it out into
+ * ALU instructions.
+ *
+ * This should run late, after constant folding has had a chance to do it's
+ * thing, so we can actually know if it is an indirect uniform offset or not.
+ */
+bool
+ir3_nir_fixup_load_uniform(nir_shader *nir)
+{
+	return nir_shader_lower_instructions(nir,
+			fixup_load_uniform_filter, fixup_load_uniform_instr,
+			NULL);
+}
+static nir_ssa_def *
+ir3_nir_lower_load_const_instr(nir_builder *b, nir_instr *in_instr, void *data)
+{
+	struct ir3_const_state *const_state = data;
+	nir_intrinsic_instr *instr = nir_instr_as_intrinsic(in_instr);
+
+	/* Pick a UBO index to use as our constant data.  Skip UBO 0 since that's
+	 * reserved for gallium's cb0.
+	 */
+	if (const_state->constant_data_ubo == -1) {
+		if (b->shader->info.num_ubos == 0)
+			b->shader->info.num_ubos++;
+		const_state->constant_data_ubo = b->shader->info.num_ubos++;
+	}
+
+	unsigned num_components = instr->num_components;
+	if (nir_dest_bit_size(instr->dest) == 16) {
+		/* We can't do 16b loads -- either from LDC (32-bit only in any of our
+		 * traces, and disasm that doesn't look like it really supports it) or
+		 * from the constant file (where CONSTANT_DEMOTION_ENABLE means we get
+		 * automatic 32b-to-16b conversions when we ask for 16b from it).
+		 * Instead, we'll load 32b from a UBO and unpack from there.
+		 */
+		num_components = DIV_ROUND_UP(num_components, 2);
+	}
+	unsigned base = nir_intrinsic_base(instr);
+	nir_ssa_def *index = nir_imm_int(b, const_state->constant_data_ubo);
+	nir_ssa_def *offset = nir_iadd_imm(b, nir_ssa_for_src(b, instr->src[0], 1), base);
+
+	nir_ssa_def *result =
+		nir_load_ubo(b, num_components, 32, index, offset,
+					 .align_mul = nir_intrinsic_align_mul(instr),
+					 .align_offset = nir_intrinsic_align_offset(instr),
+					 .range_base = base,
+					 .range = nir_intrinsic_range(instr));
+
+	if (nir_dest_bit_size(instr->dest) == 16) {
+		result = nir_bitcast_vector(b, result, 16);
+		result = nir_channels(b, result, BITSET_MASK(instr->num_components));
+	}
+
+	return result;
+}
+
+static bool
+ir3_lower_load_const_filter(const nir_instr *instr, const void *data)
+{
+        return (instr->type == nir_instr_type_intrinsic &&
+                nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_constant);
+}
+
+/* Lowers load_constant intrinsics to UBO accesses so we can run them through
+ * the general "upload to const file or leave as UBO access" code.
+ */
+bool
+ir3_nir_lower_load_constant(nir_shader *nir, struct ir3_shader_variant *v)
+{
+	struct ir3_const_state *const_state = ir3_const_state(v);
+
+	const_state->constant_data_ubo = -1;
+
+	bool progress = nir_shader_lower_instructions(nir,
+			ir3_lower_load_const_filter, ir3_nir_lower_load_const_instr,
+			const_state);
+
+	if (progress) {
+		struct ir3_compiler *compiler = v->shader->compiler;
+
+		/* Save a copy of the NIR constant data to the variant for
+			* inclusion in the final assembly.
+			*/
+		v->constant_data_size = align(nir->constant_data_size,
+				compiler->const_upload_unit * 4 * sizeof(uint32_t));
+		v->constant_data = rzalloc_size(v, v->constant_data_size);
+		memcpy(v->constant_data, nir->constant_data,
+				nir->constant_data_size);
+	}
 
 	return progress;
 }

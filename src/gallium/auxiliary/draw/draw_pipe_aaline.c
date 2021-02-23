@@ -308,16 +308,11 @@ generate_aaline_fs(struct aaline_stage *aaline)
 #endif
 
    aaline->fs->aaline_fs = aaline->driver_create_fs_state(pipe, &aaline_fs);
-   if (aaline->fs->aaline_fs == NULL)
-      goto fail;
+   if (aaline->fs->aaline_fs != NULL)
+      aaline->fs->generic_attrib = transform.maxGeneric + 1;
 
-   aaline->fs->generic_attrib = transform.maxGeneric + 1;
    FREE((void *)aaline_fs.tokens);
-   return TRUE;
-
-fail:
-   FREE((void *)aaline_fs.tokens);
-   return FALSE;
+   return aaline->fs->aaline_fs != NULL;
 }
 
 static boolean
@@ -336,13 +331,12 @@ generate_aaline_fs_nir(struct aaline_stage *aaline)
    nir_lower_aaline_fs(aaline_fs.ir.nir, &aaline->fs->generic_attrib);
    aaline->fs->aaline_fs = aaline->driver_create_fs_state(pipe, &aaline_fs);
    if (aaline->fs->aaline_fs == NULL)
-      goto fail;
+      return FALSE;
 
    return TRUE;
-
-fail:
-#endif
+#else
    return FALSE;
+#endif
 }
 
 /**
@@ -529,7 +523,7 @@ aaline_first_line(struct draw_stage *stage, struct prim_header *header)
    draw->suspend_flushing = TRUE;
 
    /* Disable triangle culling, stippling, unfilled mode etc. */
-   r = draw_get_rasterizer_no_cull(draw, rast->scissor, rast->flatshade);
+   r = draw_get_rasterizer_no_cull(draw, rast);
    pipe->bind_rasterizer_state(pipe, r);
 
    draw->suspend_flushing = FALSE;
@@ -606,15 +600,12 @@ draw_aaline_stage(struct draw_context *draw)
    aaline->stage.reset_stipple_counter = aaline_reset_stipple_counter;
    aaline->stage.destroy = aaline_destroy;
 
-   if (!draw_alloc_temp_verts(&aaline->stage, 8))
-      goto fail;
+   if (!draw_alloc_temp_verts(&aaline->stage, 8)) {
+      aaline->stage.destroy(&aaline->stage);
+      return NULL;
+   }
 
    return aaline;
-
- fail:
-   aaline->stage.destroy(&aaline->stage);
-
-   return NULL;
 }
 
 
@@ -747,7 +738,7 @@ draw_install_aaline_stage(struct draw_context *draw, struct pipe_context *pipe)
     */
    aaline = draw_aaline_stage(draw);
    if (!aaline)
-      goto fail;
+      return FALSE;
 
    /* save original driver functions */
    aaline->driver_create_fs_state = pipe->create_fs_state;
@@ -764,10 +755,4 @@ draw_install_aaline_stage(struct draw_context *draw, struct pipe_context *pipe)
    draw->pipeline.aaline = &aaline->stage;
 
    return TRUE;
-
-fail:
-   if (aaline)
-      aaline->stage.destroy(&aaline->stage);
-
-   return FALSE;
 }

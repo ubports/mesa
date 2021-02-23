@@ -170,7 +170,7 @@ intel_miptree_choose_aux_usage(struct brw_context *brw,
    if (_mesa_is_format_color_format(mt->format)) {
       if (mt->surf.samples > 1) {
          mt->aux_usage = ISL_AUX_USAGE_MCS;
-      } else if (!unlikely(INTEL_DEBUG & DEBUG_NO_RBC) &&
+      } else if (!(INTEL_DEBUG & DEBUG_NO_RBC) &&
                  format_supports_ccs_e(brw, mt->format)) {
          mt->aux_usage = ISL_AUX_USAGE_CCS_E;
       } else if (brw->mesa_format_supports_render[mt->format]) {
@@ -1156,52 +1156,6 @@ intel_miptree_get_image_offset(const struct intel_mipmap_tree *mt,
    *y = y_offset_sa;
 }
 
-
-/**
- * This function computes the tile_w (in bytes) and tile_h (in rows) of
- * different tiling patterns. If the BO is untiled, tile_w is set to cpp
- * and tile_h is set to 1.
- */
-void
-intel_get_tile_dims(enum isl_tiling tiling, uint32_t cpp,
-                    uint32_t *tile_w, uint32_t *tile_h)
-{
-   switch (tiling) {
-   case ISL_TILING_X:
-      *tile_w = 512;
-      *tile_h = 8;
-      break;
-   case ISL_TILING_Y0:
-      *tile_w = 128;
-      *tile_h = 32;
-      break;
-   case ISL_TILING_LINEAR:
-      *tile_w = cpp;
-      *tile_h = 1;
-      break;
-   default:
-      unreachable("not reached");
-   }
-}
-
-
-/**
- * This function computes masks that may be used to select the bits of the X
- * and Y coordinates that indicate the offset within a tile.  If the BO is
- * untiled, the masks are set to 0.
- */
-void
-intel_get_tile_masks(enum isl_tiling tiling, uint32_t cpp,
-                     uint32_t *mask_x, uint32_t *mask_y)
-{
-   uint32_t tile_w_bytes, tile_h;
-
-   intel_get_tile_dims(tiling, cpp, &tile_w_bytes, &tile_h);
-
-   *mask_x = tile_w_bytes / cpp - 1;
-   *mask_y = tile_h - 1;
-}
-
 /**
  * Compute the offset (in bytes) from the start of the BO to the given x
  * and y coordinate.  For tiled BOs, caller must ensure that x and y are
@@ -1249,7 +1203,7 @@ intel_miptree_get_tile_offsets(const struct intel_mipmap_tree *mt,
    uint32_t x, y;
    uint32_t mask_x, mask_y;
 
-   intel_get_tile_masks(mt->surf.tiling, mt->cpp, &mask_x, &mask_y);
+   isl_get_tile_masks(mt->surf.tiling, mt->cpp, &mask_x, &mask_y);
    intel_miptree_get_image_offset(mt, level, slice, &x, &y);
 
    *tile_x = x & mask_x;
@@ -3280,34 +3234,15 @@ intel_miptree_set_clear_color(struct brw_context *brw,
 }
 
 union isl_color_value
-intel_miptree_get_clear_color(const struct gen_device_info *devinfo,
-                              const struct intel_mipmap_tree *mt,
-                              enum isl_format view_format, bool sampling,
+intel_miptree_get_clear_color(const struct intel_mipmap_tree *mt,
                               struct brw_bo **clear_color_bo,
                               uint64_t *clear_color_offset)
 {
    assert(mt->aux_buf);
 
-   if (devinfo->gen == 10 && isl_format_is_srgb(view_format) && sampling) {
-      /* The gen10 sampler doesn't gamma-correct the clear color. In this case,
-       * we switch to using the inline clear color and do the sRGB color
-       * conversion process defined in the OpenGL spec. The red, green, and
-       * blue channels take part in gamma correction, while the alpha channel
-       * is unchanged.
-       */
-      union isl_color_value srgb_decoded_value = mt->fast_clear_color;
-      for (unsigned i = 0; i < 3; i++) {
-         srgb_decoded_value.f32[i] =
-            util_format_srgb_to_linear_float(mt->fast_clear_color.f32[i]);
-      }
-      *clear_color_bo = 0;
-      *clear_color_offset = 0;
-      return srgb_decoded_value;
-   } else {
-      *clear_color_bo = mt->aux_buf->clear_color_bo;
-      *clear_color_offset = mt->aux_buf->clear_color_offset;
-      return mt->fast_clear_color;
-   }
+   *clear_color_bo = mt->aux_buf->clear_color_bo;
+   *clear_color_offset = mt->aux_buf->clear_color_offset;
+   return mt->fast_clear_color;
 }
 
 static void

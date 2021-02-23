@@ -105,10 +105,10 @@ intel_miptree_create_for_teximage(struct brw_context *brw,
     * resizable buffers, or require that buffers implement lazy
     * pagetable arrangements.
     */
-   if ((intelObj->base.Sampler.MinFilter == GL_NEAREST ||
-        intelObj->base.Sampler.MinFilter == GL_LINEAR) &&
+   if ((intelObj->base.Sampler.Attrib.MinFilter == GL_NEAREST ||
+        intelObj->base.Sampler.Attrib.MinFilter == GL_LINEAR) &&
        intelImage->base.Base.Level == 0 &&
-       !intelObj->base.GenerateMipmap) {
+       !intelObj->base.Attrib.GenerateMipmap) {
       lastLevel = 0;
    } else {
       lastLevel = _mesa_get_tex_max_num_levels(intelObj->base.Target,
@@ -634,6 +634,7 @@ intel_image_target_texture(struct gl_context *ctx, GLenum target,
 
    struct intel_texture_object *intel_texobj = intel_texture_object(texObj);
    intel_texobj->planar_format = image->planar_format;
+   intel_texobj->yuv_color_space = image->yuv_color_space;
 
    GLenum internal_format =
       image->internal_format != 0 ?

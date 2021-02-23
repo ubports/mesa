@@ -353,7 +353,7 @@ nv30_screen_get_shader_param(struct pipe_screen *pscreen,
       case PIPE_SHADER_CAP_FP16:
       case PIPE_SHADER_CAP_FP16_DERIVATIVES:
       case PIPE_SHADER_CAP_INT16:
-      case PIPE_SHADER_CAP_GLSL_16BIT_TEMPS:
+      case PIPE_SHADER_CAP_GLSL_16BIT_CONSTS:
       case PIPE_SHADER_CAP_TGSI_DROUND_SUPPORTED:
       case PIPE_SHADER_CAP_TGSI_DFRACEXP_DLDEXP_SUPPORTED:
       case PIPE_SHADER_CAP_TGSI_LDEXP_SUPPORTED:
@@ -366,6 +366,8 @@ nv30_screen_get_shader_param(struct pipe_screen *pscreen,
       case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTERS:
       case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTER_BUFFERS:
          return 0;
+      case PIPE_SHADER_CAP_SUPPORTED_IRS:
+         return 1 << PIPE_SHADER_IR_TGSI;
       default:
          debug_printf("unknown vertex shader param %d\n", param);
          return 0;
@@ -408,7 +410,7 @@ nv30_screen_get_shader_param(struct pipe_screen *pscreen,
       case PIPE_SHADER_CAP_FP16:
       case PIPE_SHADER_CAP_FP16_DERIVATIVES:
       case PIPE_SHADER_CAP_INT16:
-      case PIPE_SHADER_CAP_GLSL_16BIT_TEMPS:
+      case PIPE_SHADER_CAP_GLSL_16BIT_CONSTS:
       case PIPE_SHADER_CAP_TGSI_DROUND_SUPPORTED:
       case PIPE_SHADER_CAP_TGSI_DFRACEXP_DLDEXP_SUPPORTED:
       case PIPE_SHADER_CAP_TGSI_LDEXP_SUPPORTED:
@@ -421,6 +423,8 @@ nv30_screen_get_shader_param(struct pipe_screen *pscreen,
       case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTERS:
       case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTER_BUFFERS:
          return 0;
+      case PIPE_SHADER_CAP_SUPPORTED_IRS:
+         return 1 << PIPE_SHADER_IR_TGSI;
       default:
          debug_printf("unknown fragment shader param %d\n", param);
          return 0;
@@ -491,17 +495,7 @@ nv30_screen_destroy(struct pipe_screen *pscreen)
    if (!nouveau_drm_screen_unref(&screen->base))
       return;
 
-   if (screen->base.fence.current) {
-      struct nouveau_fence *current = NULL;
-
-      /* nouveau_fence_wait will create a new current fence, so wait on the
-       * _current_ one, and remove both.
-       */
-      nouveau_fence_ref(screen->base.fence.current, &current);
-      nouveau_fence_wait(current, NULL);
-      nouveau_fence_ref(NULL, &current);
-      nouveau_fence_ref(NULL, &screen->base.fence.current);
-   }
+   nouveau_fence_cleanup(&screen->base);
 
    nouveau_bo_ref(NULL, &screen->notify);
 

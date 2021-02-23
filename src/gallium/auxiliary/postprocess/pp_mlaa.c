@@ -85,7 +85,7 @@ pp_jimenezmlaa_run(struct pp_queue_t *ppq, struct pipe_resource *in,
 
    memset(&mstencil, 0, sizeof(mstencil));
 
-   cso_set_stencil_ref(p->cso, &ref);
+   cso_set_stencil_ref(p->cso, ref);
 
    /* Init the pixel size constant */
    if (dimensions[0] != p->framebuffer.width ||
@@ -256,7 +256,7 @@ pp_jimenezmlaa_init_run(struct pp_queue_t *ppq, unsigned int n,
    u_box_2d(0, 0, 165, 165, &box);
 
    ppq->p->pipe->texture_subdata(ppq->p->pipe, ppq->areamaptex, 0,
-                                 PIPE_TRANSFER_WRITE, &box,
+                                 PIPE_MAP_WRITE, &box,
                                  areamap, 165 * 2, sizeof(areamap));
 
    ppq->shaders[n][1] = pp_tgsi_to_state(ppq->p->pipe, offsetvs, true,

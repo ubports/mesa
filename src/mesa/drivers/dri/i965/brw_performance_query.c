@@ -111,7 +111,7 @@ brw_is_perf_query_ready(struct gl_context *ctx,
                         struct gl_perf_query_object *o);
 
 static void
-dump_perf_query_callback(GLuint id, void *query_void, void *brw_void)
+dump_perf_query_callback(void *query_void, void *brw_void)
 {
    struct brw_context *ctx = brw_void;
    struct gen_perf_context *perf_ctx = ctx->perf_ctx;
@@ -120,7 +120,7 @@ dump_perf_query_callback(GLuint id, void *query_void, void *brw_void)
    struct gen_perf_query_object *obj = brw_query->query;
 
    DBG("%4d: %-6s %-8s ",
-       id,
+       o->Id,
        o->Used ? "Dirty," : "New,",
        o->Active ? "Active," : (o->Ready ? "Ready," : "Pending,"));
    gen_perf_dump_query(perf_ctx, obj, &ctx->batch);
@@ -247,12 +247,12 @@ brw_begin_perf_query(struct gl_context *ctx,
 
    DBG("Begin(%d)\n", o->Id);
 
-   gen_perf_begin_query(perf_ctx, obj);
+   bool ret = gen_perf_begin_query(perf_ctx, obj);
 
    if (INTEL_DEBUG & DEBUG_PERFMON)
       dump_perf_queries(brw);
 
-   return true;
+   return ret;
 }
 
 /**
@@ -323,7 +323,7 @@ brw_get_perf_query_data(struct gl_context *ctx,
     */
    assert(o->Ready);
 
-   gen_perf_get_query_data(brw->perf_ctx, obj,
+   gen_perf_get_query_data(brw->perf_ctx, obj, &brw->batch,
                            data_size, data, bytes_written);
 }
 
@@ -487,7 +487,7 @@ brw_init_perf_query_info(struct gl_context *ctx)
    if (!oa_metrics_kernel_support(brw->screen->fd, devinfo))
       return 0;
 
-   perf_cfg = gen_perf_new(ctx);
+   perf_cfg = gen_perf_new(brw->mem_ctx);
 
    perf_cfg->vtbl.bo_alloc = brw_oa_bo_alloc;
    perf_cfg->vtbl.bo_unreference = (bo_unreference_t)brw_bo_unreference;

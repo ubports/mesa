@@ -42,10 +42,7 @@ static nir_shader *
 build_nir_vertex_shader(void)
 {
 	const struct glsl_type *vec4 = glsl_vec4_type();
-	nir_builder b;
-
-	nir_builder_init_simple_shader(&b, NULL, MESA_SHADER_VERTEX, NULL);
-	b.shader->info.name = ralloc_strdup(b.shader, "meta_blit_vs");
+	nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_VERTEX, NULL, "meta_blit_vs");
 
 	nir_variable *pos_out = nir_variable_create(b.shader, nir_var_shader_out,
 						    vec4, "gl_Position");
@@ -60,25 +57,10 @@ build_nir_vertex_shader(void)
 
 	nir_store_var(&b, pos_out, outvec, 0xf);
 
-	nir_intrinsic_instr *src_box = nir_intrinsic_instr_create(b.shader, nir_intrinsic_load_push_constant);
-	src_box->src[0] = nir_src_for_ssa(nir_imm_int(&b, 0));
-	nir_intrinsic_set_base(src_box, 0);
-	nir_intrinsic_set_range(src_box, 16);
-	src_box->num_components = 4;
-	nir_ssa_dest_init(&src_box->instr, &src_box->dest, 4, 32, "src_box");
-	nir_builder_instr_insert(&b, &src_box->instr);
+	nir_ssa_def *src_box = nir_load_push_constant(&b, 4, 32, nir_imm_int(&b, 0), .range=16);
+	nir_ssa_def *src0_z = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base=16, .range=4);
 
-	nir_intrinsic_instr *src0_z = nir_intrinsic_instr_create(b.shader, nir_intrinsic_load_push_constant);
-	src0_z->src[0] = nir_src_for_ssa(nir_imm_int(&b, 0));
-	nir_intrinsic_set_base(src0_z, 16);
-	nir_intrinsic_set_range(src0_z, 4);
-	src0_z->num_components = 1;
-	nir_ssa_dest_init(&src0_z->instr, &src0_z->dest, 1, 32, "src0_z");
-	nir_builder_instr_insert(&b, &src0_z->instr);
-
-	nir_intrinsic_instr *vertex_id = nir_intrinsic_instr_create(b.shader, nir_intrinsic_load_vertex_id_zero_base);
-	nir_ssa_dest_init(&vertex_id->instr, &vertex_id->dest, 1, 32, "vertexid");
-	nir_builder_instr_insert(&b, &vertex_id->instr);
+	nir_ssa_def *vertex_id = nir_load_vertex_id_zero_base(&b);
 
 	/* vertex 0 - src0_x, src0_y, src0_z */
 	/* vertex 1 - src0_x, src1_y, src0_z*/
@@ -86,20 +68,18 @@ build_nir_vertex_shader(void)
 	/* so channel 0 is vertex_id != 2 ? src_x : src_x + w
 	   channel 1 is vertex id != 1 ? src_y : src_y + w */
 
-	nir_ssa_def *c0cmp = nir_ine(&b, &vertex_id->dest.ssa,
-				     nir_imm_int(&b, 2));
-	nir_ssa_def *c1cmp = nir_ine(&b, &vertex_id->dest.ssa,
-				     nir_imm_int(&b, 1));
+	nir_ssa_def *c0cmp = nir_ine(&b, vertex_id, nir_imm_int(&b, 2));
+	nir_ssa_def *c1cmp = nir_ine(&b, vertex_id, nir_imm_int(&b, 1));
 
 	nir_ssa_def *comp[4];
 	comp[0] = nir_bcsel(&b, c0cmp,
-			    nir_channel(&b, &src_box->dest.ssa, 0),
-			    nir_channel(&b, &src_box->dest.ssa, 2));
+			    nir_channel(&b, src_box, 0),
+			    nir_channel(&b, src_box, 2));
 
 	comp[1] = nir_bcsel(&b, c1cmp,
-			    nir_channel(&b, &src_box->dest.ssa, 1),
-			    nir_channel(&b, &src_box->dest.ssa, 3));
-	comp[2] = &src0_z->dest.ssa;
+			    nir_channel(&b, src_box, 1),
+			    nir_channel(&b, src_box, 3));
+	comp[2] = src0_z;
 	comp[3] = nir_imm_float(&b, 1.0);
 	nir_ssa_def *out_tex_vec = nir_vec(&b, comp, 4);
 	nir_store_var(&b, tex_pos_out, out_tex_vec, 0xf);
@@ -109,14 +89,8 @@ build_nir_vertex_shader(void)
 static nir_shader *
 build_nir_copy_fragment_shader(enum glsl_sampler_dim tex_dim)
 {
-	char shader_name[64];
 	const struct glsl_type *vec4 = glsl_vec4_type();
-	nir_builder b;
-
-	nir_builder_init_simple_shader(&b, NULL, MESA_SHADER_FRAGMENT, NULL);
-
-	sprintf(shader_name, "meta_blit_fs.%d", tex_dim);
-	b.shader->info.name = ralloc_strdup(b.shader, shader_name);
+	nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT, NULL, "meta_blit_fs.%d", tex_dim);
 
 	nir_variable *tex_pos_in = nir_variable_create(b.shader, nir_var_shader_in,
 						       vec4, "v_tex_pos");
@@ -167,14 +141,8 @@ build_nir_copy_fragment_shader(enum glsl_sampler_dim tex_dim)
 static nir_shader *
 build_nir_copy_fragment_shader_depth(enum glsl_sampler_dim tex_dim)
 {
-	char shader_name[64];
 	const struct glsl_type *vec4 = glsl_vec4_type();
-	nir_builder b;
-
-	nir_builder_init_simple_shader(&b, NULL, MESA_SHADER_FRAGMENT, NULL);
-
-	sprintf(shader_name, "meta_blit_depth_fs.%d", tex_dim);
-	b.shader->info.name = ralloc_strdup(b.shader, shader_name);
+	nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT, NULL, "meta_blit_depth_fs.%d", tex_dim);
 
 	nir_variable *tex_pos_in = nir_variable_create(b.shader, nir_var_shader_in,
 						       vec4, "v_tex_pos");
@@ -225,14 +193,8 @@ build_nir_copy_fragment_shader_depth(enum glsl_sampler_dim tex_dim)
 static nir_shader *
 build_nir_copy_fragment_shader_stencil(enum glsl_sampler_dim tex_dim)
 {
-	char shader_name[64];
 	const struct glsl_type *vec4 = glsl_vec4_type();
-	nir_builder b;
-
-	nir_builder_init_simple_shader(&b, NULL, MESA_SHADER_FRAGMENT, NULL);
-
-	sprintf(shader_name, "meta_blit_stencil_fs.%d", tex_dim);
-	b.shader->info.name = ralloc_strdup(b.shader, shader_name);
+	nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT, NULL, "meta_blit_stencil_fs.%d", tex_dim);
 
 	nir_variable *tex_pos_in = nir_variable_create(b.shader, nir_var_shader_in,
 						       vec4, "v_tex_pos");
@@ -299,8 +261,8 @@ meta_emit_blit(struct radv_cmd_buffer *cmd_buffer,
                struct radv_image *src_image,
                struct radv_image_view *src_iview,
 	       VkImageLayout src_image_layout,
-               VkOffset3D src_offset_0,
-               VkOffset3D src_offset_1,
+               float src_offset_0[3],
+               float src_offset_1[3],
                struct radv_image *dest_image,
                struct radv_image_view *dest_iview,
 	       VkImageLayout dest_image_layout,
@@ -319,11 +281,11 @@ meta_emit_blit(struct radv_cmd_buffer *cmd_buffer,
 	assert(src_image->info.samples == dest_image->info.samples);
 
 	float vertex_push_constants[5] = {
-		(float)src_offset_0.x / (float)src_width,
-		(float)src_offset_0.y / (float)src_height,
-		(float)src_offset_1.x / (float)src_width,
-		(float)src_offset_1.y / (float)src_height,
-		(float)src_offset_0.z / (float)src_depth,
+		src_offset_0[0] / (float)src_width,
+		src_offset_0[1] / (float)src_height,
+		src_offset_1[0] / (float)src_width,
+		src_offset_1[1] / (float)src_height,
+		src_offset_0[2] / (float)src_depth,
 	};
 
 	radv_CmdPushConstants(radv_cmd_buffer_to_handle(cmd_buffer),
@@ -348,7 +310,7 @@ meta_emit_blit(struct radv_cmd_buffer *cmd_buffer,
 	switch (src_iview->aspect_mask) {
 	case VK_IMAGE_ASPECT_COLOR_BIT: {
 		unsigned dst_layout = radv_meta_dst_layout_from_layout(dest_image_layout);
-		fs_key = radv_format_meta_fs_key(dest_image->vk_format);
+		fs_key = radv_format_meta_fs_key(device, dest_image->vk_format);
 
 		radv_cmd_buffer_begin_render_pass(cmd_buffer,
 						  &(VkRenderPassBeginInfo) {
@@ -361,7 +323,7 @@ meta_emit_blit(struct radv_cmd_buffer *cmd_buffer,
 								},
 							.clearValueCount = 0,
 							.pClearValues = NULL,
-						});
+						}, NULL);
 		switch (src_image->type) {
 		case VK_IMAGE_TYPE_1D:
 			pipeline = &device->meta_state.blit.pipeline_1d_src[fs_key];
@@ -390,7 +352,7 @@ meta_emit_blit(struct radv_cmd_buffer *cmd_buffer,
 							},
 							.clearValueCount = 0,
 							.pClearValues = NULL,
-						  });
+						  }, NULL);
 		switch (src_image->type) {
 		case VK_IMAGE_TYPE_1D:
 			pipeline = &device->meta_state.blit.depth_only_1d_pipeline;
@@ -419,7 +381,7 @@ meta_emit_blit(struct radv_cmd_buffer *cmd_buffer,
 						        },
 							.clearValueCount = 0,
 							.pClearValues = NULL,
-						  });
+						  }, NULL);
 		switch (src_image->type) {
 		case VK_IMAGE_TYPE_1D:
 			pipeline = &device->meta_state.blit.stencil_only_1d_pipeline;
@@ -526,20 +488,17 @@ flip_coords(unsigned *src0, unsigned *src1, unsigned *dst0, unsigned *dst1)
 	return flip;
 }
 
-void radv_CmdBlitImage(
-	VkCommandBuffer                             commandBuffer,
-	VkImage                                     srcImage,
-	VkImageLayout                               srcImageLayout,
-	VkImage                                     destImage,
-	VkImageLayout                               destImageLayout,
-	uint32_t                                    regionCount,
-	const VkImageBlit*                          pRegions,
-	VkFilter                                    filter)
-
+static void
+blit_image(struct radv_cmd_buffer *cmd_buffer,
+	   struct radv_image *src_image,
+	   VkImageLayout src_image_layout,
+	   struct radv_image *dst_image,
+	   VkImageLayout dst_image_layout,
+	   const VkImageBlit2KHR *region,
+	   VkFilter filter)
 {
-	RADV_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
-	RADV_FROM_HANDLE(radv_image, src_image, srcImage);
-	RADV_FROM_HANDLE(radv_image, dest_image, destImage);
+	const VkImageSubresourceLayers *src_res = &region->srcSubresource;
+	const VkImageSubresourceLayers *dst_res = &region->dstSubresource;
 	struct radv_device *device = cmd_buffer->device;
 	struct radv_meta_saved_state saved_state;
 	bool old_predicating;
@@ -551,7 +510,7 @@ void radv_CmdBlitImage(
 	 *    destination images. Use vkCmdResolveImage for this purpose.
 	 */
 	assert(src_image->info.samples == 1);
-	assert(dest_image->info.samples == 1);
+	assert(dst_image->info.samples == 1);
 
 	radv_CreateSampler(radv_device_to_handle(device),
 			   &(VkSamplerCreateInfo) {
@@ -574,118 +533,121 @@ void radv_CmdBlitImage(
 	old_predicating = cmd_buffer->state.predicating;
 	cmd_buffer->state.predicating = false;
 
-	for (unsigned r = 0; r < regionCount; r++) {
-		const VkImageSubresourceLayers *src_res = &pRegions[r].srcSubresource;
-		const VkImageSubresourceLayers *dst_res = &pRegions[r].dstSubresource;
+	unsigned dst_start, dst_end;
+	if (dst_image->type == VK_IMAGE_TYPE_3D) {
+		assert(dst_res->baseArrayLayer == 0);
+		dst_start = region->dstOffsets[0].z;
+		dst_end = region->dstOffsets[1].z;
+	} else {
+		dst_start = dst_res->baseArrayLayer;
+		dst_end = dst_start + dst_res->layerCount;
+	}
 
-		unsigned dst_start, dst_end;
-		if (dest_image->type == VK_IMAGE_TYPE_3D) {
-			assert(dst_res->baseArrayLayer == 0);
-			dst_start = pRegions[r].dstOffsets[0].z;
-			dst_end = pRegions[r].dstOffsets[1].z;
-		} else {
-			dst_start = dst_res->baseArrayLayer;
-			dst_end = dst_start + dst_res->layerCount;
-		}
+	unsigned src_start, src_end;
+	if (src_image->type == VK_IMAGE_TYPE_3D) {
+		assert(src_res->baseArrayLayer == 0);
+		src_start = region->srcOffsets[0].z;
+		src_end = region->srcOffsets[1].z;
+	} else {
+		src_start = src_res->baseArrayLayer;
+		src_end = src_start + src_res->layerCount;
+	}
 
-		unsigned src_start, src_end;
-		if (src_image->type == VK_IMAGE_TYPE_3D) {
-			assert(src_res->baseArrayLayer == 0);
-			src_start = pRegions[r].srcOffsets[0].z;
-			src_end = pRegions[r].srcOffsets[1].z;
-		} else {
-			src_start = src_res->baseArrayLayer;
-			src_end = src_start + src_res->layerCount;
-		}
+	bool flip_z = flip_coords(&src_start, &src_end, &dst_start, &dst_end);
+	float src_z_step = (float)(src_end - src_start) /
+		(float)(dst_end - dst_start);
 
-		bool flip_z = flip_coords(&src_start, &src_end, &dst_start, &dst_end);
-		float src_z_step = (float)(src_end + 1 - src_start) /
-			(float)(dst_end + 1 - dst_start);
+	/* There is no interpolation to the pixel center during
+	 * rendering, so add the 0.5 offset ourselves here. */
+	float depth_center_offset = 0;
+	if (src_image->type == VK_IMAGE_TYPE_3D)
+		depth_center_offset = 0.5 / (dst_end - dst_start) * (src_end - src_start);
 
-		if (flip_z) {
-			src_start = src_end;
-			src_z_step *= -1;
-		}
+	if (flip_z) {
+		src_start = src_end;
+		src_z_step *= -1;
+		depth_center_offset *= -1;
+	}
 
-		unsigned src_x0 = pRegions[r].srcOffsets[0].x;
-		unsigned src_x1 = pRegions[r].srcOffsets[1].x;
-		unsigned dst_x0 = pRegions[r].dstOffsets[0].x;
-		unsigned dst_x1 = pRegions[r].dstOffsets[1].x;
+	unsigned src_x0 = region->srcOffsets[0].x;
+	unsigned src_x1 = region->srcOffsets[1].x;
+	unsigned dst_x0 = region->dstOffsets[0].x;
+	unsigned dst_x1 = region->dstOffsets[1].x;
 
-		unsigned src_y0 = pRegions[r].srcOffsets[0].y;
-		unsigned src_y1 = pRegions[r].srcOffsets[1].y;
-		unsigned dst_y0 = pRegions[r].dstOffsets[0].y;
-		unsigned dst_y1 = pRegions[r].dstOffsets[1].y;
+	unsigned src_y0 = region->srcOffsets[0].y;
+	unsigned src_y1 = region->srcOffsets[1].y;
+	unsigned dst_y0 = region->dstOffsets[0].y;
+	unsigned dst_y1 = region->dstOffsets[1].y;
 
-		VkRect2D dest_box;
-		dest_box.offset.x = MIN2(dst_x0, dst_x1);
-		dest_box.offset.y = MIN2(dst_y0, dst_y1);
-		dest_box.extent.width = dst_x1 - dst_x0;
-		dest_box.extent.height = dst_y1 - dst_y0;
+	VkRect2D dst_box;
+	dst_box.offset.x = MIN2(dst_x0, dst_x1);
+	dst_box.offset.y = MIN2(dst_y0, dst_y1);
+	dst_box.extent.width = dst_x1 - dst_x0;
+	dst_box.extent.height = dst_y1 - dst_y0;
 
-		const unsigned num_layers = dst_end - dst_start;
-		for (unsigned i = 0; i < num_layers; i++) {
-			struct radv_image_view dest_iview, src_iview;
+	const unsigned num_layers = dst_end - dst_start;
+	for (unsigned i = 0; i < num_layers; i++) {
+		struct radv_image_view dst_iview, src_iview;
 
-			const VkOffset2D dest_offset_0 = {
-				.x = dst_x0,
-				.y = dst_y0,
-			};
-			const VkOffset2D dest_offset_1 = {
-				.x = dst_x1,
-				.y = dst_y1,
-			};
-			VkOffset3D src_offset_0 = {
-				.x = src_x0,
-				.y = src_y0,
-				.z = src_start + i * src_z_step,
-			};
-			VkOffset3D src_offset_1 = {
-				.x = src_x1,
-				.y = src_y1,
-				.z = src_start + i * src_z_step,
-			};
-			const uint32_t dest_array_slice = dst_start + i;
+		const VkOffset2D dst_offset_0 = {
+			.x = dst_x0,
+			.y = dst_y0,
+		};
+		const VkOffset2D dst_offset_1 = {
+			.x = dst_x1,
+			.y = dst_y1,
+		};
 
-			/* 3D images have just 1 layer */
-			const uint32_t src_array_slice = src_image->type == VK_IMAGE_TYPE_3D ? 0 : src_start + i;
+		float src_offset_0[3] = {
+			src_x0,
+			src_y0,
+			src_start + i * src_z_step + depth_center_offset,
+		};
+		float src_offset_1[3] = {
+			src_x1,
+			src_y1,
+			src_start + i * src_z_step + depth_center_offset,
+		};
+		const uint32_t dst_array_slice = dst_start + i;
 
-			radv_image_view_init(&dest_iview, cmd_buffer->device,
-					     &(VkImageViewCreateInfo) {
-						     .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-							     .image = destImage,
-							     .viewType = radv_meta_get_view_type(dest_image),
-							     .format = dest_image->vk_format,
-							     .subresourceRange = {
-							     .aspectMask = dst_res->aspectMask,
-							     .baseMipLevel = dst_res->mipLevel,
-							     .levelCount = 1,
-							     .baseArrayLayer = dest_array_slice,
-							     .layerCount = 1
-						     },
-					     }, NULL);
-			radv_image_view_init(&src_iview, cmd_buffer->device,
-					     &(VkImageViewCreateInfo) {
-						.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-							.image = srcImage,
-							.viewType = radv_meta_get_view_type(src_image),
-							.format = src_image->vk_format,
-							.subresourceRange = {
-							.aspectMask = src_res->aspectMask,
-							.baseMipLevel = src_res->mipLevel,
-							.levelCount = 1,
-							.baseArrayLayer = src_array_slice,
-							.layerCount = 1
-						},
-					}, NULL);
-			meta_emit_blit(cmd_buffer,
-				       src_image, &src_iview, srcImageLayout,
-				       src_offset_0, src_offset_1,
-				       dest_image, &dest_iview, destImageLayout,
-				       dest_offset_0, dest_offset_1,
-				       dest_box,
-				       sampler);
-		}
+		/* 3D images have just 1 layer */
+		const uint32_t src_array_slice = src_image->type == VK_IMAGE_TYPE_3D ? 0 : src_start + i;
+
+		radv_image_view_init(&dst_iview, cmd_buffer->device,
+				     &(VkImageViewCreateInfo) {
+					     .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+						     .image = radv_image_to_handle(dst_image),
+						     .viewType = radv_meta_get_view_type(dst_image),
+						     .format = dst_image->vk_format,
+						     .subresourceRange = {
+						     .aspectMask = dst_res->aspectMask,
+						     .baseMipLevel = dst_res->mipLevel,
+						     .levelCount = 1,
+						     .baseArrayLayer = dst_array_slice,
+						     .layerCount = 1
+					     },
+				     }, NULL);
+		radv_image_view_init(&src_iview, cmd_buffer->device,
+				     &(VkImageViewCreateInfo) {
+					.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+						.image = radv_image_to_handle(src_image),
+						.viewType = radv_meta_get_view_type(src_image),
+						.format = src_image->vk_format,
+						.subresourceRange = {
+						.aspectMask = src_res->aspectMask,
+						.baseMipLevel = src_res->mipLevel,
+						.levelCount = 1,
+						.baseArrayLayer = src_array_slice,
+						.layerCount = 1
+					},
+				}, NULL);
+		meta_emit_blit(cmd_buffer,
+			       src_image, &src_iview, src_image_layout,
+			       src_offset_0, src_offset_1,
+			       dst_image, &dst_iview, dst_image_layout,
+			       dst_offset_0, dst_offset_1,
+			       dst_box,
+			       sampler);
 	}
 
 	/* Restore conditional rendering. */
@@ -695,6 +657,60 @@ void radv_CmdBlitImage(
 
 	radv_DestroySampler(radv_device_to_handle(device), sampler,
 			    &cmd_buffer->pool->alloc);
+}
+
+void radv_CmdBlitImage(
+	VkCommandBuffer                             commandBuffer,
+	VkImage                                     srcImage,
+	VkImageLayout                               srcImageLayout,
+	VkImage                                     dstImage,
+	VkImageLayout                               dstImageLayout,
+	uint32_t                                    regionCount,
+	const VkImageBlit*                          pRegions,
+	VkFilter                                    filter)
+
+{
+	RADV_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
+	RADV_FROM_HANDLE(radv_image, src_image, srcImage);
+	RADV_FROM_HANDLE(radv_image, dst_image, dstImage);
+
+	for (unsigned r = 0; r < regionCount; r++) {
+		VkImageBlit2KHR blit = {
+			.sType          = VK_STRUCTURE_TYPE_IMAGE_BLIT_2_KHR,
+			.srcSubresource = pRegions[r].srcSubresource,
+			.srcOffsets     = {
+				pRegions[r].srcOffsets[0],
+				pRegions[r].srcOffsets[1],
+			},
+			.dstSubresource = pRegions[r].dstSubresource,
+			.dstOffsets     = {
+				pRegions[r].dstOffsets[0],
+				pRegions[r].dstOffsets[1],
+			},
+		};
+
+		blit_image(cmd_buffer,
+			   src_image, srcImageLayout,
+			   dst_image, dstImageLayout,
+			   &blit, filter);
+	}
+}
+
+void radv_CmdBlitImage2KHR(
+	VkCommandBuffer                             commandBuffer,
+	const VkBlitImageInfo2KHR*                  pBlitImageInfo)
+{
+	RADV_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
+	RADV_FROM_HANDLE(radv_image, src_image, pBlitImageInfo->srcImage);
+	RADV_FROM_HANDLE(radv_image, dst_image, pBlitImageInfo->dstImage);
+
+	for (unsigned r = 0; r < pBlitImageInfo->regionCount; r++) {
+		blit_image(cmd_buffer,
+			   src_image, pBlitImageInfo->srcImageLayout,
+			   dst_image, pBlitImageInfo->dstImageLayout,
+			   &pBlitImageInfo->pRegions[r],
+			   pBlitImageInfo->filter);
+	}
 }
 
 void
@@ -931,7 +947,7 @@ radv_device_init_meta_blit_color(struct radv_device *device, bool on_demand)
 	VkResult result;
 
 	for (unsigned i = 0; i < NUM_META_FS_KEYS; ++i) {
-		unsigned key = radv_format_meta_fs_key(radv_fs_key_format_exemplars[i]);
+		unsigned key = radv_format_meta_fs_key(device, radv_fs_key_format_exemplars[i]);
 		for(unsigned j = 0; j < RADV_META_DST_LAYOUT_COUNT; ++j) {
 			VkImageLayout layout = radv_meta_dst_layout_to_layout(j);
 			result = radv_CreateRenderPass(radv_device_to_handle(device),

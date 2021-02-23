@@ -105,7 +105,11 @@ def emit_uadd(tmp_id, args):
 def emit_udiv(tmp_id, args):
     c("uint64_t tmp{0} = {1};".format(tmp_id, args[1]))
     c("uint64_t tmp{0} = {1};".format(tmp_id + 1, args[0]))
-    c("uint64_t tmp{0} = tmp{1} ? tmp{2} / tmp{1} : 0;".format(tmp_id + 2, tmp_id + 1, tmp_id))
+    if args[0].isdigit():
+        assert int(args[0]) > 0
+        c("uint64_t tmp{0} = tmp{2} / tmp{1};".format(tmp_id + 2, tmp_id + 1, tmp_id))
+    else:
+        c("uint64_t tmp{0} = tmp{1} ? tmp{2} / tmp{1} : 0;".format(tmp_id + 2, tmp_id + 1, tmp_id))
     return tmp_id + 3
 
 def emit_umul(tmp_id, args):
@@ -679,6 +683,7 @@ def main():
             c("\n")
             c("query->kind = GEN_PERF_QUERY_TYPE_OA;\n")
             c("query->name = \"" + set.name + "\";\n")
+            c("query->symbol_name = \"" + set.symbol_name + "\";\n")
             c("query->guid = \"" + set.hw_config_guid + "\";\n")
 
             c("query->counters = rzalloc_array(query, struct gen_perf_query_counter, %u);" % len(counters))

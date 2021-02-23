@@ -120,7 +120,8 @@ genX(init_device_state)(struct anv_device *device)
 
    anv_batch_emit(&batch, GENX(PIPELINE_SELECT), ps) {
 #if GEN_GEN >= 9
-      ps.MaskBits = 3;
+      ps.MaskBits = GEN_GEN >= 12 ? 0x13 : 3;
+      ps.MediaSamplerDOPClockGateEnable = GEN_GEN >= 12;
 #endif
       ps.PipelineSelection = _3D;
    }
@@ -130,6 +131,8 @@ genX(init_device_state)(struct anv_device *device)
    anv_pack_struct(&cache_mode_1, GENX(CACHE_MODE_1),
                    .FloatBlendOptimizationEnable = true,
                    .FloatBlendOptimizationEnableMask = true,
+                   .MSCRAWHazardAvoidanceBit = true,
+                   .MSCRAWHazardAvoidanceBitMask = true,
                    .PartialResolveDisableInVC = true,
                    .PartialResolveDisableInVCMask = true);
 
@@ -501,9 +504,12 @@ VkResult genX(CreateSampler)(
       /* From Broadwell PRM, SAMPLER_STATE:
        *   "Mip Mode Filter must be set to MIPFILTER_NONE for Planar YUV surfaces."
        */
+      const bool isl_format_is_planar_yuv = sampler->conversion &&
+         isl_format_is_yuv(sampler->conversion->format->planes[0].isl_format) &&
+         isl_format_is_planar(sampler->conversion->format->planes[0].isl_format);
+
       const uint32_t mip_filter_mode =
-         (sampler->conversion &&
-          isl_format_is_yuv(sampler->conversion->format->planes[0].isl_format)) ?
+         isl_format_is_planar_yuv ?
          MIPFILTER_NONE : vk_to_gen_mipmap_mode[pCreateInfo->mipmapMode];
 
       struct GENX(SAMPLER_STATE) sampler_state = {

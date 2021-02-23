@@ -2190,6 +2190,10 @@ ir_to_mesa_visitor::ir_to_mesa_visitor()
    next_signature_id = 1;
    current_function = NULL;
    mem_ctx = ralloc_context(NULL);
+   ctx = NULL;
+   prog = NULL;
+   shader_program = NULL;
+   options = NULL;
 }
 
 ir_to_mesa_visitor::~ir_to_mesa_visitor()
@@ -2332,7 +2336,8 @@ public:
    add_uniform_to_shader(struct gl_context *ctx,
                          struct gl_shader_program *shader_program,
 			 struct gl_program_parameter_list *params)
-      : ctx(ctx), shader_program(shader_program), params(params), idx(-1)
+      : ctx(ctx), shader_program(shader_program), params(params), idx(-1),
+        var(NULL)
    {
       /* empty */
    }
@@ -2386,7 +2391,7 @@ add_uniform_to_shader::visit_field(const glsl_type *type, const char *name,
    if (is_dual_slot)
       num_params *= 2;
 
-   _mesa_reserve_parameter_storage(params, num_params);
+   _mesa_reserve_parameter_storage(params, num_params, num_params);
    index = params->NumParameters;
 
    if (ctx->Const.PackedDriverUniformStorage) {
@@ -2551,7 +2556,7 @@ _mesa_associate_uniform_storage(struct gl_context *ctx,
             break;
          }
 
-         unsigned pvo = params->ParameterValueOffset[i];
+         unsigned pvo = params->Parameters[i].ValueOffset;
          _mesa_uniform_attach_driver_storage(storage, dmul * columns, dmul,
                                              format,
                                              &params->ParameterValues[pvo]);

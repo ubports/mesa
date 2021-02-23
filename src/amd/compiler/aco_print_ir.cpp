@@ -4,58 +4,63 @@
 #include "sid.h"
 #include "ac_shader_util.h"
 
+#include <array>
+
 namespace aco {
 
-static const char *reduce_ops[] = {
-   [iadd8] = "iadd8",
-   [iadd16] = "iadd16",
-   [iadd32] = "iadd32",
-   [iadd64] = "iadd64",
-   [imul8] = "imul8",
-   [imul16] = "imul16",
-   [imul32] = "imul32",
-   [imul64] = "imul64",
-   [fadd16] = "fadd16",
-   [fadd32] = "fadd32",
-   [fadd64] = "fadd64",
-   [fmul16] = "fmul16",
-   [fmul32] = "fmul32",
-   [fmul64] = "fmul64",
-   [imin8] = "imin8",
-   [imin16] = "imin16",
-   [imin32] = "imin32",
-   [imin64] = "imin64",
-   [imax8] = "imax8",
-   [imax16] = "imax16",
-   [imax32] = "imax32",
-   [imax64] = "imax64",
-   [umin8] = "umin8",
-   [umin16] = "umin16",
-   [umin32] = "umin32",
-   [umin64] = "umin64",
-   [umax8] = "umax8",
-   [umax16] = "umax16",
-   [umax32] = "umax32",
-   [umax64] = "umax64",
-   [fmin16] = "fmin16",
-   [fmin32] = "fmin32",
-   [fmin64] = "fmin64",
-   [fmax16] = "fmax16",
-   [fmax32] = "fmax32",
-   [fmax64] = "fmax64",
-   [iand8] = "iand8",
-   [iand16] = "iand16",
-   [iand32] = "iand32",
-   [iand64] = "iand64",
-   [ior8] = "ior8",
-   [ior16] = "ior16",
-   [ior32] = "ior32",
-   [ior64] = "ior64",
-   [ixor8] = "ixor8",
-   [ixor16] = "ixor16",
-   [ixor32] = "ixor32",
-   [ixor64] = "ixor64",
-};
+const std::array<const char*, num_reduce_ops> reduce_ops = []()
+{
+   std::array<const char*, num_reduce_ops> ret{};
+   ret[iadd8] = "iadd8";
+   ret[iadd16] = "iadd16";
+   ret[iadd32] = "iadd32";
+   ret[iadd64] = "iadd64";
+   ret[imul8] = "imul8";
+   ret[imul16] = "imul16";
+   ret[imul32] = "imul32";
+   ret[imul64] = "imul64";
+   ret[fadd16] = "fadd16";
+   ret[fadd32] = "fadd32";
+   ret[fadd64] = "fadd64";
+   ret[fmul16] = "fmul16";
+   ret[fmul32] = "fmul32";
+   ret[fmul64] = "fmul64";
+   ret[imin8] = "imin8";
+   ret[imin16] = "imin16";
+   ret[imin32] = "imin32";
+   ret[imin64] = "imin64";
+   ret[imax8] = "imax8";
+   ret[imax16] = "imax16";
+   ret[imax32] = "imax32";
+   ret[imax64] = "imax64";
+   ret[umin8] = "umin8";
+   ret[umin16] = "umin16";
+   ret[umin32] = "umin32";
+   ret[umin64] = "umin64";
+   ret[umax8] = "umax8";
+   ret[umax16] = "umax16";
+   ret[umax32] = "umax32";
+   ret[umax64] = "umax64";
+   ret[fmin16] = "fmin16";
+   ret[fmin32] = "fmin32";
+   ret[fmin64] = "fmin64";
+   ret[fmax16] = "fmax16";
+   ret[fmax32] = "fmax32";
+   ret[fmax64] = "fmax64";
+   ret[iand8] = "iand8";
+   ret[iand16] = "iand16";
+   ret[iand32] = "iand32";
+   ret[iand64] = "iand64";
+   ret[ior8] = "ior8";
+   ret[ior16] = "ior16";
+   ret[ior32] = "ior32";
+   ret[ior64] = "ior64";
+   ret[ixor8] = "ixor8";
+   ret[ixor16] = "ixor16";
+   ret[ixor32] = "ixor32";
+   ret[ixor64] = "ixor64";
+   return ret;
+}();
 
 static void print_reg_class(const RegClass rc, FILE *output)
 {
@@ -151,7 +156,7 @@ static void print_constant(uint8_t reg, FILE *output)
    }
 }
 
-static void print_operand(const Operand *operand, FILE *output)
+void aco_print_operand(const Operand *operand, FILE *output)
 {
    if (operand->isLiteral() || (operand->isConstant() && operand->bytes() == 1)) {
       if (operand->bytes() == 1)
@@ -168,6 +173,10 @@ static void print_operand(const Operand *operand, FILE *output)
    } else {
       if (operand->isLateKill())
          fprintf(output, "(latekill)");
+      if (operand->is16bit())
+         fprintf(output, "(is16bit)");
+      if (operand->is24bit())
+         fprintf(output, "(is24bit)");
 
       fprintf(output, "%%%d", operand->tempId());
 
@@ -183,29 +192,81 @@ static void print_definition(const Definition *definition, FILE *output)
       fprintf(output, "(precise)");
    if (definition->isNUW())
       fprintf(output, "(nuw)");
+   if (definition->isNoCSE())
+      fprintf(output, "(noCSE)");
    fprintf(output, "%%%d", definition->tempId());
 
    if (definition->isFixed())
       print_physReg(definition->physReg(), definition->bytes(), output);
 }
 
-static void print_barrier_reorder(bool can_reorder, barrier_interaction barrier, FILE *output)
+static void print_storage(storage_class storage, FILE *output)
 {
-   if (can_reorder)
-      fprintf(output, " reorder");
+   fprintf(output, " storage:");
+   int printed = 0;
+   if (storage & storage_buffer)
+      printed += fprintf(output, "%sbuffer", printed ? "," : "");
+   if (storage & storage_atomic_counter)
+      printed += fprintf(output, "%satomic_counter", printed ? "," : "");
+   if (storage & storage_image)
+      printed += fprintf(output, "%simage", printed ? "," : "");
+   if (storage & storage_shared)
+      printed += fprintf(output, "%sshared", printed ? "," : "");
+   if (storage & storage_vmem_output)
+      printed += fprintf(output, "%svmem_output", printed ? "," : "");
+   if (storage & storage_scratch)
+      printed += fprintf(output, "%sscratch", printed ? "," : "");
+   if (storage & storage_vgpr_spill)
+      printed += fprintf(output, "%svgpr_spill", printed ? "," : "");
+}
 
-   if (barrier & barrier_buffer)
-      fprintf(output, " buffer");
-   if (barrier & barrier_image)
-      fprintf(output, " image");
-   if (barrier & barrier_atomic)
-      fprintf(output, " atomic");
-   if (barrier & barrier_shared)
-      fprintf(output, " shared");
-   if (barrier & barrier_gs_data)
-      fprintf(output, " gs_data");
-   if (barrier & barrier_gs_sendmsg)
-      fprintf(output, " gs_sendmsg");
+static void print_semantics(memory_semantics sem, FILE *output)
+{
+   fprintf(output, " semantics:");
+   int printed = 0;
+   if (sem & semantic_acquire)
+      printed += fprintf(output, "%sacquire", printed ? "," : "");
+   if (sem & semantic_release)
+      printed += fprintf(output, "%srelease", printed ? "," : "");
+   if (sem & semantic_volatile)
+      printed += fprintf(output, "%svolatile", printed ? "," : "");
+   if (sem & semantic_private)
+      printed += fprintf(output, "%sprivate", printed ? "," : "");
+   if (sem & semantic_can_reorder)
+      printed += fprintf(output, "%sreorder", printed ? "," : "");
+   if (sem & semantic_atomic)
+      printed += fprintf(output, "%satomic", printed ? "," : "");
+   if (sem & semantic_rmw)
+      printed += fprintf(output, "%srmw", printed ? "," : "");
+}
+
+static void print_scope(sync_scope scope, FILE *output, const char *prefix="scope")
+{
+   fprintf(output, " %s:", prefix);
+   switch (scope) {
+   case scope_invocation:
+      fprintf(output, "invocation");
+      break;
+   case scope_subgroup:
+      fprintf(output, "subgroup");
+      break;
+   case scope_workgroup:
+      fprintf(output, "workgroup");
+      break;
+   case scope_queuefamily:
+      fprintf(output, "queuefamily");
+      break;
+   case scope_device:
+      fprintf(output, "device");
+      break;
+   }
+}
+
+static void print_sync(memory_sync_info sync, FILE *output)
+{
+   print_storage(sync.storage, output);
+   print_semantics(sync.semantics, output);
+   print_scope(sync.scope, output);
 }
 
 static void print_instr_format_specific(const Instruction *instr, FILE *output)
@@ -292,7 +353,7 @@ static void print_instr_format_specific(const Instruction *instr, FILE *output)
          fprintf(output, " dlc");
       if (smem->nv)
          fprintf(output, " nv");
-      print_barrier_reorder(smem->can_reorder, smem->barrier, output);
+      print_sync(smem->sync, output);
       break;
    }
    case Format::VINTRP: {
@@ -308,6 +369,7 @@ static void print_instr_format_specific(const Instruction *instr, FILE *output)
          fprintf(output, " offset1:%u", ds->offset1);
       if (ds->gds)
          fprintf(output, " gds");
+      print_sync(ds->sync, output);
       break;
    }
    case Format::MUBUF: {
@@ -332,7 +394,7 @@ static void print_instr_format_specific(const Instruction *instr, FILE *output)
          fprintf(output, " lds");
       if (mubuf->disable_wqm)
          fprintf(output, " disable_wqm");
-      print_barrier_reorder(mubuf->can_reorder, mubuf->barrier, output);
+      print_sync(mubuf->sync, output);
       break;
    }
    case Format::MIMG: {
@@ -392,7 +454,7 @@ static void print_instr_format_specific(const Instruction *instr, FILE *output)
          fprintf(output, " d16");
       if (mimg->disable_wqm)
          fprintf(output, " disable_wqm");
-      print_barrier_reorder(mimg->can_reorder, mimg->barrier, output);
+      print_sync(mimg->sync, output);
       break;
    }
    case Format::EXP: {
@@ -439,6 +501,12 @@ static void print_instr_format_specific(const Instruction *instr, FILE *output)
          fprintf(output, " cluster_size:%u", reduce->cluster_size);
       break;
    }
+   case Format::PSEUDO_BARRIER: {
+      const Pseudo_barrier_instruction* barrier = static_cast<const Pseudo_barrier_instruction*>(instr);
+      print_sync(barrier->sync, output);
+      print_scope(barrier->exec_scope, output, "exec_scope");
+      break;
+   }
    case Format::FLAT:
    case Format::GLOBAL:
    case Format::SCRATCH: {
@@ -457,7 +525,7 @@ static void print_instr_format_specific(const Instruction *instr, FILE *output)
          fprintf(output, " nv");
       if (flat->disable_wqm)
          fprintf(output, " disable_wqm");
-      print_barrier_reorder(flat->can_reorder, flat->barrier, output);
+      print_sync(flat->sync, output);
       break;
    }
    case Format::MTBUF: {
@@ -507,7 +575,7 @@ static void print_instr_format_specific(const Instruction *instr, FILE *output)
          fprintf(output, " tfe");
       if (mtbuf->disable_wqm)
          fprintf(output, " disable_wqm");
-      print_barrier_reorder(mtbuf->can_reorder, mtbuf->barrier, output);
+      print_sync(mtbuf->sync, output);
       break;
    }
    case Format::VOP3P: {
@@ -621,10 +689,10 @@ void aco_print_instr(const Instruction *instr, FILE *output)
    }
    fprintf(output, "%s", instr_info.name[(int)instr->opcode]);
    if (instr->operands.size()) {
-      bool abs[instr->operands.size()];
-      bool neg[instr->operands.size()];
-      bool opsel[instr->operands.size()];
-      uint8_t sel[instr->operands.size()];
+      bool *const abs = (bool *)alloca(instr->operands.size() * sizeof(bool));
+      bool *const neg = (bool *)alloca(instr->operands.size() * sizeof(bool));
+      bool *const opsel = (bool *)alloca(instr->operands.size() * sizeof(bool));
+      uint8_t *const sel = (uint8_t *)alloca(instr->operands.size() * sizeof(uint8_t));
       if ((int)instr->format & (int)Format::VOP3A) {
          const VOP3A_instruction* vop3 = static_cast<const VOP3A_instruction*>(instr);
          for (unsigned i = 0; i < instr->operands.size(); ++i) {
@@ -671,11 +739,11 @@ void aco_print_instr(const Instruction *instr, FILE *output)
             fprintf(output, "hi(");
          else if (sel[i] & sdwa_sext)
             fprintf(output, "sext(");
-         print_operand(&instr->operands[i], output);
+         aco_print_operand(&instr->operands[i], output);
          if (opsel[i] || (sel[i] & sdwa_sext))
             fprintf(output, ")");
          if (!(sel[i] & sdwa_isra)) {
-            if (sel[i] & sdwa_udword) {
+            if (sel[i] == sdwa_udword || sel[i] == sdwa_sdword) {
                /* print nothing */
             } else if (sel[i] & sdwa_isword) {
                unsigned index = sel[i] & sdwa_wordnum;
@@ -773,14 +841,14 @@ static void print_stage(Stage stage, FILE *output)
       fprintf(output, "vertex_geometry_gs");
    else if (stage == tess_eval_geometry_gs)
       fprintf(output, "tess_eval_geometry_gs");
-   else if (stage == ngg_vertex_gs)
-      fprintf(output, "ngg_vertex_gs");
-   else if (stage == ngg_tess_eval_gs)
-      fprintf(output, "ngg_tess_eval_gs");
-   else if (stage == ngg_vertex_geometry_gs)
-      fprintf(output, "ngg_vertex_geometry_gs");
-   else if (stage == ngg_tess_eval_geometry_gs)
-      fprintf(output, "ngg_tess_eval_geometry_gs");
+   else if (stage == vertex_ngg)
+      fprintf(output, "vertex_ngg");
+   else if (stage == tess_eval_ngg)
+      fprintf(output, "tess_eval_ngg");
+   else if (stage == vertex_geometry_ngg)
+      fprintf(output, "vertex_geometry_ngg");
+   else if (stage == tess_eval_geometry_ngg)
+      fprintf(output, "tess_eval_geometry_ngg");
    else
       fprintf(output, "unknown");
 

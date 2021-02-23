@@ -296,7 +296,7 @@ static void radeon_bomgr_free_va(const struct radeon_info *info,
       heap->start = va;
       /* Delete uppermost hole if it reaches the new top */
       if (!list_is_empty(&heap->holes)) {
-         hole = container_of(heap->holes.next, hole, list);
+         hole = container_of(heap->holes.next, struct radeon_bo_va_hole, list);
          if ((hole->offset + hole->size) == va) {
             heap->start = hole->offset;
             list_del(&hole->list);
@@ -306,7 +306,7 @@ static void radeon_bomgr_free_va(const struct radeon_info *info,
    } else {
       struct radeon_bo_va_hole *next;
 
-      hole = container_of(&heap->holes, hole, list);
+      hole = container_of(&heap->holes, struct radeon_bo_va_hole, list);
       LIST_FOR_EACH_ENTRY(next, &heap->holes, list) {
          if (next->offset < va)
             break;
@@ -498,16 +498,16 @@ void *radeon_bo_do_map(struct radeon_bo *bo)
 
 static void *radeon_bo_map(struct pb_buffer *buf,
                            struct radeon_cmdbuf *rcs,
-                           enum pipe_transfer_usage usage)
+                           enum pipe_map_flags usage)
 {
    struct radeon_bo *bo = (struct radeon_bo*)buf;
-   struct radeon_drm_cs *cs = (struct radeon_drm_cs*)rcs;
+   struct radeon_drm_cs *cs = rcs ? radeon_drm_cs(rcs) : NULL;
 
    /* If it's not unsynchronized bo_map, flush CS if needed and then wait. */
-   if (!(usage & PIPE_TRANSFER_UNSYNCHRONIZED)) {
+   if (!(usage & PIPE_MAP_UNSYNCHRONIZED)) {
       /* DONTBLOCK doesn't make sense with UNSYNCHRONIZED. */
-      if (usage & PIPE_TRANSFER_DONTBLOCK) {
-         if (!(usage & PIPE_TRANSFER_WRITE)) {
+      if (usage & PIPE_MAP_DONTBLOCK) {
+         if (!(usage & PIPE_MAP_WRITE)) {
             /* Mapping for read.
              *
              * Since we are mapping for read, we don't need to wait
@@ -540,7 +540,7 @@ static void *radeon_bo_map(struct pb_buffer *buf,
       } else {
          uint64_t time = os_time_get_nano();
 
-         if (!(usage & PIPE_TRANSFER_WRITE)) {
+         if (!(usage & PIPE_MAP_WRITE)) {
             /* Mapping for read.
              *
              * Since we are mapping for read, we don't need to wait
@@ -749,8 +749,7 @@ bool radeon_bo_can_reclaim(struct pb_buffer *_buf)
 
 bool radeon_bo_can_reclaim_slab(void *priv, struct pb_slab_entry *entry)
 {
-   struct radeon_bo *bo = NULL; /* fix container_of */
-   bo = container_of(entry, bo, u.slab.entry);
+   struct radeon_bo *bo = container_of(entry, struct radeon_bo, u.slab.entry);
 
    return radeon_bo_can_reclaim(&bo->base);
 }
@@ -1044,8 +1043,7 @@ radeon_winsys_bo_create(struct radeon_winsys *rws,
       if (!entry)
          return NULL;
 
-      bo = NULL;
-      bo = container_of(entry, bo, u.slab.entry);
+      bo = container_of(entry, struct radeon_bo, u.slab.entry);
 
       pipe_reference_init(&bo->base.reference, 1);
 

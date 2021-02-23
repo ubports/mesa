@@ -164,7 +164,7 @@ static bool match_layout_qualifier(const char *s1, const char *s2,
 %token INVARIANT PRECISE
 %token LOWP MEDIUMP HIGHP SUPERP PRECISION
 
-%token VERSION_TOK EXTENSION LINE COLON EOL INTERFACE OUTPUT
+%token VERSION_TOK EXTENSION LINE COLON EOL INTERFACE_TOK OUTPUT
 %token PRAGMA_DEBUG_ON PRAGMA_DEBUG_OFF
 %token PRAGMA_OPTIMIZE_ON PRAGMA_OPTIMIZE_OFF
 %token PRAGMA_WARNING_ON PRAGMA_WARNING_OFF
@@ -917,20 +917,8 @@ parameter_declarator:
    }
    | layout_qualifier type_specifier any_identifier
    {
-      if (state->allow_layout_qualifier_on_function_parameter) {
-         void *ctx = state->linalloc;
-         $$ = new(ctx) ast_parameter_declarator();
-         $$->set_location_range(@2, @3);
-         $$->type = new(ctx) ast_fully_specified_type();
-         $$->type->set_location(@2);
-         $$->type->specifier = $2;
-         $$->identifier = $3;
-         state->symbols->add_variable(new(state) ir_variable(NULL, $3, ir_var_auto));
-      } else {
-         _mesa_glsl_error(&@1, state,
-                          "is is not allowed on function parameter");
-         YYERROR;
-      }
+      _mesa_glsl_error(&@1, state, "is is not allowed on function parameter");
+      YYERROR;
    }
    | type_specifier any_identifier array_specifier
    {

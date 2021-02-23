@@ -2,31 +2,89 @@
 
 set -ex
 
+if [ $DEBIAN_ARCH = arm64 ]; then
+    ARCH_PACKAGES="firmware-qcom-media"
+elif [ $DEBIAN_ARCH = amd64 ]; then
+    # Upstream LLVM package repository
+    apt-get -y install --no-install-recommends gnupg ca-certificates
+    apt-key add /llvm-snapshot.gpg.key
+    echo "deb https://apt.llvm.org/buster/ llvm-toolchain-buster-10 main" >/etc/apt/sources.list.d/llvm10.list
+    apt-get update
+
+    ARCH_PACKAGES="firmware-amd-graphics
+                   libelf1
+                   libllvm10
+                  "
+fi
+
+if [ -n "$INCLUDE_VK_CTS" ]; then
+    VK_CTS_PACKAGES="libvulkan1"
+fi
+
+if [ -n "$INCLUDE_PIGLIT" ]; then
+    PIGLIT_PACKAGES="libwaffle-1-0
+                     libxkbcommon0
+                     python3-lxml
+                     python3-mako
+                     python3-numpy
+                     python3-simplejson
+                    "
+    INSTALL_CI_FAIRY_PACKAGES="git
+                               python3-dev
+                               python3-pip
+                               python3-setuptools
+                               python3-wheel
+                              "
+fi
+
 apt-get -y install --no-install-recommends \
+    $ARCH_PACKAGES \
+    $CI_FAIRY_PACKAGES \
+    $INSTALL_CI_FAIRY_PACKAGES \
+    $PIGLIT_PACKAGES \
+    $VK_CTS_PACKAGES \
     ca-certificates \
     curl \
     initramfs-tools \
-    libpng16-16 \
-    strace \
-    libsensors5 \
     libexpat1 \
-    libdrm2 \
-    libdrm-nouveau2 \
+    libpng16-16 \
+    libpython3.7 \
+    libsensors5 \
+    libwaffle-1-0 \
     libx11-6 \
     libx11-xcb1 \
-    firmware-qcom-media \
+    libxcb-dri2-0 \
+    libxcb-dri3-0 \
+    libxcb-glx0 \
+    libxcb-present0 \
+    libxcb-randr0 \
+    libxcb-shm0 \
+    libxcb-sync1 \
+    libxcb-xfixes0 \
+    libxdamage1 \
+    libxext6 \
+    libxfixes3 \
+    libxkbcommon0 \
+    libxshmfence1 \
+    libxxf86vm1 \
     netcat-openbsd \
     python3 \
-    libpython3.7 \
     python3-pil \
     python3-pytest \
     python3-requests \
     python3-yaml \
+    sntp \
+    strace \
     wget \
     xz-utils
 
-if [ -n "$INCLUDE_VK_CTS" ]; then
-    apt-get install -y libvulkan1
+if [ -n "$INCLUDE_PIGLIT" ]; then
+    # Needed for ci-fairy, this revision is able to upload files to
+    # MinIO and doesn't depend on git
+    pip3 install git+http://gitlab.freedesktop.org/freedesktop/ci-templates@0f1abc24c043e63894085a6bd12f14263e8b29eb
+
+    apt-get purge -y \
+        $INSTALL_CI_FAIRY_PACKAGES
 fi
 
 passwd root -d
@@ -59,7 +117,8 @@ cp /usr/share/zoneinfo/Etc/UTC /etc/localtime
 
 UNNEEDED_PACKAGES="libfdisk1
                    tzdata
-                   diffutils"
+                   diffutils
+                   gnupg"
 
 export DEBIAN_FRONTEND=noninteractive
 

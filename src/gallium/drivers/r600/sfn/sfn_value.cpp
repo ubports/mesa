@@ -153,19 +153,18 @@ bool LiteralValue::is_equal_to(const Value& other) const
            value() == rhs.value());
 }
 
-SpecialValue::SpecialValue(Type type, int value, int chan):
-   Value(type, chan),
+InlineConstValue::InlineConstValue(int value, int chan):
+   Value(Value::cinline,  chan),
    m_value(static_cast<AluInlineConstants>(value))
 {
 }
 
-uint32_t SpecialValue::sel() const
+uint32_t InlineConstValue::sel() const
 {
    return m_value;
 }
 
-
-void SpecialValue::do_print(std::ostream& os) const
+void InlineConstValue::do_print(std::ostream& os) const
 {
    auto sv_info = alu_src_const.find(m_value);
    if (sv_info != alu_src_const.end()) {
@@ -183,22 +182,17 @@ void SpecialValue::do_print(std::ostream& os) const
    }
 }
 
-PValue Value::zero(new InlineConstValue(ALU_SRC_0, 0));
-PValue Value::one_f(new InlineConstValue(ALU_SRC_1, 0));
-PValue Value::one_i(new InlineConstValue(ALU_SRC_1_INT, 0));
-PValue Value::zero_dot_5(new InlineConstValue(ALU_SRC_0_5, 0));
-
-InlineConstValue::InlineConstValue(int value, int chan):
-   SpecialValue(Value::cinline, value, chan)
-{
-}
-
 bool InlineConstValue::is_equal_to(const Value& other) const
 {
    assert(other.type() == Value::Type::cinline);
    const auto& rhs = static_cast<const InlineConstValue&>(other);
    return sel() == rhs.sel();
 }
+
+PValue Value::zero(new InlineConstValue(ALU_SRC_0, 0));
+PValue Value::one_f(new InlineConstValue(ALU_SRC_1, 0));
+PValue Value::one_i(new InlineConstValue(ALU_SRC_1_INT, 0));
+PValue Value::zero_dot_5(new InlineConstValue(ALU_SRC_0_5, 0));
 
 UniformValue::UniformValue(uint32_t sel, uint32_t chan, uint32_t kcache_bank):
    Value(Value::kconst, chan)
@@ -210,7 +204,7 @@ UniformValue::UniformValue(uint32_t sel, uint32_t chan, uint32_t kcache_bank):
 UniformValue::UniformValue(uint32_t sel, uint32_t chan, PValue addr):
    Value(Value::kconst, chan),
    m_index(sel),
-   m_kcache_bank(0),
+   m_kcache_bank(1),
    m_addr(addr)
 {
 
@@ -238,8 +232,10 @@ void UniformValue::do_print(std::ostream& os) const
 {
    if (m_index < 512)
       os << "KC" << m_kcache_bank << "[" << m_index;
+   else if (m_addr)
+      os << "KC[" << *m_addr << "][" << m_index;
    else
-      os << "KCX[" << m_index;
+      os << "KCx[" << m_index;
    os << "]." << component_names[chan()];
 }
 

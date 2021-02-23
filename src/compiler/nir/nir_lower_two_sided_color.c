@@ -51,17 +51,14 @@ static nir_variable *
 create_input(nir_shader *shader, gl_varying_slot slot,
              enum glsl_interp_mode interpolation)
 {
-   nir_variable *var = rzalloc(shader, nir_variable);
+   nir_variable *var = nir_variable_create(shader, nir_var_shader_in,
+                                           glsl_vec4_type(), NULL);
 
    var->data.driver_location = shader->num_inputs++;
-   var->type = glsl_vec4_type();
-   var->data.mode = nir_var_shader_in;
    var->name = ralloc_asprintf(var, "in_%d", var->data.driver_location);
    var->data.index = 0;
    var->data.location = slot;
    var->data.interpolation = interpolation;
-
-   exec_list_push_tail(&shader->inputs, &var->node);
 
    return var;
 }
@@ -69,22 +66,19 @@ create_input(nir_shader *shader, gl_varying_slot slot,
 static nir_variable *
 create_face_input(nir_shader *shader)
 {
-   nir_foreach_variable(var, &shader->inputs) {
-      if (var->data.location == VARYING_SLOT_FACE)
-         return var;
+   nir_variable *var =
+      nir_find_variable_with_location(shader, nir_var_shader_in,
+                                      VARYING_SLOT_FACE);
+
+   if (var == NULL) {
+      var = nir_variable_create(shader, nir_var_shader_in,
+                                glsl_bool_type(), "gl_FrontFacing");
+
+      var->data.driver_location = shader->num_inputs++;
+      var->data.index = 0;
+      var->data.location = VARYING_SLOT_FACE;
+      var->data.interpolation = INTERP_MODE_FLAT;
    }
-
-   nir_variable *var = rzalloc(shader, nir_variable);
-
-   var->data.driver_location = shader->num_inputs++;
-   var->type = glsl_bool_type();
-   var->data.mode = nir_var_shader_in;
-   var->name = "gl_FrontFacing";
-   var->data.index = 0;
-   var->data.location = VARYING_SLOT_FACE;
-   var->data.interpolation = INTERP_MODE_FLAT;
-
-   exec_list_push_tail(&shader->inputs, &var->node);
 
    return var;
 }
@@ -92,23 +86,15 @@ create_face_input(nir_shader *shader)
 static nir_ssa_def *
 load_input(nir_builder *b, nir_variable *in)
 {
-   nir_intrinsic_instr *load;
-
-   load = nir_intrinsic_instr_create(b->shader, nir_intrinsic_load_input);
-   load->num_components = 4;
-   nir_intrinsic_set_base(load, in->data.driver_location);
-   load->src[0] = nir_src_for_ssa(nir_imm_int(b, 0));
-   nir_ssa_dest_init(&load->instr, &load->dest, 4, 32, NULL);
-   nir_builder_instr_insert(b, &load->instr);
-
-   return &load->dest.ssa;
+   return nir_load_input(b, 4, 32, nir_imm_int(b, 0),
+                         .base = in->data.driver_location);
 }
 
 static int
 setup_inputs(lower_2side_state *state)
 {
    /* find color inputs: */
-   nir_foreach_variable(var, &state->shader->inputs) {
+   nir_foreach_shader_in_variable(var, state->shader) {
       switch (var->data.location) {
       case VARYING_SLOT_COL0:
       case VARYING_SLOT_COL1:

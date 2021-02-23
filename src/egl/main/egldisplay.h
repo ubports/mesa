@@ -45,6 +45,7 @@ extern "C" {
 
 enum _egl_platform_type {
    _EGL_PLATFORM_X11,
+   _EGL_PLATFORM_XCB,
    _EGL_PLATFORM_WAYLAND,
    _EGL_PLATFORM_DRM,
    _EGL_PLATFORM_ANDROID,
@@ -108,6 +109,7 @@ struct _egl_extensions
    EGLBoolean EXT_image_dma_buf_import;
    EGLBoolean EXT_image_dma_buf_import_modifiers;
    EGLBoolean EXT_pixel_format_float;
+   EGLBoolean EXT_protected_surface;
    EGLBoolean EXT_surface_CTA861_3_metadata;
    EGLBoolean EXT_surface_SMPTE2086_metadata;
    EGLBoolean EXT_swap_buffers_with_damage;
@@ -163,7 +165,7 @@ struct _egl_display
    void *PlatformDisplay;     /**< A pointer to the platform display */
 
    _EGLDevice *Device;        /**< Device backing the display */
-   _EGLDriver *Driver;        /**< Matched driver of the display */
+   const _EGLDriver *Driver;  /**< Matched driver of the display */
    EGLBoolean Initialized;    /**< True if the display is initialized */
 
    /* options that affect how the driver initializes the display */
@@ -209,7 +211,7 @@ _eglFindDisplay(_EGLPlatformType plat, void *plat_dpy, const EGLAttrib *attr);
 
 
 extern void
-_eglReleaseDisplayResources(_EGLDriver *drv, _EGLDisplay *disp);
+_eglReleaseDisplayResources(_EGLDisplay *disp);
 
 
 extern void
@@ -293,6 +295,12 @@ _eglNumAttribs(const EGLAttrib *attribs)
 #ifdef HAVE_X11_PLATFORM
 _EGLDisplay*
 _eglGetX11Display(Display *native_display, const EGLAttrib *attrib_list);
+#endif
+
+#ifdef HAVE_XCB_PLATFORM
+typedef struct xcb_connection_t xcb_connection_t;
+_EGLDisplay*
+_eglGetXcbDisplay(xcb_connection_t *native_display, const EGLAttrib *attrib_list);
 #endif
 
 #ifdef HAVE_DRM_PLATFORM

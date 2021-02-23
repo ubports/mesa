@@ -39,9 +39,11 @@
 #include "sw/null/null_sw_winsys.h"
 #include "sw/wrapper/wrapper_sw_winsys.h"
 #include "target-helpers/sw_helper_public.h"
+#include "target-helpers/inline_debug_helper.h"
 #include "frontend/drisw_api.h"
 #include "frontend/sw_driver.h"
 #include "frontend/sw_winsys.h"
+
 
 struct pipe_loader_sw_device {
    struct pipe_loader_device base;
@@ -105,7 +107,11 @@ pipe_loader_sw_probe_init_common(struct pipe_loader_sw_device *sdev)
    if (!sdev->dd)
       return false;
 #else
-   sdev->lib = pipe_loader_find_module("swrast", PIPE_SEARCH_DIR);
+   const char *search_dir = getenv("GALLIUM_PIPE_SEARCH_DIR");
+   if (search_dir == NULL)
+      search_dir = PIPE_SEARCH_DIR;
+
+   sdev->lib = pipe_loader_find_module("swrast", search_dir);
    if (!sdev->lib)
       return false;
 
@@ -294,9 +300,10 @@ pipe_loader_sw_release(struct pipe_loader_device **dev)
    pipe_loader_base_release(dev);
 }
 
-static const char *
-pipe_loader_sw_get_driconf_xml(struct pipe_loader_device *dev)
+static const struct driOptionDescription *
+pipe_loader_sw_get_driconf(struct pipe_loader_device *dev, unsigned *count)
 {
+   *count = 0;
    return NULL;
 }
 
@@ -311,11 +318,11 @@ pipe_loader_sw_create_screen(struct pipe_loader_device *dev,
    if (!screen)
       sdev->ws->destroy(sdev->ws);
 
-   return screen;
+   return screen ? debug_screen_wrap(screen) : NULL;
 }
 
 static const struct pipe_loader_ops pipe_loader_sw_ops = {
    .create_screen = pipe_loader_sw_create_screen,
-   .get_driconf_xml = pipe_loader_sw_get_driconf_xml,
+   .get_driconf = pipe_loader_sw_get_driconf,
    .release = pipe_loader_sw_release
 };

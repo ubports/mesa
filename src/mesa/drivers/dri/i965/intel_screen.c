@@ -49,62 +49,67 @@
 
 #include "common/gen_defines.h"
 
-static const __DRIconfigOptionsExtension brw_config_options = {
-   .base = { __DRI_CONFIG_OPTIONS, 1 },
-   .xml =
-DRI_CONF_BEGIN
+static const driOptionDescription brw_driconf[] = {
    DRI_CONF_SECTION_PERFORMANCE
       /* Options correspond to DRI_CONF_BO_REUSE_DISABLED,
        * DRI_CONF_BO_REUSE_ALL
        */
-      DRI_CONF_OPT_BEGIN_V(bo_reuse, enum, 1, "0:1")
-	 DRI_CONF_DESC_BEGIN("Buffer object reuse")
-	    DRI_CONF_ENUM(0, "Disable buffer object reuse")
-	    DRI_CONF_ENUM(1, "Enable reuse of all sizes of buffer objects")
-	 DRI_CONF_DESC_END
-      DRI_CONF_OPT_END
-      DRI_CONF_MESA_NO_ERROR("false")
-      DRI_CONF_MESA_GLTHREAD("false")
+      DRI_CONF_OPT_E(bo_reuse, 1, 0, 1,
+                     "Buffer object reuse",
+                     DRI_CONF_ENUM(0, "Disable buffer object reuse")
+                     DRI_CONF_ENUM(1, "Enable reuse of all sizes of buffer objects"))
+      DRI_CONF_MESA_NO_ERROR(false)
+      DRI_CONF_MESA_GLTHREAD(false)
    DRI_CONF_SECTION_END
 
    DRI_CONF_SECTION_QUALITY
-      DRI_CONF_PRECISE_TRIG("false")
+      DRI_CONF_PRECISE_TRIG(false)
 
-      DRI_CONF_OPT_BEGIN(clamp_max_samples, int, -1)
-              DRI_CONF_DESC("Clamp the value of GL_MAX_SAMPLES to the "
-                            "given integer. If negative, then do not clamp.")
-      DRI_CONF_OPT_END
+      DRI_CONF_OPT_I(clamp_max_samples, -1, 0, 0,
+                     "Clamp the value of GL_MAX_SAMPLES to the "
+                     "given integer. If negative, then do not clamp.")
    DRI_CONF_SECTION_END
 
    DRI_CONF_SECTION_DEBUG
-      DRI_CONF_ALWAYS_FLUSH_BATCH("false")
-      DRI_CONF_ALWAYS_FLUSH_CACHE("false")
-      DRI_CONF_DISABLE_THROTTLING("false")
-      DRI_CONF_FORCE_GLSL_EXTENSIONS_WARN("false")
+      DRI_CONF_ALWAYS_FLUSH_BATCH(false)
+      DRI_CONF_ALWAYS_FLUSH_CACHE(false)
+      DRI_CONF_DISABLE_THROTTLING(false)
+      DRI_CONF_FORCE_GLSL_EXTENSIONS_WARN(false)
       DRI_CONF_FORCE_GLSL_VERSION(0)
-      DRI_CONF_DISABLE_GLSL_LINE_CONTINUATIONS("false")
-      DRI_CONF_DISABLE_BLEND_FUNC_EXTENDED("false")
-      DRI_CONF_DUAL_COLOR_BLEND_BY_LOCATION("false")
-      DRI_CONF_ALLOW_GLSL_EXTENSION_DIRECTIVE_MIDSHADER("false")
-      DRI_CONF_ALLOW_GLSL_BUILTIN_VARIABLE_REDECLARATION("false")
-      DRI_CONF_ALLOW_GLSL_CROSS_STAGE_INTERPOLATION_MISMATCH("false")
-      DRI_CONF_ALLOW_HIGHER_COMPAT_VERSION("false")
-      DRI_CONF_FORCE_COMPAT_PROFILE("false")
-      DRI_CONF_FORCE_GLSL_ABS_SQRT("false")
+      DRI_CONF_DISABLE_GLSL_LINE_CONTINUATIONS(false)
+      DRI_CONF_DISABLE_BLEND_FUNC_EXTENDED(false)
+      DRI_CONF_DUAL_COLOR_BLEND_BY_LOCATION(false)
+      DRI_CONF_ALLOW_EXTRA_PP_TOKENS(false)
+      DRI_CONF_ALLOW_GLSL_EXTENSION_DIRECTIVE_MIDSHADER(false)
+      DRI_CONF_ALLOW_GLSL_BUILTIN_VARIABLE_REDECLARATION(false)
+      DRI_CONF_ALLOW_GLSL_CROSS_STAGE_INTERPOLATION_MISMATCH(false)
+      DRI_CONF_ALLOW_HIGHER_COMPAT_VERSION(false)
+      DRI_CONF_FORCE_COMPAT_PROFILE(false)
+      DRI_CONF_FORCE_GLSL_ABS_SQRT(false)
+      DRI_CONF_FORCE_GL_VENDOR()
 
-      DRI_CONF_OPT_BEGIN_B(shader_precompile, "true")
-	 DRI_CONF_DESC("Perform code generation at shader link time.")
-      DRI_CONF_OPT_END
+      DRI_CONF_OPT_B(shader_precompile, true, "Perform code generation at shader link time.")
    DRI_CONF_SECTION_END
 
    DRI_CONF_SECTION_MISCELLANEOUS
-      DRI_CONF_GLSL_ZERO_INIT("false")
-      DRI_CONF_VS_POSITION_ALWAYS_INVARIANT("false")
-      DRI_CONF_ALLOW_RGB10_CONFIGS("false")
-      DRI_CONF_ALLOW_RGB565_CONFIGS("true")
-      DRI_CONF_ALLOW_FP16_CONFIGS("false")
+      DRI_CONF_GLSL_ZERO_INIT(false)
+      DRI_CONF_VS_POSITION_ALWAYS_INVARIANT(false)
+      DRI_CONF_ALLOW_RGB10_CONFIGS(false)
+      DRI_CONF_ALLOW_RGB565_CONFIGS(true)
+      DRI_CONF_ALLOW_FP16_CONFIGS(false)
    DRI_CONF_SECTION_END
-DRI_CONF_END
+};
+
+static char *
+brw_driconf_get_xml(UNUSED const char *driver_name)
+{
+   return driGetOptionsXml(brw_driconf, ARRAY_SIZE(brw_driconf));
+}
+
+static const __DRIconfigOptionsExtension brw_config_options = {
+   .base = { __DRI_CONFIG_OPTIONS, 2 },
+   .xml = NULL,
+   .getXml = brw_driconf_get_xml,
 };
 
 #include "intel_batchbuffer.h"
@@ -363,7 +368,7 @@ modifier_is_supported(const struct gen_device_info *devinfo,
 
    if (modinfo->aux_usage == ISL_AUX_USAGE_CCS_E) {
       /* If INTEL_DEBUG=norbc is set, don't support any CCS_E modifiers */
-      if (unlikely(INTEL_DEBUG & DEBUG_NO_RBC))
+      if (INTEL_DEBUG & DEBUG_NO_RBC)
          return false;
 
       /* CCS_E is not supported for planar images */
@@ -472,7 +477,8 @@ intel_allocate_image(struct intel_screen *screen, int dri_format,
     }
 
     image->internal_format = _mesa_get_format_base_format(image->format);
-    image->data = loaderPrivate;
+    image->driScrnPriv = screen->driScrnPriv;
+    image->loader_private = loaderPrivate;
 
     return image;
 }
@@ -563,7 +569,8 @@ intel_create_image_from_renderbuffer(__DRIcontext *context,
    image->modifier = tiling_to_modifier(
                         isl_tiling_to_i915_tiling(irb->mt->surf.tiling));
    image->offset = 0;
-   image->data = loaderPrivate;
+   image->driScrnPriv = context->driScreenPriv;
+   image->loader_private = loaderPrivate;
    brw_bo_unreference(image->bo);
    image->bo = irb->mt->bo;
    brw_bo_reference(irb->mt->bo);
@@ -606,7 +613,7 @@ intel_create_image_from_texture(__DRIcontext *context, int target,
       return NULL;
    }
 
-   if (level < obj->BaseLevel || level > obj->_MaxLevel) {
+   if (level < obj->Attrib.BaseLevel || level > obj->_MaxLevel) {
       *error = __DRI_IMAGE_ERROR_BAD_MATCH;
       return NULL;
    }
@@ -625,7 +632,8 @@ intel_create_image_from_texture(__DRIcontext *context, int target,
    image->format = obj->Image[face][level]->TexFormat;
    image->modifier = tiling_to_modifier(
                         isl_tiling_to_i915_tiling(iobj->mt->surf.tiling));
-   image->data = loaderPrivate;
+   image->driScrnPriv = context->driScreenPriv;
+   image->loader_private = loaderPrivate;
    intel_setup_image_from_mipmap_tree(brw, image, iobj->mt, level, zoffset);
    image->dri_format = driGLFormatToImageFormat(image->format);
    image->has_depthstencil = iobj->mt->stencil_mt? true : false;
@@ -643,6 +651,18 @@ intel_create_image_from_texture(__DRIcontext *context, int target,
 static void
 intel_destroy_image(__DRIimage *image)
 {
+   const __DRIscreen * driScreen = image->driScrnPriv;
+   const __DRIimageLoaderExtension *imgLoader = driScreen->image.loader;
+   const __DRIdri2LoaderExtension *dri2Loader = driScreen->dri2.loader;
+
+   if (imgLoader && imgLoader->base.version >= 4 &&
+         imgLoader->destroyLoaderImageState) {
+      imgLoader->destroyLoaderImageState(image->loader_private);
+   } else if (dri2Loader && dri2Loader->base.version >= 5 &&
+         dri2Loader->destroyLoaderImageState) {
+      dri2Loader->destroyLoaderImageState(image->loader_private);
+   }
+
    brw_bo_unreference(image->bo);
    free(image);
 }
@@ -875,7 +895,8 @@ intel_map_image(__DRIcontext *context, __DRIimage *image,
 }
 
 static void
-intel_unmap_image(__DRIcontext *context, __DRIimage *image, void *map_info)
+intel_unmap_image(UNUSED __DRIcontext *context, UNUSED __DRIimage *image,
+                  void *map_info)
 {
    struct brw_bo *bo = map_info;
 
@@ -1001,7 +1022,8 @@ intel_dup_image(__DRIimage *orig_image, void *loaderPrivate)
    image->tile_x          = orig_image->tile_x;
    image->tile_y          = orig_image->tile_y;
    image->has_depthstencil = orig_image->has_depthstencil;
-   image->data            = loaderPrivate;
+   image->driScrnPriv     = orig_image->driScrnPriv;
+   image->loader_private  = loaderPrivate;
    image->aux_offset      = orig_image->aux_offset;
    image->aux_pitch       = orig_image->aux_pitch;
 
@@ -2495,7 +2517,7 @@ shader_perf_log_mesa(void *data, const char *fmt, ...)
    va_list args;
    va_start(args, fmt);
 
-   if (unlikely(INTEL_DEBUG & DEBUG_PERF)) {
+   if (INTEL_DEBUG & DEBUG_PERF) {
       va_list args_copy;
       va_copy(args_copy, args);
       vfprintf(stderr, fmt, args_copy);
@@ -2542,9 +2564,9 @@ __DRIconfig **intelInitScreen2(__DRIscreen *dri_screen)
    driOptionCache options;
    memset(&options, 0, sizeof(options));
 
-   driParseOptionInfo(&options, brw_config_options.xml);
+   driParseOptionInfo(&options, brw_driconf, ARRAY_SIZE(brw_driconf));
    driParseConfigFiles(&screen->optionCache, &options, dri_screen->myNum,
-                       "i965", NULL, NULL, 0);
+                       "i965", NULL, NULL, 0, NULL, 0);
    driDestroyOptionCache(&options);
 
    screen->driScrnPriv = dri_screen;
@@ -2570,7 +2592,7 @@ __DRIconfig **intelInitScreen2(__DRIscreen *dri_screen)
    if ((INTEL_DEBUG & DEBUG_SHADER_TIME) && devinfo->gen < 7) {
       fprintf(stderr,
               "shader_time debugging requires gen7 (Ivybridge) or better.\n");
-      INTEL_DEBUG &= ~DEBUG_SHADER_TIME;
+      intel_debug &= ~DEBUG_SHADER_TIME;
    }
 
    if (intel_get_integer(screen, I915_PARAM_MMAP_GTT_VERSION) >= 1) {
@@ -2892,7 +2914,7 @@ intelAllocateBuffer(__DRIscreen *dri_screen,
 }
 
 static void
-intelReleaseBuffer(__DRIscreen *dri_screen, __DRIbuffer *buffer)
+intelReleaseBuffer(UNUSED __DRIscreen *dri_screen, __DRIbuffer *buffer)
 {
    struct intel_buffer *intelBuffer = (struct intel_buffer *) buffer;
 

@@ -158,7 +158,9 @@ static const enum pipe_format vk_format_map[] = {
    [VK_FORMAT_R32G32B32A32_SINT] = PIPE_FORMAT_R32G32B32A32_SINT,
    [VK_FORMAT_R32G32B32A32_SFLOAT] = PIPE_FORMAT_R32G32B32A32_FLOAT,
 
-   /* Missing 64-bit uint/sint formats */
+   [VK_FORMAT_R64_UINT] = PIPE_FORMAT_R64_UINT,
+   [VK_FORMAT_R64_SINT] = PIPE_FORMAT_R64_SINT,
+   /* Missing rest of 64-bit uint/sint formats */
    [VK_FORMAT_R64_SFLOAT] = PIPE_FORMAT_R64_FLOAT,
    [VK_FORMAT_R64G64_SFLOAT] = PIPE_FORMAT_R64G64_FLOAT,
    [VK_FORMAT_R64G64B64_SFLOAT] = PIPE_FORMAT_R64G64B64_FLOAT,
@@ -270,6 +272,10 @@ vk_format_to_pipe_format(enum VkFormat vkformat)
          return PIPE_FORMAT_Y16_U16V16_422_UNORM;
       case VK_FORMAT_G16_B16_R16_3PLANE_444_UNORM:
          return PIPE_FORMAT_Y16_U16_V16_444_UNORM;
+      case VK_FORMAT_A4R4G4B4_UNORM_PACK16_EXT:
+         return PIPE_FORMAT_B4G4R4A4_UNORM;
+      case VK_FORMAT_A4B4G4R4_UNORM_PACK16_EXT:
+         return PIPE_FORMAT_R4G4B4A4_UNORM;
       default:
          return PIPE_FORMAT_NONE;
       }

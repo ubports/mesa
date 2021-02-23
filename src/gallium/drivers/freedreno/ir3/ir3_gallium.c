@@ -52,6 +52,7 @@ dump_shader_info(struct ir3_shader_variant *v, struct pipe_debug_callback *debug
 	pipe_debug_message(debug, SHADER_INFO,
 			"%s shader: %u inst, %u nops, %u non-nops, %u mov, %u cov, "
 			"%u dwords, %u last-baryf, %u half, %u full, %u constlen, "
+			"%u cat0, %u cat1, %u cat2, %u cat3, %u cat4, %u cat5, %u cat6, %u cat7, "
 			"%u sstall, %u (ss), %u (sy), %d max_sun, %d loops\n",
 			ir3_shader_stage(v),
 			v->info.instrs_count,
@@ -64,6 +65,14 @@ dump_shader_info(struct ir3_shader_variant *v, struct pipe_debug_callback *debug
 			v->info.max_half_reg + 1,
 			v->info.max_reg + 1,
 			v->constlen,
+			v->info.instrs_per_cat[0],
+			v->info.instrs_per_cat[1],
+			v->info.instrs_per_cat[2],
+			v->info.instrs_per_cat[3],
+			v->info.instrs_per_cat[4],
+			v->info.instrs_per_cat[5],
+			v->info.instrs_per_cat[6],
+			v->info.instrs_per_cat[7],
 			v->info.sstall,
 			v->info.ss, v->info.sy,
 			v->max_sun, v->loops);
@@ -77,9 +86,7 @@ upload_shader_variant(struct ir3_shader_variant *v)
 
 	assert(!v->bo);
 
-	unsigned sz = v->info.sizedwords * 4;
-
-	v->bo = fd_bo_new(compiler->dev, sz,
+	v->bo = fd_bo_new(compiler->dev, v->info.size,
 			DRM_FREEDRENO_GEM_CACHE_WCOMBINE |
 			DRM_FREEDRENO_GEM_TYPE_KMEM,
 			"%s:%s", ir3_shader_stage(v), info->name);
@@ -87,7 +94,7 @@ upload_shader_variant(struct ir3_shader_variant *v)
 	/* Always include shaders in kernel crash dumps. */
 	fd_bo_mark_for_dump(v->bo);
 
-	memcpy(fd_bo_map(v->bo), v->bin, sz);
+	memcpy(fd_bo_map(v->bo), v->bin, v->info.size);
 }
 
 struct ir3_shader_variant *
@@ -169,7 +176,7 @@ ir3_shader_create(struct ir3_compiler *compiler,
 		nir = tgsi_to_nir(cso->tokens, screen, false);
 	}
 
-	struct ir3_stream_output_info stream_output;
+	struct ir3_stream_output_info stream_output = {};
 	copy_stream_out(&stream_output, &cso->stream_output);
 
 	struct ir3_shader *shader = ir3_shader_from_nir(compiler, nir, 0, &stream_output);
@@ -179,6 +186,7 @@ ir3_shader_create(struct ir3_compiler *compiler,
 	 */
 	struct ir3_shader_key key = {
 		.tessellation = IR3_TESS_NONE,
+		.ucp_enables = MASK(nir->info.clip_distance_array_size),
 		.msaa = true,
 	};
 

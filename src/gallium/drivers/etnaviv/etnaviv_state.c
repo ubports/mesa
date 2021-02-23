@@ -39,6 +39,7 @@
 #include "etnaviv_surface.h"
 #include "etnaviv_translate.h"
 #include "etnaviv_util.h"
+#include "etnaviv_zsa.h"
 #include "util/u_framebuffer.h"
 #include "util/u_helpers.h"
 #include "util/u_inlines.h"
@@ -47,18 +48,18 @@
 #include "util/u_upload_mgr.h"
 
 static void
-etna_set_stencil_ref(struct pipe_context *pctx, const struct pipe_stencil_ref *sr)
+etna_set_stencil_ref(struct pipe_context *pctx, const struct pipe_stencil_ref sr)
 {
    struct etna_context *ctx = etna_context(pctx);
    struct compiled_stencil_ref *cs = &ctx->stencil_ref;
 
-   ctx->stencil_ref_s = *sr;
+   ctx->stencil_ref_s = sr;
 
    for (unsigned i = 0; i < 2; i++) {
       cs->PE_STENCIL_CONFIG[i] =
-         VIVS_PE_STENCIL_CONFIG_REF_FRONT(sr->ref_value[i]);
+         VIVS_PE_STENCIL_CONFIG_REF_FRONT(sr.ref_value[i]);
       cs->PE_STENCIL_CONFIG_EXT[i] =
-         VIVS_PE_STENCIL_CONFIG_EXT_REF_BACK(sr->ref_value[!i]);
+         VIVS_PE_STENCIL_CONFIG_EXT_REF_BACK(sr.ref_value[!i]);
    }
    ctx->dirty |= ETNA_DIRTY_STENCIL_REF;
 }
@@ -250,9 +251,7 @@ etna_set_framebuffer_state(struct pipe_context *pctx,
          depth_format |
          COND(depth_supertiled, VIVS_PE_DEPTH_CONFIG_SUPER_TILED) |
          VIVS_PE_DEPTH_CONFIG_DEPTH_MODE_Z |
-         VIVS_PE_DEPTH_CONFIG_UNK18 | /* something to do with clipping? */
-         COND(screen->specs.halti >= 5, VIVS_PE_DEPTH_CONFIG_DISABLE_ZS) /* Needs to be enabled on GC7000, otherwise depth writes hang w/ TS - apparently it does something else now */
-         ;
+         VIVS_PE_DEPTH_CONFIG_UNK18; /* something to do with clipping? */
       /* VIVS_PE_DEPTH_CONFIG_ONLY_DEPTH */
       /* merged with depth_stencil_alpha */
 
@@ -519,6 +518,7 @@ etna_vertex_elements_state_create(struct pipe_context *pctx,
    if (num_elements > screen->specs.vertex_max_elements) {
       BUG("number of elements (%u) exceeds chip maximum (%u)", num_elements,
           screen->specs.vertex_max_elements);
+      FREE(cs);
       return NULL;
    }
 
@@ -611,6 +611,14 @@ etna_vertex_elements_state_bind(struct pipe_context *pctx, void *ve)
    ctx->dirty |= ETNA_DIRTY_VERTEX_ELEMENTS;
 }
 
+static void
+etna_set_stream_output_targets(struct pipe_context *pctx,
+      unsigned num_targets, struct pipe_stream_output_target **targets,
+      const unsigned *offsets)
+{
+   /* stub */
+}
+
 static bool
 etna_update_ts_config(struct etna_context *ctx)
 {
@@ -677,6 +685,71 @@ etna_update_clipping(struct etna_context *ctx)
    return true;
 }
 
+static bool
+etna_update_zsa(struct etna_context *ctx)
+{
+   struct compiled_shader_state *shader_state = &ctx->shader_state;
+   struct pipe_depth_stencil_alpha_state *zsa_state = ctx->zsa;
+   struct etna_zsa_state *zsa = etna_zsa_state(zsa_state);
+   struct etna_screen *screen = ctx->screen;
+   uint32_t new_pe_depth, new_ra_depth;
+   bool late_z_write = false, early_z_write = false,
+        late_z_test = false, early_z_test = false;
+
+   if (zsa->z_write_enabled) {
+      if (VIV_FEATURE(screen, chipMinorFeatures5, RA_WRITE_DEPTH) &&
+          !VIV_FEATURE(screen, chipFeatures, NO_EARLY_Z) &&
+          !zsa->stencil_enabled &&
+          !zsa_state->alpha_enabled &&
+          !shader_state->writes_z &&
+          !shader_state->uses_discard)
+         early_z_write = true;
+      else
+         late_z_write = true;
+   }
+
+   if (zsa->z_test_enabled) {
+      if (!VIV_FEATURE(screen, chipFeatures, NO_EARLY_Z) &&
+          !zsa->stencil_modified &&
+          !shader_state->writes_z)
+         early_z_test = true;
+      else
+         late_z_test = true;
+   }
+
+   new_pe_depth = VIVS_PE_DEPTH_CONFIG_DEPTH_FUNC(zsa->z_test_enabled ?
+                     /* compare funcs have 1 to 1 mapping */
+                     zsa_state->depth_func : PIPE_FUNC_ALWAYS) |
+                  COND(zsa->z_write_enabled, VIVS_PE_DEPTH_CONFIG_WRITE_ENABLE) |
+                  COND(early_z_test, VIVS_PE_DEPTH_CONFIG_EARLY_Z) |
+                  COND(!late_z_write && !late_z_test && !zsa->stencil_enabled,
+                       VIVS_PE_DEPTH_CONFIG_DISABLE_ZS);
+
+   /* blob sets this to 0x40000031 on GC7000, seems to make no difference,
+    * but keep it in mind if depth behaves strangely. */
+   new_ra_depth = 0x0000030 |
+                  COND(early_z_test, VIVS_RA_EARLY_DEPTH_TEST_ENABLE);
+
+   if (VIV_FEATURE(screen, chipMinorFeatures5, RA_WRITE_DEPTH)) {
+      if (!early_z_write)
+         new_ra_depth |= VIVS_RA_EARLY_DEPTH_WRITE_DISABLE;
+      /* The new early hierarchical test seems to only work properly if depth
+       * is also written from the early stage.
+       */
+      if (late_z_test || (early_z_test && late_z_write))
+         new_ra_depth |= VIVS_RA_EARLY_DEPTH_HDEPTH_DISABLE;
+   }
+
+   if (new_pe_depth != zsa->PE_DEPTH_CONFIG ||
+       new_ra_depth != zsa->RA_DEPTH_CONFIG)
+      ctx->dirty |= ETNA_DIRTY_ZSA;
+
+   zsa->PE_DEPTH_CONFIG = new_pe_depth;
+   zsa->RA_DEPTH_CONFIG = new_ra_depth;
+
+   return true;
+}
+
 struct etna_state_updater {
    bool (*update)(struct etna_context *ctx);
    uint32_t dirty;
@@ -701,6 +774,9 @@ static const struct etna_state_updater etna_state_updates[] = {
    {
       etna_update_clipping, ETNA_DIRTY_SCISSOR | ETNA_DIRTY_FRAMEBUFFER |
                             ETNA_DIRTY_RASTERIZER | ETNA_DIRTY_VIEWPORT,
+   },
+   {
+      etna_update_zsa, ETNA_DIRTY_ZSA | ETNA_DIRTY_SHADER,
    }
 };
 
@@ -742,4 +818,6 @@ etna_state_init(struct pipe_context *pctx)
    pctx->create_vertex_elements_state = etna_vertex_elements_state_create;
    pctx->delete_vertex_elements_state = etna_vertex_elements_state_delete;
    pctx->bind_vertex_elements_state = etna_vertex_elements_state_bind;
+
+   pctx->set_stream_output_targets = etna_set_stream_output_targets;
 }

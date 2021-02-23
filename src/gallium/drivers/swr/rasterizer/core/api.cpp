@@ -987,7 +987,7 @@ void SetupPipeline(DRAW_CONTEXT* pDC)
             streamMasks |= pState->state.soState.streamMasks[i];
         }
 
-        DWORD maxAttrib;
+        unsigned long maxAttrib;
         if (_BitScanReverse64(&maxAttrib, streamMasks))
         {
             pState->state.feNumAttributes =
@@ -1027,7 +1027,7 @@ void SetupPipeline(DRAW_CONTEXT* pDC)
     // Disable hottile for surfaces with no writes
     if (psState.pfnPixelShader != nullptr)
     {
-        DWORD    rt;
+        unsigned long rt;
         uint32_t rtMask = pState->state.psState.renderTargetMask;
         while (_BitScanForward(&rt, rtMask))
         {
@@ -1063,7 +1063,7 @@ void SetupPipeline(DRAW_CONTEXT* pDC)
             pState->state.pfnQuantizeDepth = QuantizeDepth<R16_UNORM>;
             break;
         default:
-            SWR_INVALID("Unsupported depth format for depth quantiztion.");
+            SWR_INVALID("Unsupported depth format for depth quantization.");
             pState->state.pfnQuantizeDepth = QuantizeDepth<R32_FLOAT>;
         }
     }

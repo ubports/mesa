@@ -94,22 +94,22 @@ resolve_sampler_views(struct iris_context *ice,
    while (views) {
       const int i = u_bit_scan(&views);
       struct iris_sampler_view *isv = shs->textures[i];
-      struct iris_resource *res = (void *) isv->base.texture;
 
-      if (res->base.target != PIPE_BUFFER) {
+      if (isv->res->base.target != PIPE_BUFFER) {
          if (consider_framebuffer) {
-            disable_rb_aux_buffer(ice, draw_aux_buffer_disabled,
-                                  res, isv->view.base_level, isv->view.levels,
+            disable_rb_aux_buffer(ice, draw_aux_buffer_disabled, isv->res,
+                                  isv->view.base_level, isv->view.levels,
                                   "for sampling");
          }
 
-         iris_resource_prepare_texture(ice, res, isv->view.format,
+         iris_resource_prepare_texture(ice, isv->res, isv->view.format,
                                        isv->view.base_level, isv->view.levels,
                                        isv->view.base_array_layer,
                                        isv->view.array_len);
       }
 
-      iris_emit_buffer_barrier_for(batch, res->bo, IRIS_DOMAIN_OTHER_READ);
+      iris_emit_buffer_barrier_for(batch, isv->res->bo,
+                                   IRIS_DOMAIN_OTHER_READ);
    }
 }
 
@@ -414,16 +414,8 @@ iris_resolve_color(struct iris_context *ice,
    iris_batch_sync_region_start(batch);
    struct blorp_batch blorp_batch;
    blorp_batch_init(&ice->blorp, &blorp_batch, batch, 0);
-   /* On Gen >= 12, Stencil buffer with lossless compression needs to be
-    * resolve with WM_HZ_OP packet.
-    */
-   if (res->aux.usage == ISL_AUX_USAGE_STC_CCS) {
-      blorp_hiz_stencil_op(&blorp_batch, &surf, level, layer,
-                           1, resolve_op);
-   } else {
-      blorp_ccs_resolve(&blorp_batch, &surf, level, layer, 1,
-                        res->surf.format, resolve_op);
-   }
+   blorp_ccs_resolve(&blorp_batch, &surf, level, layer, 1, res->surf.format,
+                     resolve_op);
    blorp_batch_finish(&blorp_batch);
 
    /* See comment above */
@@ -551,25 +543,12 @@ iris_hiz_exec(struct iris_context *ice,
     *    the depth buffer clear operation."
     *
     * Same applies for Gen8 and Gen9.
-    *
-    * In addition, from the Ivybridge PRM, volume 2, 1.10.4.1
-    * PIPE_CONTROL, Depth Cache Flush Enable:
-    *
-    *   "This bit must not be set when Depth Stall Enable bit is set in
-    *    this packet."
-    *
-    * This is confirmed to hold for real, Haswell gets immediate gpu hangs.
-    *
-    * Therefore issue two pipe control flushes, one for cache flush and
-    * another for depth stall.
     */
    iris_emit_pipe_control_flush(batch,
-                                "hiz op: pre-flushes (1/2)",
+                                "hiz op: pre-flush",
                                 PIPE_CONTROL_DEPTH_CACHE_FLUSH |
+                                PIPE_CONTROL_DEPTH_STALL |
                                 PIPE_CONTROL_CS_STALL);
-
-   iris_emit_pipe_control_flush(batch, "hiz op: pre-flushes (2/2)",
-                                PIPE_CONTROL_DEPTH_STALL);
 
    assert(isl_aux_usage_has_hiz(res->aux.usage) && res->aux.bo);
 
@@ -673,9 +652,9 @@ miptree_layer_range_length(const struct iris_resource *res, uint32_t level,
 }
 
 bool
-iris_has_color_unresolved(const struct iris_resource *res,
-                          unsigned start_level, unsigned num_levels,
-                          unsigned start_layer, unsigned num_layers)
+iris_has_invalid_primary(const struct iris_resource *res,
+                         unsigned start_level, unsigned num_levels,
+                         unsigned start_layer, unsigned num_layers)
 {
    if (!res->aux.bo)
       return false;
@@ -685,13 +664,15 @@ iris_has_color_unresolved(const struct iris_resource *res,
 
    for (uint32_t l = 0; l < num_levels; l++) {
       const uint32_t level = start_level + l;
+      if (!level_has_aux(res, level))
+         continue;
+
       const uint32_t level_layers =
          miptree_layer_range_length(res, level, start_layer, num_layers);
       for (unsigned a = 0; a < level_layers; a++) {
          enum isl_aux_state aux_state =
             iris_resource_get_aux_state(res, level, start_layer + a);
-         assert(aux_state != ISL_AUX_STATE_AUX_INVALID);
-         if (aux_state != ISL_AUX_STATE_PASS_THROUGH)
+         if (!isl_aux_state_has_valid_primary(aux_state))
             return true;
       }
    }
@@ -728,6 +709,12 @@ iris_resource_prepare_access(struct iris_context *ice,
          const enum isl_aux_op aux_op =
             isl_aux_prepare_access(aux_state, aux_usage, fast_clear_supported);
 
+         /* Prepare the aux buffer for a conditional or unconditional access.
+          * A conditional access is handled by assuming that the access will
+          * not evaluate to a no-op. If the access does in fact occur, the aux
+          * will be in the required state. If it does not, no data is lost
+          * because the aux_op performed is lossless.
+          */
          if (aux_op == ISL_AUX_OP_NONE) {
             /* Nothing to do here. */
          } else if (isl_aux_usage_has_mcs(res->aux.usage)) {
@@ -735,6 +722,8 @@ iris_resource_prepare_access(struct iris_context *ice,
             iris_mcs_partial_resolve(ice, batch, res, layer, 1);
          } else if (isl_aux_usage_has_hiz(res->aux.usage)) {
             iris_hiz_exec(ice, batch, res, level, layer, 1, aux_op, false);
+         } else if (res->aux.usage == ISL_AUX_USAGE_STC_CCS) {
+            unreachable("iris doesn't resolve STC_CCS resources");
          } else {
             assert(isl_aux_usage_has_ccs(res->aux.usage));
             iris_resolve_color(ice, batch, res, level, layer, aux_op);
@@ -763,8 +752,18 @@ iris_resource_finish_write(struct iris_context *ice,
       const uint32_t layer = start_layer + a;
       const enum isl_aux_state aux_state =
          iris_resource_get_aux_state(res, level, layer);
+
+      /* Transition the aux state for a conditional or unconditional write. A
+       * conditional write is handled by assuming that the write applies to
+       * only part of the render target. This prevents the new state from
+       * losing the types of compression that might exist in the current state
+       * (e.g. CLEAR). If the write evaluates to a no-op, the state will still
+       * be able to communicate when resolves are necessary (but it may
+       * falsely communicate this as well).
+       */
       const enum isl_aux_state new_aux_state =
          isl_aux_state_transition_write(aux_state, aux_usage, false);
+
       iris_resource_set_aux_state(ice, res, level, layer, 1, new_aux_state);
    }
 }
@@ -804,8 +803,19 @@ iris_resource_set_aux_state(struct iris_context *ice,
       if (res->aux.state[level][start_layer + a] != aux_state) {
          res->aux.state[level][start_layer + a] = aux_state;
          /* XXX: Need to track which bindings to make dirty */
-         ice->state.dirty |= IRIS_DIRTY_RENDER_BUFFER;
+         ice->state.dirty |= IRIS_DIRTY_RENDER_BUFFER |
+                             IRIS_DIRTY_RENDER_RESOLVES_AND_FLUSHES |
+                             IRIS_DIRTY_COMPUTE_RESOLVES_AND_FLUSHES;
          ice->state.stage_dirty |= IRIS_ALL_STAGE_DIRTY_BINDINGS;
+      }
+   }
+
+   if (res->mod_info && !res->mod_info->supports_clear_color) {
+      assert(res->mod_info->aux_usage != ISL_AUX_USAGE_NONE);
+      if (aux_state == ISL_AUX_STATE_CLEAR ||
+          aux_state == ISL_AUX_STATE_COMPRESSED_CLEAR ||
+          aux_state == ISL_AUX_STATE_PARTIAL_CLEAR) {
+         iris_mark_dirty_dmabuf(ice, &res->base);
       }
    }
 }
@@ -820,15 +830,18 @@ iris_resource_texture_aux_usage(struct iris_context *ice,
 
    switch (res->aux.usage) {
    case ISL_AUX_USAGE_HIZ:
+      assert(res->surf.format == view_format);
       if (iris_sample_with_depth_aux(devinfo, res))
          return ISL_AUX_USAGE_HIZ;
       break;
 
    case ISL_AUX_USAGE_HIZ_CCS:
+      assert(res->surf.format == view_format);
       assert(!iris_sample_with_depth_aux(devinfo, res));
       return ISL_AUX_USAGE_NONE;
 
    case ISL_AUX_USAGE_HIZ_CCS_WT:
+      assert(res->surf.format == view_format);
       if (iris_sample_with_depth_aux(devinfo, res))
          return ISL_AUX_USAGE_HIZ_CCS_WT;
       break;
@@ -836,6 +849,7 @@ iris_resource_texture_aux_usage(struct iris_context *ice,
    case ISL_AUX_USAGE_MCS:
    case ISL_AUX_USAGE_MCS_CCS:
    case ISL_AUX_USAGE_STC_CCS:
+   case ISL_AUX_USAGE_MC:
       return res->aux.usage;
 
    case ISL_AUX_USAGE_CCS_E:
@@ -844,8 +858,8 @@ iris_resource_texture_aux_usage(struct iris_context *ice,
        * ISL_AUX_USAGE_NONE.  This way, texturing won't even look at the
        * aux surface and we can save some bandwidth.
        */
-      if (!iris_has_color_unresolved(res, 0, INTEL_REMAINING_LEVELS,
-                                     0, INTEL_REMAINING_LAYERS))
+      if (!iris_has_invalid_primary(res, 0, INTEL_REMAINING_LEVELS,
+                                    0, INTEL_REMAINING_LAYERS))
          return ISL_AUX_USAGE_NONE;
 
       /* On Gen9 color buffers may be compressed by the hardware (lossless

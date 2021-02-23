@@ -85,6 +85,7 @@ struct etna_screen {
 
    uint32_t drm_version;
 
+   struct etna_compiler *compiler;
    nir_shader_compiler_options options;
 };
 
@@ -96,7 +97,7 @@ etna_screen(struct pipe_screen *pscreen)
 
 struct etna_bo *
 etna_screen_bo_from_handle(struct pipe_screen *pscreen,
-                           struct winsys_handle *whandle, unsigned *out_stride);
+                           struct winsys_handle *whandle);
 
 struct pipe_screen *
 etna_screen_create(struct etna_device *dev, struct etna_gpu *gpu,

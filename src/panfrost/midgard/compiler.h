@@ -1,4 +1,5 @@
 /*
+ * Copyright (C) 2019-2020 Collabora, Ltd.
  * Copyright (C) 2019 Alyssa Rosenzweig <alyssa@rosenzweig.io>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
@@ -71,10 +72,6 @@ typedef struct midgard_branch {
         };
 } midgard_branch;
 
-#define PAN_WRITEOUT_C 1
-#define PAN_WRITEOUT_Z 2
-#define PAN_WRITEOUT_S 4
-
 /* Generic in-memory data type repesenting a single logical instruction, rather
  * than a single instruction group. This is the preferred form for code gen.
  * Multiple midgard_insturctions will later be combined during scheduling,
@@ -129,9 +126,6 @@ typedef struct midgard_instruction {
         /* If the op supports it */
         enum midgard_roundmode roundmode;
 
-        /* Special fields for an ALU instruction */
-        midgard_reg_info registers;
-
         /* For textures: should helpers execute this instruction (instead of
          * just helping with derivatives)? Should helpers terminate after? */
         bool helper_terminate;
@@ -143,7 +137,6 @@ typedef struct midgard_instruction {
         bool has_constants;
         midgard_constants constants;
         uint16_t inline_constant;
-        bool has_blend_constant;
         bool has_inline_constant;
 
         bool compact_branch;
@@ -175,15 +168,19 @@ typedef struct midgard_instruction {
         unsigned nr_dependencies;
         BITSET_WORD *dependents;
 
+        /* Use this in conjunction with `type` */
+        unsigned op;
+
+        /* This refers to midgard_outmod_float or midgard_outmod_int.
+         * In case of a ALU op, use midgard_is_integer_out_op() to know which
+         * one is used.
+         * If it's a texture op, it's always midgard_outmod_float. */
+        unsigned outmod;
+
         union {
                 midgard_load_store_word load_store;
-                midgard_vector_alu alu;
                 midgard_texture_word texture;
-                midgard_branch_extended branch_extended;
-                uint16_t br_compact;
 
-                /* General branch, rather than packed br_compact. Higher level
-                 * than the other components */
                 midgard_branch branch;
         };
 } midgard_instruction;
@@ -220,7 +217,6 @@ typedef struct midgard_bundle {
         int control;
         bool has_embedded_constants;
         midgard_constants constants;
-        bool has_blend_constant;
         bool last_writeout;
 } midgard_bundle;
 
@@ -237,6 +233,8 @@ enum midgard_rt_id {
         MIDGARD_NUM_RTS,
 };
 
+#define MIDGARD_MAX_SAMPLE_ITER 16
+
 typedef struct compiler_context {
         nir_shader *nir;
         gl_shader_stage stage;
@@ -247,14 +245,17 @@ typedef struct compiler_context {
         /* Render target number for a keyed blend shader. Depends on is_blend */
         unsigned blend_rt;
 
+        /* Number of samples for a keyed blend shader. Depends on is_blend */
+        unsigned blend_sample_iterations;
+
         /* Index to precolour to r0 for an input blend colour */
         unsigned blend_input;
 
         /* Index to precolour to r2 for a dual-source blend colour */
         unsigned blend_src1;
 
-        /* Tracking for blend constant patching */
-        int blend_constant_offset;
+        /* Blend constants */
+        float blend_constants[4];
 
         /* Number of bytes used for Thread Local Storage */
         unsigned tls_size;
@@ -292,8 +293,6 @@ typedef struct compiler_context {
         /* Constants which have been loaded, for later inlining */
         struct hash_table_u64 *ssa_constants;
 
-        /* Mapping of hashes computed from NIR indices to the sequential temp indices ultimately used in MIR */
-        struct hash_table_u64 *hash_to_temp;
         int temp_count;
         int max_hash;
 
@@ -310,9 +309,6 @@ typedef struct compiler_context {
         /* Count of instructions emitted from NIR overall, across all blocks */
         int instruction_count;
 
-        /* Alpha ref value passed in */
-        float alpha_ref;
-
         unsigned quadword_count;
 
         /* Bitmask of valid metadata */
@@ -322,7 +318,7 @@ typedef struct compiler_context {
         uint32_t quirks;
 
         /* Writeout instructions for each render target */
-        midgard_instruction *writeout_branch[MIDGARD_NUM_RTS];
+        midgard_instruction *writeout_branch[MIDGARD_NUM_RTS][MIDGARD_MAX_SAMPLE_ITER];
 
         struct panfrost_sysvals sysvals;
 } compiler_context;
@@ -520,6 +516,8 @@ uint16_t mir_round_bytemask_up(uint16_t mask, unsigned bits);
 void mir_set_bytemask(midgard_instruction *ins, uint16_t bytemask);
 signed mir_upper_override(midgard_instruction *ins, unsigned inst_size);
 unsigned mir_components_for_type(nir_alu_type T);
+unsigned max_bitsize_for_alu(midgard_instruction *ins);
+midgard_reg_mode reg_mode_for_bitsize(unsigned bitsize);
 
 /* MIR printing */
 
@@ -535,7 +533,11 @@ void mir_insert_instruction_after_scheduled(compiler_context *ctx, midgard_block
 void mir_flip(midgard_instruction *ins);
 void mir_compute_temp_count(compiler_context *ctx);
 
-void mir_set_offset(compiler_context *ctx, midgard_instruction *ins, nir_src *offset, bool is_shared);
+#define LDST_GLOBAL 0x3E
+#define LDST_SHARED 0x2E
+#define LDST_SCRATCH 0x2A
+
+void mir_set_offset(compiler_context *ctx, midgard_instruction *ins, nir_src *offset, unsigned seg);
 
 /* 'Intrinsic' move for aliasing */
 
@@ -550,11 +552,8 @@ v_mov(unsigned src, unsigned dest)
                 .swizzle = SWIZZLE_IDENTITY,
                 .dest = dest,
                 .dest_type = nir_type_uint32,
-                .alu = {
-                        .op = midgard_alu_op_imov,
-                        .reg_mode = midgard_reg_mode_32,
-                        .outmod = midgard_outmod_int_wrap
-                },
+                .op = midgard_alu_op_imov,
+                .outmod = midgard_outmod_int_wrap
         };
 
         return ins;
@@ -587,9 +586,8 @@ v_load_store_scratch(
                 .dest = ~0,
                 .src = { ~0, ~0, ~0, ~0 },
                 .swizzle = SWIZZLE_IDENTITY_4,
+                .op = is_store ? midgard_op_st_int4 : midgard_op_ld_int4,
                 .load_store = {
-                        .op = is_store ? midgard_op_st_int4 : midgard_op_ld_int4,
-
                         /* For register spilling - to thread local storage */
                         .arg_1 = 0xEA,
                         .arg_2 = 0x1E,
@@ -667,11 +665,11 @@ void emit_binary_bundle(
         struct util_dynarray *emission,
         int next_tag);
 
-bool
-nir_undef_to_zero(nir_shader *shader);
 bool nir_fuse_io_16(nir_shader *shader);
 
-void midgard_nir_lod_errata(nir_shader *shader);
+bool midgard_nir_lod_errata(nir_shader *shader);
+
+unsigned midgard_get_first_tag_from_block(compiler_context *ctx, unsigned block_idx);
 
 /* Optimizations */
 

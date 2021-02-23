@@ -54,7 +54,8 @@ nvc0_program_validate(struct nvc0_context *nvc0, struct nvc0_program *prog)
 
    if (!prog->translated) {
       prog->translated = nvc0_program_translate(
-         prog, nvc0->screen->base.device->chipset, &nvc0->base.debug);
+         prog, nvc0->screen->base.device->chipset,
+         nvc0->screen->base.disk_shader_cache, &nvc0->base.debug);
       if (!prog->translated)
          return false;
    }
@@ -115,6 +116,16 @@ nvc0_fragprog_validate(struct nvc0_context *nvc0)
          nouveau_heap_free(&fp->mem);
 
       fp->fp.force_persample_interp = rast->force_persample_interp;
+   }
+
+   if (fp->fp.msaa != rast->multisample) {
+      /* Force the program to be reuploaded, which will trigger interp fixups
+       * to get applied
+       */
+      if (fp->mem)
+         nouveau_heap_free(&fp->mem);
+
+      fp->fp.msaa = rast->multisample;
    }
 
    /* Shade model works well enough when both colors follow it. However if one

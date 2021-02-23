@@ -31,18 +31,14 @@
 
 #include "ir3/ir3_nir.h"
 
-static nir_shader *
-tu_spirv_to_nir(struct ir3_compiler *compiler,
-                const uint32_t *words,
-                size_t word_count,
-                gl_shader_stage stage,
-                const char *entry_point_name,
-                const VkSpecializationInfo *spec_info)
+nir_shader *
+tu_spirv_to_nir(struct tu_device *dev,
+                const VkPipelineShaderStageCreateInfo *stage_info,
+                gl_shader_stage stage)
 {
    /* TODO these are made-up */
    const struct spirv_to_nir_options spirv_options = {
       .frag_coord_is_sysval = true,
-      .lower_ubo_ssbo_access_to_offsets = false,
 
       .ubo_addr_format = nir_address_format_vec2_index_32bit_offset,
       .ssbo_addr_format = nir_address_format_vec2_index_32bit_offset,
@@ -59,18 +55,26 @@ tu_spirv_to_nir(struct ir3_compiler *compiler,
       /* Accessed via stg/ldg (not used with Vulkan?) */
       .global_addr_format = nir_address_format_64bit_global,
 
+      /* ViewID is a sysval in geometry stages and an input in the FS */
+      .view_index_is_input = stage == MESA_SHADER_FRAGMENT,
       .caps = {
          .transform_feedback = true,
          .tessellation = true,
          .draw_parameters = true,
+         .image_read_without_format = true,
+         .image_write_without_format = true,
          .variable_pointers = true,
          .stencil_export = true,
+         .multiview = true,
+         .shader_viewport_index_layer = true,
+         .geometry_streams = true,
       },
    };
    const nir_shader_compiler_options *nir_options =
-      ir3_get_compiler_options(compiler);
+      ir3_get_compiler_options(dev->compiler);
 
    /* convert VkSpecializationInfo */
+   const VkSpecializationInfo *spec_info = stage_info->pSpecializationInfo;
    struct nir_spirv_specialization *spec = NULL;
    uint32_t num_spec = 0;
    if (spec_info && spec_info->mapEntryCount) {
@@ -106,14 +110,76 @@ tu_spirv_to_nir(struct ir3_compiler *compiler,
       num_spec = spec_info->mapEntryCount;
    }
 
+   struct tu_shader_module *module =
+      tu_shader_module_from_handle(stage_info->module);
+   assert(module->code_size % 4 == 0);
    nir_shader *nir =
-      spirv_to_nir(words, word_count, spec, num_spec, stage, entry_point_name,
+      spirv_to_nir(module->code, module->code_size / 4,
+                   spec, num_spec, stage, stage_info->pName,
                    &spirv_options, nir_options);
 
    free(spec);
 
    assert(nir->info.stage == stage);
    nir_validate_shader(nir, "after spirv_to_nir");
+
+   if (unlikely(dev->physical_device->instance->debug_flags & TU_DEBUG_NIR)) {
+      fprintf(stderr, "translated nir:\n");
+      nir_print_shader(nir, stderr);
+   }
+
+   /* multi step inlining procedure */
+   NIR_PASS_V(nir, nir_lower_variable_initializers, nir_var_function_temp);
+   NIR_PASS_V(nir, nir_lower_returns);
+   NIR_PASS_V(nir, nir_inline_functions);
+   NIR_PASS_V(nir, nir_copy_prop);
+   NIR_PASS_V(nir, nir_opt_deref);
+   foreach_list_typed_safe(nir_function, func, node, &nir->functions) {
+      if (!func->is_entrypoint)
+         exec_node_remove(&func->node);
+   }
+   assert(exec_list_length(&nir->functions) == 1);
+   NIR_PASS_V(nir, nir_lower_variable_initializers, ~nir_var_function_temp);
+
+   /* Split member structs.  We do this before lower_io_to_temporaries so that
+    * it doesn't lower system values to temporaries by accident.
+    */
+   NIR_PASS_V(nir, nir_split_var_copies);
+   NIR_PASS_V(nir, nir_split_per_member_structs);
+
+   NIR_PASS_V(nir, nir_remove_dead_variables,
+              nir_var_shader_in | nir_var_shader_out | nir_var_system_value | nir_var_mem_shared,
+              NULL);
+
+   NIR_PASS_V(nir, nir_propagate_invariant);
+
+   NIR_PASS_V(nir, nir_lower_io_to_temporaries, nir_shader_get_entrypoint(nir), true, true);
+
+   NIR_PASS_V(nir, nir_lower_global_vars_to_local);
+   NIR_PASS_V(nir, nir_split_var_copies);
+   NIR_PASS_V(nir, nir_lower_var_copies);
+
+   NIR_PASS_V(nir, nir_opt_copy_prop_vars);
+   NIR_PASS_V(nir, nir_opt_combine_stores, nir_var_all);
+
+   /* ir3 doesn't support indirect input/output */
+   /* TODO: We shouldn't perform this lowering pass on gl_TessLevelInner
+    * and gl_TessLevelOuter. Since the tess levels are actually stored in
+    * a global BO, they can be directly accessed via stg and ldg.
+    * nir_lower_indirect_derefs will instead generate a big if-ladder which
+    * isn't *incorrect* but is much less efficient. */
+   NIR_PASS_V(nir, nir_lower_indirect_derefs, nir_var_shader_in | nir_var_shader_out, UINT32_MAX);
+
+   NIR_PASS_V(nir, nir_lower_io_arrays_to_elements_no_indirects, false);
+
+   NIR_PASS_V(nir, nir_lower_system_values);
+   NIR_PASS_V(nir, nir_lower_compute_system_values, NULL);
+
+   NIR_PASS_V(nir, nir_lower_clip_cull_distance_arrays);
+
+   NIR_PASS_V(nir, nir_lower_frexp);
+
+   ir3_optimize_loop(nir);
 
    return nir;
 }
@@ -122,21 +188,17 @@ static void
 lower_load_push_constant(nir_builder *b, nir_intrinsic_instr *instr,
                          struct tu_shader *shader)
 {
-   nir_intrinsic_instr *load =
-      nir_intrinsic_instr_create(b->shader, nir_intrinsic_load_uniform);
-   load->num_components = instr->num_components;
    uint32_t base = nir_intrinsic_base(instr);
    assert(base % 4 == 0);
    assert(base >= shader->push_consts.lo * 16);
    base -= shader->push_consts.lo * 16;
-   nir_intrinsic_set_base(load, base / 4);
-   load->src[0] =
-      nir_src_for_ssa(nir_ushr(b, instr->src[0].ssa, nir_imm_int(b, 2)));
-   nir_ssa_dest_init(&load->instr, &load->dest,
-                     load->num_components, instr->dest.ssa.bit_size,
-                     instr->dest.ssa.name);
-   nir_builder_instr_insert(b, &load->instr);
-   nir_ssa_def_rewrite_uses(&instr->dest.ssa, nir_src_for_ssa(&load->dest.ssa));
+
+   nir_ssa_def *load =
+      nir_load_uniform(b, instr->num_components, instr->dest.ssa.bit_size,
+                       nir_ushr(b, instr->src[0].ssa, nir_imm_int(b, 2)),
+                       .base = base / 4);
+
+   nir_ssa_def_rewrite_uses(&instr->dest.ssa, nir_src_for_ssa(load));
 
    nir_instr_remove(&instr->instr);
 }
@@ -213,17 +275,10 @@ lower_ssbo_ubo_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin)
 
    for (unsigned i = 0; i < MAX_SETS + 1; i++) {
       /* if (base_idx == i) { ... */
-      nir_if *nif = nir_push_if(b, nir_ieq(b, base_idx, nir_imm_int(b, i)));
+      nir_if *nif = nir_push_if(b, nir_ieq_imm(b, base_idx, i));
 
-      nir_intrinsic_instr *bindless =
-         nir_intrinsic_instr_create(b->shader,
-                                    nir_intrinsic_bindless_resource_ir3);
-      bindless->num_components = 0;
-      nir_ssa_dest_init(&bindless->instr, &bindless->dest,
-                        1, 32, NULL);
-      nir_intrinsic_set_desc_set(bindless, i);
-      bindless->src[0] = nir_src_for_ssa(descriptor_idx);
-      nir_builder_instr_insert(b, &bindless->instr);
+      nir_ssa_def *bindless =
+         nir_bindless_resource_ir3(b, 32, descriptor_idx, .desc_set = i);
 
       nir_intrinsic_instr *copy =
          nir_intrinsic_instr_create(b->shader, intrin->intrinsic);
@@ -232,7 +287,7 @@ lower_ssbo_ubo_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin)
 
       for (unsigned src = 0; src < info->num_srcs; src++) {
          if (src == buffer_src)
-            copy->src[src] = nir_src_for_ssa(&bindless->dest.ssa);
+            copy->src[src] = nir_src_for_ssa(bindless);
          else
             copy->src[src] = nir_src_for_ssa(intrin->src[src].ssa);
       }
@@ -325,17 +380,7 @@ build_bindless(nir_builder *b, nir_deref_instr *deref, bool is_sampler,
                              nir_imul_imm(b, arr_index, descriptor_stride));
    }
 
-   nir_intrinsic_instr *bindless =
-      nir_intrinsic_instr_create(b->shader,
-                                 nir_intrinsic_bindless_resource_ir3);
-   bindless->num_components = 0;
-   nir_ssa_dest_init(&bindless->instr, &bindless->dest,
-                     1, 32, NULL);
-   nir_intrinsic_set_desc_set(bindless, set);
-   bindless->src[0] = nir_src_for_ssa(desc_offset);
-   nir_builder_instr_insert(b, &bindless->instr);
-
-   return &bindless->dest.ssa;
+   return nir_bindless_resource_ir3(b, 32, desc_offset, .desc_set = set);
 }
 
 static void
@@ -354,13 +399,6 @@ lower_intrinsic(nir_builder *b, nir_intrinsic_instr *instr,
                 const struct tu_pipeline_layout *layout)
 {
    switch (instr->intrinsic) {
-   case nir_intrinsic_load_layer_id:
-      /* TODO: remove this when layered rendering is implemented */
-      nir_ssa_def_rewrite_uses(&instr->dest.ssa,
-                               nir_src_for_ssa(nir_imm_int(b, 0)));
-      nir_instr_remove(&instr->instr);
-      return true;
-
    case nir_intrinsic_load_push_constant:
       lower_load_push_constant(b, instr, shader);
       return true;
@@ -390,7 +428,7 @@ lower_intrinsic(nir_builder *b, nir_intrinsic_instr *instr,
    case nir_intrinsic_ssbo_atomic_fmin:
    case nir_intrinsic_ssbo_atomic_fmax:
    case nir_intrinsic_ssbo_atomic_fcomp_swap:
-   case nir_intrinsic_get_buffer_size:
+   case nir_intrinsic_get_ssbo_size:
       lower_ssbo_ubo_intrinsic(b, instr);
       return true;
 
@@ -611,6 +649,50 @@ tu_lower_io(nir_shader *shader, struct tu_shader *tu_shader,
    return progress;
 }
 
+static bool
+lower_image_size_filter(const nir_instr *instr, UNUSED const void *data)
+{
+   if (instr->type != nir_instr_type_intrinsic)
+      return false;
+
+   nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
+   if(intrin->intrinsic != nir_intrinsic_bindless_image_size)
+      return false;
+
+   return (intrin->num_components == 3 && nir_intrinsic_image_dim(intrin) == GLSL_SAMPLER_DIM_CUBE);
+}
+
+/* imageSize() expects the last component of the return value to be the
+ * number of layers in the texture array. In the case of cube map array,
+ * it will return a ivec3, with the third component being the number of
+ * layer-faces. Therefore, we need to divide it by 6 (# faces of the
+ * cube map).
+ */
+static nir_ssa_def *
+lower_image_size_lower(nir_builder *b, nir_instr *instr, UNUSED void *data)
+{
+   nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
+   b->cursor = nir_after_instr(&intrin->instr);
+   nir_ssa_def *channels[NIR_MAX_VEC_COMPONENTS];
+   for (unsigned i = 0; i < intrin->num_components; i++) {
+      channels[i] = nir_vector_extract(b, &intrin->dest.ssa, nir_imm_int(b, i));
+   }
+
+   channels[2] = nir_idiv(b, channels[2], nir_imm_int(b, 6u));
+   nir_ssa_def *result = nir_vec(b, channels, intrin->num_components);
+
+   return result;
+}
+
+static bool
+tu_lower_image_size(nir_shader *shader)
+{
+   return nir_shader_lower_instructions(shader,
+                                        lower_image_size_filter,
+                                        lower_image_size_lower,
+                                        NULL);
+}
+
 static void
 shared_type_info(const struct glsl_type *type, unsigned *size, unsigned *align)
 {
@@ -648,8 +730,12 @@ tu_gather_xfb_info(nir_shader *nir, struct ir3_stream_output_info *info)
    assert(xfb->output_count < IR3_MAX_SO_OUTPUTS);
    info->num_outputs = xfb->output_count;
 
-   for (int i = 0; i < IR3_MAX_SO_BUFFERS; i++)
+   for (int i = 0; i < IR3_MAX_SO_BUFFERS; i++) {
       info->stride[i] = xfb->buffers[i].stride / 4;
+      info->buffer_to_stream[i] = xfb->buffer_to_stream[i];
+   }
+
+   info->streams_written = xfb->streams_written;
 
    for (int i = 0; i < xfb->output_count; i++) {
       info->output[i].register_index = output_map[xfb->outputs[i].location];
@@ -666,8 +752,8 @@ tu_gather_xfb_info(nir_shader *nir, struct ir3_stream_output_info *info)
 
 struct tu_shader *
 tu_shader_create(struct tu_device *dev,
-                 gl_shader_stage stage,
-                 const VkPipelineShaderStageCreateInfo *stage_info,
+                 nir_shader *nir,
+                 unsigned multiview_mask,
                  struct tu_pipeline_layout *layout,
                  const VkAllocationCallbacks *alloc)
 {
@@ -680,57 +766,6 @@ tu_shader_create(struct tu_device *dev,
    if (!shader)
       return NULL;
 
-   nir_shader *nir;
-   if (stage_info) {
-      /* translate SPIR-V to NIR */
-      const struct tu_shader_module *module =
-         tu_shader_module_from_handle(stage_info->module);
-      assert(module->code_size % 4 == 0);
-      nir = tu_spirv_to_nir(
-         dev->compiler, (const uint32_t *) module->code, module->code_size / 4,
-         stage, stage_info->pName, stage_info->pSpecializationInfo);
-   } else {
-      assert(stage == MESA_SHADER_FRAGMENT);
-      nir_builder fs_b;
-      const nir_shader_compiler_options *nir_options =
-         ir3_get_compiler_options(dev->compiler);
-      nir_builder_init_simple_shader(&fs_b, NULL, MESA_SHADER_FRAGMENT, nir_options);
-      fs_b.shader->info.name = ralloc_strdup(fs_b.shader, "noop_fs");
-      nir = fs_b.shader;
-   }
-
-   if (!nir) {
-      vk_free2(&dev->vk.alloc, alloc, shader);
-      return NULL;
-   }
-
-   if (unlikely(dev->physical_device->instance->debug_flags & TU_DEBUG_NIR)) {
-      fprintf(stderr, "translated nir:\n");
-      nir_print_shader(nir, stderr);
-   }
-
-   /* multi step inlining procedure */
-   NIR_PASS_V(nir, nir_lower_variable_initializers, nir_var_function_temp);
-   NIR_PASS_V(nir, nir_lower_returns);
-   NIR_PASS_V(nir, nir_inline_functions);
-   NIR_PASS_V(nir, nir_opt_deref);
-   foreach_list_typed_safe(nir_function, func, node, &nir->functions) {
-      if (!func->is_entrypoint)
-         exec_node_remove(&func->node);
-   }
-   assert(exec_list_length(&nir->functions) == 1);
-   NIR_PASS_V(nir, nir_lower_variable_initializers, ~nir_var_function_temp);
-
-   /* Split member structs.  We do this before lower_io_to_temporaries so that
-    * it doesn't lower system values to temporaries by accident.
-    */
-   NIR_PASS_V(nir, nir_split_var_copies);
-   NIR_PASS_V(nir, nir_split_per_member_structs);
-
-   NIR_PASS_V(nir, nir_remove_dead_variables,
-              nir_var_shader_in | nir_var_shader_out | nir_var_system_value | nir_var_mem_shared,
-              NULL);
-
    /* Gather information for transform feedback.
     * This should be called after nir_split_per_member_structs.
     * Also needs to be called after nir_remove_dead_variables with varyings,
@@ -742,35 +777,27 @@ tu_shader_create(struct tu_device *dev,
          nir->info.stage == MESA_SHADER_GEOMETRY)
       tu_gather_xfb_info(nir, &so_info);
 
-   NIR_PASS_V(nir, nir_propagate_invariant);
+   if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+      NIR_PASS_V(nir, nir_lower_input_attachments,
+                 &(nir_input_attachment_options) {
+                     .use_fragcoord_sysval = true,
+                     .use_layer_id_sysval = false,
+                     /* When using multiview rendering, we must use
+                      * gl_ViewIndex as the layer id to pass to the texture
+                      * sampling function. gl_Layer doesn't work when
+                      * multiview is enabled.
+                      */
+                     .use_view_id_for_layer = multiview_mask != 0,
+                 });
+   }
 
-   NIR_PASS_V(nir, nir_lower_io_to_temporaries, nir_shader_get_entrypoint(nir), true, true);
+   if (nir->info.stage == MESA_SHADER_VERTEX && multiview_mask) {
+      tu_nir_lower_multiview(nir, multiview_mask,
+                             &shader->multi_pos_output, dev);
+   }
 
-   NIR_PASS_V(nir, nir_lower_global_vars_to_local);
-   NIR_PASS_V(nir, nir_split_var_copies);
-   NIR_PASS_V(nir, nir_lower_var_copies);
-
-   NIR_PASS_V(nir, nir_opt_copy_prop_vars);
-   NIR_PASS_V(nir, nir_opt_combine_stores, nir_var_all);
-
-   /* ir3 doesn't support indirect input/output */
-   /* TODO: We shouldn't perform this lowering pass on gl_TessLevelInner
-    * and gl_TessLevelOuter. Since the tess levels are actually stored in
-    * a global BO, they can be directly accessed via stg and ldg.
-    * nir_lower_indirect_derefs will instead generate a big if-ladder which
-    * isn't *incorrect* but is much less efficient. */
-   NIR_PASS_V(nir, nir_lower_indirect_derefs, nir_var_shader_in | nir_var_shader_out);
-
-   NIR_PASS_V(nir, nir_lower_io_arrays_to_elements_no_indirects, false);
-
-   nir_assign_io_var_locations(&nir->inputs, &nir->num_inputs, stage);
-   nir_assign_io_var_locations(&nir->outputs, &nir->num_outputs, stage);
-
-   NIR_PASS_V(nir, nir_lower_system_values);
-   NIR_PASS_V(nir, nir_lower_frexp);
-
-   if (stage == MESA_SHADER_FRAGMENT)
-      NIR_PASS_V(nir, nir_lower_input_attachments, true);
+   NIR_PASS_V(nir, nir_lower_explicit_io, nir_var_mem_push_const,
+              nir_address_format_32bit_offset);
 
    NIR_PASS_V(nir, nir_lower_explicit_io,
               nir_var_mem_ubo | nir_var_mem_ssbo,
@@ -784,7 +811,12 @@ tu_shader_create(struct tu_device *dev,
                  nir_address_format_32bit_offset);
    }
 
+   nir_assign_io_var_locations(nir, nir_var_shader_in, &nir->num_inputs, nir->info.stage);
+   nir_assign_io_var_locations(nir, nir_var_shader_out, &nir->num_outputs, nir->info.stage);
+
    NIR_PASS_V(nir, tu_lower_io, shader, layout);
+
+   NIR_PASS_V(nir, tu_lower_image_size);
 
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
 
@@ -829,8 +861,6 @@ tu_CreateShaderModule(VkDevice _device,
 
    module->code_size = pCreateInfo->codeSize;
    memcpy(module->code, pCreateInfo->pCode, pCreateInfo->codeSize);
-
-   _mesa_sha1_compute(module->code, module->code_size, module->sha1);
 
    *pShaderModule = tu_shader_module_to_handle(module);
 

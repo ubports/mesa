@@ -40,7 +40,7 @@
 #include "fd2_util.h"
 #include "fd2_zsa.h"
 #include "fd2_draw.h"
-#include "instr-a2xx.h"
+#include "ir2/instr-a2xx.h"
 
 static uint32_t fmt2swap(enum pipe_format format)
 {
@@ -572,7 +572,7 @@ fd2_emit_tile_init(struct fd_batch *batch)
 			if (cf->opc == ALLOC)
 				cf++;
 			assert(cf->opc == EXEC);
-			assert(cf[ctx->screen->num_vsc_pipes*2-2].opc == EXEC_END);
+			assert(cf[ctx->screen->info.num_vsc_pipes*2-2].opc == EXEC_END);
 			cf[2*(gmem->num_vsc_pipes-1)].opc = EXEC_END;
 		}
 

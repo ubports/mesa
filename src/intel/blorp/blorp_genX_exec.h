@@ -190,7 +190,7 @@ _blorp_combine_address(struct blorp_batch *batch, void *location,
 static void
 emit_urb_config(struct blorp_batch *batch,
                 const struct blorp_params *params,
-                enum gen_urb_deref_block_size *deref_block_size)
+                UNUSED enum gen_urb_deref_block_size *deref_block_size)
 {
    /* Once vertex fetcher has written full VUE entries with complete
     * header the space requirement is as follows per vertex (in bytes):
@@ -347,8 +347,7 @@ blorp_emit_input_varying_data(struct blorp_batch *batch,
 }
 
 static void
-blorp_fill_vertex_buffer_state(struct blorp_batch *batch,
-                               struct GENX(VERTEX_BUFFER_STATE) *vb,
+blorp_fill_vertex_buffer_state(struct GENX(VERTEX_BUFFER_STATE) *vb,
                                unsigned idx,
                                struct blorp_address addr, uint32_t size,
                                uint32_t stride)
@@ -388,11 +387,11 @@ blorp_emit_vertex_buffers(struct blorp_batch *batch,
    struct blorp_address addrs[2] = {};
    uint32_t sizes[2];
    blorp_emit_vertex_data(batch, params, &addrs[0], &sizes[0]);
-   blorp_fill_vertex_buffer_state(batch, vb, 0, addrs[0], sizes[0],
+   blorp_fill_vertex_buffer_state(vb, 0, addrs[0], sizes[0],
                                   3 * sizeof(float));
 
    blorp_emit_input_varying_data(batch, params, &addrs[1], &sizes[1]);
-   blorp_fill_vertex_buffer_state(batch, vb, 1, addrs[1], sizes[1], 0);
+   blorp_fill_vertex_buffer_state(vb, 1, addrs[1], sizes[1], 0);
 
    blorp_vf_invalidate_for_vb_48b_transitions(batch, addrs, sizes, num_vbs);
 
@@ -688,7 +687,7 @@ blorp_emit_vs_config(struct blorp_batch *batch,
 static void
 blorp_emit_sf_config(struct blorp_batch *batch,
                      const struct blorp_params *params,
-                     enum gen_urb_deref_block_size urb_deref_block_size)
+                     UNUSED enum gen_urb_deref_block_size urb_deref_block_size)
 {
    const struct brw_wm_prog_data *prog_data = params->wm_prog_data;
 
@@ -1400,7 +1399,7 @@ blorp_emit_memcpy(struct blorp_batch *batch,
 static void
 blorp_emit_surface_state(struct blorp_batch *batch,
                          const struct brw_blorp_surface_info *surface,
-                         enum isl_aux_op aux_op,
+                         UNUSED enum isl_aux_op aux_op,
                          void *state, uint32_t state_offset,
                          const bool color_write_disables[4],
                          bool is_render_target)
@@ -1716,18 +1715,11 @@ blorp_emit_gen8_hiz_op(struct blorp_batch *batch,
     */
    assert(params->depth.enabled || params->stencil.enabled);
 
-   /* The stencil buffer should only be enabled on GEN == 12, if a fast clear
-    * or full resolve operation is requested. On rest of the GEN, if a fast
-    * clear operation is requested.
+   /* The stencil buffer should only be enabled if a fast clear operation is
+    * requested.
     */
-   if (params->stencil.enabled) {
-#if GEN_GEN >= 12
-      assert(params->hiz_op == ISL_AUX_OP_FAST_CLEAR ||
-             params->hiz_op == ISL_AUX_OP_FULL_RESOLVE);
-#else
+   if (params->stencil.enabled)
       assert(params->hiz_op == ISL_AUX_OP_FAST_CLEAR);
-#endif
-   }
 
    /* From the BDW PRM Volume 2, 3DSTATE_WM_HZ_OP:
     *
@@ -1754,38 +1746,14 @@ blorp_emit_gen8_hiz_op(struct blorp_batch *batch,
       blorp_emit_cc_viewport(batch);
    }
 
-   if (GEN_GEN >= 12 && params->stencil.enabled &&
-       params->hiz_op == ISL_AUX_OP_FULL_RESOLVE) {
-      /* GEN:BUG:1605967699
-       *
-       * This workaround requires that the Force Thread Dispatch Enable flag
-       * needs to be set to ForceOFF on the first WM_HZ_OP state cycle
-       * (followed by a CS Stall):
-       *
-       *    "Workaround: There is a potential software workaround for the
-       *    issue by doing these 2 steps 1) setting the force thread dispatch
-       *    enable(bits 20:19) in the 3dstate_WM_body state to be set to
-       *    Force_OFF (value of 1) along with the first WM_HZ_OP state cycle.
-       *    The second WM_HZ_OP state which is required by programming
-       *    sequencing to complete the HZ_OP operation can reprogram the
-       *    3dstate_WM_body to set to NORMAL(value of 0)."
-       */
-      blorp_emit(batch, GENX(3DSTATE_WM), wm) {
-         wm.ForceThreadDispatchEnable = ForceOff;
-      }
-      blorp_emit(batch, GENX(PIPE_CONTROL), pipe) {
-         pipe.CommandStreamerStallEnable = true;
-      }
-   } else {
-      /* According to the SKL PRM formula for WM_INT::ThreadDispatchEnable, the
-       * 3DSTATE_WM::ForceThreadDispatchEnable field can force WM thread dispatch
-       * even when WM_HZ_OP is active.  However, WM thread dispatch is normally
-       * disabled for HiZ ops and it appears that force-enabling it can lead to
-       * GPU hangs on at least Skylake.  Since we don't know the current state of
-       * the 3DSTATE_WM packet, just emit a dummy one prior to 3DSTATE_WM_HZ_OP.
-       */
-      blorp_emit(batch, GENX(3DSTATE_WM), wm);
-   }
+   /* According to the SKL PRM formula for WM_INT::ThreadDispatchEnable, the
+    * 3DSTATE_WM::ForceThreadDispatchEnable field can force WM thread dispatch
+    * even when WM_HZ_OP is active.  However, WM thread dispatch is normally
+    * disabled for HiZ ops and it appears that force-enabling it can lead to
+    * GPU hangs on at least Skylake.  Since we don't know the current state of
+    * the 3DSTATE_WM packet, just emit a dummy one prior to 3DSTATE_WM_HZ_OP.
+    */
+   blorp_emit(batch, GENX(3DSTATE_WM), wm);
 
    /* If we can't alter the depth stencil config and multiple layers are
     * involved, the HiZ op will fail. This is because the op requires that a
@@ -1807,13 +1775,7 @@ blorp_emit_gen8_hiz_op(struct blorp_batch *batch,
          break;
       case ISL_AUX_OP_FULL_RESOLVE:
          assert(params->full_surface_hiz_op);
-         hzp.DepthBufferResolveEnable = params->depth.enabled;
-#if GEN_GEN >= 12
-         if (params->stencil.enabled) {
-            assert(params->stencil.aux_usage == ISL_AUX_USAGE_STC_CCS);
-            hzp.StencilBufferResolveEnable = true;
-         }
-#endif
+         hzp.DepthBufferResolveEnable = true;
          break;
       case ISL_AUX_OP_AMBIGUATE:
          assert(params->full_surface_hiz_op);
@@ -1847,24 +1809,12 @@ blorp_emit_gen8_hiz_op(struct blorp_batch *batch,
       pc.Address = blorp_get_workaround_address(batch);
    }
 
-
-   if (GEN_GEN >= 12 && params->stencil.enabled &&
-       params->hiz_op == ISL_AUX_OP_FULL_RESOLVE) {
-      /* GEN:BUG:1605967699
-       *
-       *    The second WM_HZ_OP state which is required by programming
-       *    sequencing to complete the HZ_OP operation can reprogram the
-       *    3dstate_WM_body to set to NORMAL(value of 0)."
-       */
-      blorp_emit(batch, GENX(3DSTATE_WM), wm);
-   }
-
    blorp_emit(batch, GENX(3DSTATE_WM_HZ_OP), hzp);
 }
 #endif
 
 static void
-blorp_update_clear_color(struct blorp_batch *batch,
+blorp_update_clear_color(UNUSED struct blorp_batch *batch,
                          const struct brw_blorp_surface_info *info,
                          enum isl_aux_op op)
 {

@@ -424,6 +424,15 @@ schedule_node::set_latency_gen7(bool is_haswell)
 
       case GEN7_SFID_DATAPORT_DATA_CACHE:
          switch ((inst->desc >> 14) & 0x1f) {
+         case BRW_DATAPORT_READ_MESSAGE_OWORD_BLOCK_READ:
+         case GEN7_DATAPORT_DC_UNALIGNED_OWORD_BLOCK_READ:
+         case GEN6_DATAPORT_WRITE_MESSAGE_OWORD_BLOCK_WRITE:
+            /* We have no data for this but assume it's a little faster than
+             * untyped surface read/write.
+             */
+            latency = 200;
+            break;
+
          case GEN7_DATAPORT_DC_DWORD_SCATTERED_READ:
          case GEN6_DATAPORT_WRITE_MESSAGE_DWORD_SCATTERED_WRITE:
          case HSW_DATAPORT_DC_PORT0_BYTE_SCATTERED_READ:
@@ -493,6 +502,8 @@ schedule_node::set_latency_gen7(bool is_haswell)
          case GEN8_DATAPORT_DC_PORT1_A64_UNTYPED_SURFACE_READ:
          case GEN8_DATAPORT_DC_PORT1_A64_SCATTERED_WRITE:
          case GEN9_DATAPORT_DC_PORT1_A64_SCATTERED_READ:
+         case GEN9_DATAPORT_DC_PORT1_A64_OWORD_BLOCK_READ:
+         case GEN9_DATAPORT_DC_PORT1_A64_OWORD_BLOCK_WRITE:
             /* See also GEN7_DATAPORT_DC_UNTYPED_SURFACE_READ */
             latency = 300;
             break;
@@ -511,6 +522,16 @@ schedule_node::set_latency_gen7(bool is_haswell)
          default:
             unreachable("Unknown data cache message");
          }
+         break;
+
+      case GEN_RT_SFID_BINDLESS_THREAD_DISPATCH:
+      case GEN_RT_SFID_RAY_TRACE_ACCELERATOR:
+         /* TODO.
+          *
+          * We'll assume for the moment that this is pretty quick as it
+          * doesn't actually return any data.
+          */
+         latency = 200;
          break;
 
       default:
@@ -544,6 +565,8 @@ public:
       this->instructions.make_empty();
       this->post_reg_alloc = (mode == SCHEDULE_POST);
       this->mode = mode;
+      this->reg_pressure = 0;
+      this->block_idx = 0;
       if (!post_reg_alloc) {
          this->reg_pressure_in = rzalloc_array(mem_ctx, int, block_count);
 
@@ -962,7 +985,7 @@ instruction_scheduler::compute_exits()
     * optimistic unblocked time estimate calculated above.
     */
    foreach_in_list_reverse(schedule_node, n, &instructions) {
-      n->exit = (n->inst->opcode == FS_OPCODE_DISCARD_JUMP ? n : NULL);
+      n->exit = (n->inst->opcode == BRW_OPCODE_HALT ? n : NULL);
 
       for (int i = 0; i < n->child_count; i++) {
          if (exit_unblocked_time(n->children[i]) < exit_unblocked_time(n))
@@ -1024,7 +1047,7 @@ instruction_scheduler::add_dep(schedule_node *before, schedule_node *after)
 static bool
 is_scheduling_barrier(const backend_instruction *inst)
 {
-   return inst->opcode == FS_OPCODE_PLACEHOLDER_HALT ||
+   return inst->opcode == SHADER_OPCODE_HALT_TARGET ||
           inst->is_control_flow() ||
           inst->has_side_effects();
 }

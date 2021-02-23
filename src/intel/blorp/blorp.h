@@ -133,7 +133,7 @@ enum blorp_filter {
 void
 blorp_blit(struct blorp_batch *batch,
            const struct blorp_surf *src_surf,
-           unsigned src_level, unsigned src_layer,
+           unsigned src_level, float src_layer,
            enum isl_format src_format, struct isl_swizzle src_swizzle,
            const struct blorp_surf *dst_surf,
            unsigned dst_level, unsigned dst_layer,
@@ -245,10 +245,6 @@ blorp_hiz_op(struct blorp_batch *batch, struct blorp_surf *surf,
              uint32_t level, uint32_t start_layer, uint32_t num_layers,
              enum isl_aux_op op);
 
-void
-blorp_hiz_stencil_op(struct blorp_batch *batch, struct blorp_surf *stencil,
-                     uint32_t level, uint32_t start_layer,
-                     uint32_t num_layers, enum isl_aux_op op);
 #ifdef __cplusplus
 } /* end extern "C" */
 #endif /* __cplusplus */

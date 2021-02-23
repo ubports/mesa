@@ -26,9 +26,11 @@
 
 using namespace clover;
 
-memory_obj::memory_obj(clover::context &ctx, cl_mem_flags flags,
+memory_obj::memory_obj(clover::context &ctx,
+                       std::vector<cl_mem_properties> properties,
+                       cl_mem_flags flags,
                        size_t size, void *host_ptr) :
-   context(ctx), _flags(flags),
+   context(ctx), _properties(properties), _flags(flags),
    _size(size), _host_ptr(host_ptr) {
    if (flags & CL_MEM_COPY_HOST_PTR)
       data.append((char *)host_ptr, size);
@@ -51,6 +53,11 @@ memory_obj::destroy_notify(std::function<void ()> f) {
    _destroy_notify.push(f);
 }
 
+std::vector<cl_mem_properties>
+memory_obj::properties() const {
+   return _properties;
+}
+
 cl_mem_flags
 memory_obj::flags() const {
    return _flags;
@@ -66,9 +73,11 @@ memory_obj::host_ptr() const {
    return _host_ptr;
 }
 
-buffer::buffer(clover::context &ctx, cl_mem_flags flags,
+buffer::buffer(clover::context &ctx,
+               std::vector<cl_mem_properties> properties,
+               cl_mem_flags flags,
                size_t size, void *host_ptr) :
-   memory_obj(ctx, flags, size, host_ptr) {
+   memory_obj(ctx, properties, flags, size, host_ptr) {
 }
 
 cl_mem_object_type
@@ -76,19 +85,35 @@ buffer::type() const {
    return CL_MEM_OBJECT_BUFFER;
 }
 
-root_buffer::root_buffer(clover::context &ctx, cl_mem_flags flags,
+root_buffer::root_buffer(clover::context &ctx,
+                         std::vector<cl_mem_properties> properties,
+                         cl_mem_flags flags,
                          size_t size, void *host_ptr) :
-   buffer(ctx, flags, size, host_ptr) {
+   buffer(ctx, properties, flags, size, host_ptr) {
 }
 
 resource &
-root_buffer::resource(command_queue &q) {
+root_buffer::resource_in(command_queue &q) {
+   const void *data_ptr = NULL;
+   if (flags() & (CL_MEM_USE_HOST_PTR | CL_MEM_COPY_HOST_PTR))
+      data_ptr = !data.empty() ? data.data() : host_ptr();
+
+   return resource(q, data_ptr);
+}
+
+resource &
+root_buffer::resource_undef(command_queue &q) {
+   return resource(q, NULL);
+}
+
+resource &
+root_buffer::resource(command_queue &q, const void *data_ptr) {
    // Create a new resource if there's none for this device yet.
    if (!resources.count(&q.device())) {
       auto r = (!resources.empty() ?
                 new root_resource(q.device(), *this,
                                   *resources.begin()->second) :
-                new root_resource(q.device(), *this, q, data));
+                new root_resource(q.device(), *this, q, data_ptr));
 
       resources.insert(std::make_pair(&q.device(),
                                       std::unique_ptr<root_resource>(r)));
@@ -98,18 +123,23 @@ root_buffer::resource(command_queue &q) {
    return *resources.find(&q.device())->second;
 }
 
+void
+root_buffer::resource_out(command_queue &q) {
+   resources.erase(&q.device());
+}
+
 sub_buffer::sub_buffer(root_buffer &parent, cl_mem_flags flags,
                        size_t offset, size_t size) :
-   buffer(parent.context(), flags, size,
+   buffer(parent.context(), std::vector<cl_mem_properties>(), flags, size,
           (char *)parent.host_ptr() + offset),
    parent(parent), _offset(offset) {
 }
 
 resource &
-sub_buffer::resource(command_queue &q) {
+sub_buffer::resource_in(command_queue &q) {
    // Create a new resource if there's none for this device yet.
    if (!resources.count(&q.device())) {
-      auto r = new sub_resource(parent().resource(q), {{ offset() }});
+      auto r = new sub_resource(parent().resource_in(q), {{ offset() }});
 
       resources.insert(std::make_pair(&q.device(),
                                       std::unique_ptr<sub_resource>(r)));
@@ -118,29 +148,52 @@ sub_buffer::resource(command_queue &q) {
    return *resources.find(&q.device())->second;
 }
 
+resource &
+sub_buffer::resource_undef(command_queue &q) {
+   return resource_in(q);
+}
+
+void
+sub_buffer::resource_out(command_queue &q) {
+   resources.erase(&q.device());
+}
+
 size_t
 sub_buffer::offset() const {
    return _offset;
 }
 
-image::image(clover::context &ctx, cl_mem_flags flags,
+image::image(clover::context &ctx,
+             std::vector<cl_mem_properties> properties,
+             cl_mem_flags flags,
              const cl_image_format *format,
              size_t width, size_t height, size_t depth,
              size_t row_pitch, size_t slice_pitch, size_t size,
              void *host_ptr) :
-   memory_obj(ctx, flags, size, host_ptr),
+   memory_obj(ctx, properties, flags, size, host_ptr),
    _format(*format), _width(width), _height(height), _depth(depth),
    _row_pitch(row_pitch), _slice_pitch(slice_pitch) {
 }
 
 resource &
-image::resource(command_queue &q) {
+image::resource_in(command_queue &q) {
+   const void *data_ptr = !data.empty() ? data.data() : NULL;
+   return resource(q, data_ptr);
+}
+
+resource &
+image::resource_undef(command_queue &q) {
+   return resource(q, NULL);
+}
+
+resource &
+image::resource(command_queue &q, const void *data_ptr) {
    // Create a new resource if there's none for this device yet.
    if (!resources.count(&q.device())) {
       auto r = (!resources.empty() ?
                 new root_resource(q.device(), *this,
                                   *resources.begin()->second) :
-                new root_resource(q.device(), *this, q, data));
+                new root_resource(q.device(), *this, q, data_ptr));
 
       resources.insert(std::make_pair(&q.device(),
                                       std::unique_ptr<root_resource>(r)));
@@ -148,6 +201,11 @@ image::resource(command_queue &q) {
    }
 
    return *resources.find(&q.device())->second;
+}
+
+void
+image::resource_out(command_queue &q) {
+   resources.erase(&q.device());
 }
 
 cl_image_format
@@ -185,11 +243,13 @@ image::slice_pitch() const {
    return _slice_pitch;
 }
 
-image2d::image2d(clover::context &ctx, cl_mem_flags flags,
+image2d::image2d(clover::context &ctx,
+                 std::vector<cl_mem_properties> properties,
+                 cl_mem_flags flags,
                  const cl_image_format *format, size_t width,
                  size_t height, size_t row_pitch,
                  void *host_ptr) :
-   image(ctx, flags, format, width, height, 1,
+   image(ctx, properties, flags, format, width, height, 1,
          row_pitch, 0, height * row_pitch, host_ptr) {
 }
 
@@ -198,12 +258,14 @@ image2d::type() const {
    return CL_MEM_OBJECT_IMAGE2D;
 }
 
-image3d::image3d(clover::context &ctx, cl_mem_flags flags,
+image3d::image3d(clover::context &ctx,
+                 std::vector<cl_mem_properties> properties,
+                 cl_mem_flags flags,
                  const cl_image_format *format,
                  size_t width, size_t height, size_t depth,
                  size_t row_pitch, size_t slice_pitch,
                  void *host_ptr) :
-   image(ctx, flags, format, width, height, depth,
+   image(ctx, properties, flags, format, width, height, depth,
          row_pitch, slice_pitch, depth * slice_pitch,
          host_ptr) {
 }

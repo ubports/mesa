@@ -55,6 +55,7 @@ static unsigned cs_no = 0;
 
 struct lp_cs_job_info {
    unsigned grid_size[3];
+   unsigned grid_base[3];
    unsigned block_size[3];
    unsigned req_local_mem;
    unsigned work_dim;
@@ -438,6 +439,7 @@ llvmpipe_create_compute_state(struct pipe_context *pipe,
    shader->no = cs_no++;
 
    shader->base.type = templ->ir_type;
+   shader->req_local_mem = templ->req_local_mem;
    if (templ->ir_type == PIPE_SHADER_IR_NIR_SERIALIZED) {
       struct blob_reader reader;
       const struct pipe_binary_program_header *hdr = templ->prog;
@@ -447,6 +449,7 @@ llvmpipe_create_compute_state(struct pipe_context *pipe,
       shader->base.type = PIPE_SHADER_IR_NIR;
 
       pipe->screen->finalize_nir(pipe->screen, shader->base.ir.nir, false);
+      shader->req_local_mem += ((struct nir_shader *)shader->base.ir.nir)->info.cs.shared_size;
    } else if (templ->ir_type == PIPE_SHADER_IR_NIR)
       shader->base.ir.nir = (struct nir_shader *)templ->prog;
 
@@ -460,7 +463,6 @@ llvmpipe_create_compute_state(struct pipe_context *pipe,
       nir_tgsi_scan_shader(shader->base.ir.nir, &shader->info.base, false);
    }
 
-   shader->req_local_mem = templ->req_local_mem;
    make_empty_list(&shader->variants);
 
    nr_samplers = shader->info.base.file_max[TGSI_FILE_SAMPLER] + 1;
@@ -509,8 +511,8 @@ llvmpipe_remove_cs_shader_variant(struct llvmpipe_context *lp,
 
    /* remove from context's list */
    remove_from_list(&variant->list_item_global);
-   lp->nr_fs_variants--;
-   lp->nr_fs_instrs -= variant->nr_instrs;
+   lp->nr_cs_variants--;
+   lp->nr_cs_instrs -= variant->nr_instrs;
 
    FREE(variant);
 }
@@ -993,7 +995,7 @@ lp_csctx_set_sampler_views(struct lp_cs_context *csctx,
             struct llvmpipe_screen *screen = llvmpipe_screen(res->screen);
             struct sw_winsys *winsys = screen->winsys;
             jit_tex->base = winsys->displaytarget_map(winsys, lp_tex->dt,
-                                                         PIPE_TRANSFER_READ);
+                                                         PIPE_MAP_READ);
             jit_tex->row_stride[0] = lp_tex->row_stride[0];
             jit_tex->img_stride[0] = lp_tex->img_stride[0];
             jit_tex->mip_offsets[0] = 0;
@@ -1276,6 +1278,10 @@ cs_exec_fn(void *init_data, int iter_idx, struct lp_cs_local_mem *lmem)
    unsigned grid_z = iter_idx / (job_info->grid_size[0] * job_info->grid_size[1]);
    unsigned grid_y = (iter_idx - (grid_z * (job_info->grid_size[0] * job_info->grid_size[1]))) / job_info->grid_size[0];
    unsigned grid_x = (iter_idx - (grid_z * (job_info->grid_size[0] * job_info->grid_size[1])) - (grid_y * job_info->grid_size[0]));
+
+   grid_z += job_info->grid_base[2];
+   grid_y += job_info->grid_base[1];
+   grid_x += job_info->grid_base[0];
    struct lp_compute_shader_variant *variant = job_info->current->variant;
    variant->jit_function(&job_info->current->jit_context,
                          job_info->block_size[0], job_info->block_size[1], job_info->block_size[2],
@@ -1300,7 +1306,7 @@ fill_grid_size(struct pipe_context *pipe,
    params = pipe_buffer_map_range(pipe, info->indirect,
                                   info->indirect_offset,
                                   3 * sizeof(uint32_t),
-                                  PIPE_TRANSFER_READ,
+                                  PIPE_MAP_READ,
                                   &transfer);
 
    if (!transfer)
@@ -1328,6 +1334,9 @@ static void llvmpipe_launch_grid(struct pipe_context *pipe,
 
    fill_grid_size(pipe, info, job_info.grid_size);
 
+   job_info.grid_base[0] = info->grid_base[0];
+   job_info.grid_base[1] = info->grid_base[1];
+   job_info.grid_base[2] = info->grid_base[2];
    job_info.block_size[0] = info->block[0];
    job_info.block_size[1] = info->block[1];
    job_info.block_size[2] = info->block[2];

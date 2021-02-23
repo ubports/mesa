@@ -824,6 +824,28 @@ struct texture_orig_info {
    unsigned npix0_y;
 };
 
+static void si_use_compute_copy_for_float_formats(struct si_context *sctx,
+                                                  struct pipe_resource *texture,
+                                                  unsigned level) {
+   struct si_texture *tex = (struct si_texture *)texture;
+
+   /* If we are uploading into FP16 or R11G11B10_FLOAT via a blit, CB clobbers NaNs,
+    * so in order to preserve them exactly, we have to use the compute blit.
+    * The compute blit is used only when the destination doesn't have DCC, so
+    * disable it here, which is kinda a hack.
+    * If we are uploading into 32-bit floats with DCC via a blit, NaNs will also get
+    * lost so we need to disable DCC as well.
+    *
+    * This makes KHR-GL45.texture_view.view_classes pass on gfx9.
+    * gfx10 has the same issue, but the test doesn't use a large enough texture
+    * to enable DCC and fail, so it always passes.
+    */
+   if (vi_dcc_enabled(tex, level) &&
+       util_format_is_float(texture->format)) {
+      si_texture_disable_dcc(sctx, tex);
+   }
+}
+
 void si_resource_copy_region(struct pipe_context *ctx, struct pipe_resource *dst,
                              unsigned dst_level, unsigned dstx, unsigned dsty, unsigned dstz,
                              struct pipe_resource *src, unsigned src_level,
@@ -843,6 +865,8 @@ void si_resource_copy_region(struct pipe_context *ctx, struct pipe_resource *dst
       si_copy_buffer(sctx, dst, src, dstx, src_box->x, src_box->width);
       return;
    }
+
+   si_use_compute_copy_for_float_formats(sctx, dst, dst_level);
 
    if (!util_format_is_compressed(src->format) && !util_format_is_compressed(dst->format) &&
        !util_format_is_depth_or_stencil(src->format) && src->nr_samples <= 1 &&
@@ -948,7 +972,6 @@ void si_resource_copy_region(struct pipe_context *ctx, struct pipe_resource *dst
 
    /* SNORM8 blitting has precision issues on some chips. Use the SINT
     * equivalent instead, which doesn't force DCC decompression.
-    * Note that some chips avoid this issue by using SDMA.
     */
    if (util_format_is_snorm8(dst_templ.format)) {
       dst_templ.format = src_templ.format = util_format_snorm8_to_sint8(dst_templ.format);
@@ -1078,7 +1101,7 @@ resolve_to_temp:
    templ.usage = PIPE_USAGE_DEFAULT;
    templ.flags = SI_RESOURCE_FLAG_FORCE_MSAA_TILING | SI_RESOURCE_FLAG_FORCE_MICRO_TILE_MODE |
                  SI_RESOURCE_FLAG_MICRO_TILE_MODE_SET(src->surface.micro_tile_mode) |
-                 SI_RESOURCE_FLAG_DISABLE_DCC;
+                 SI_RESOURCE_FLAG_DISABLE_DCC | SI_RESOURCE_FLAG_DRIVER_INTERNAL;
 
    /* The src and dst microtile modes must be the same. */
    if (sctx->chip_class <= GFX8 && src->surface.micro_tile_mode == RADEON_MICRO_MODE_DISPLAY)
@@ -1113,21 +1136,18 @@ resolve_to_temp:
 static void si_blit(struct pipe_context *ctx, const struct pipe_blit_info *info)
 {
    struct si_context *sctx = (struct si_context *)ctx;
-   struct si_texture *dst = (struct si_texture *)info->dst.resource;
 
    if (do_hardware_msaa_resolve(ctx, info)) {
       return;
    }
 
-   /* Using SDMA for copying to a linear texture in GTT is much faster.
-    * This improves DRI PRIME performance.
-    *
-    * resource_copy_region can't do this yet, because dma_copy calls it
-    * on failure (recursion).
+   /* Using compute for copying to a linear texture in GTT is much faster than
+    * going through RBs (render backends). This improves DRI PRIME performance.
     */
-   if (dst->surface.is_linear && util_can_blit_via_copy_region(info, false)) {
-      sctx->dma_copy(ctx, info->dst.resource, info->dst.level, info->dst.box.x, info->dst.box.y,
-                     info->dst.box.z, info->src.resource, info->src.level, &info->src.box);
+   if (util_can_blit_via_copy_region(info, false)) {
+      si_resource_copy_region(ctx, info->dst.resource, info->dst.level,
+                              info->dst.box.x, info->dst.box.y, info->dst.box.z,
+                              info->src.resource, info->src.level, &info->src.box);
       return;
    }
 
@@ -1141,9 +1161,6 @@ static void si_blit(struct pipe_context *ctx, const struct pipe_blit_info *info)
                                          info->dst.format);
    si_decompress_subresource(ctx, info->src.resource, PIPE_MASK_RGBAZS, info->src.level,
                              info->src.box.z, info->src.box.z + info->src.box.depth - 1);
-
-   if (sctx->screen->debug_flags & DBG(FORCE_SDMA) && util_try_blit_via_copy_region(ctx, info))
-      return;
 
    si_blitter_begin(sctx, SI_BLIT | (info->render_condition_enable ? 0 : SI_DISABLE_RENDER_COND));
    util_blitter_blit(sctx->blitter, info);
@@ -1232,6 +1249,15 @@ static void si_flush_resource(struct pipe_context *ctx, struct pipe_resource *re
          vi_separate_dcc_process_and_reset_stats(ctx, tex);
       }
    }
+}
+
+void si_flush_implicit_resources(struct si_context *sctx)
+{
+   hash_table_foreach(sctx->dirty_implicit_resources, entry) {
+      si_flush_resource(&sctx->b, entry->data);
+      pipe_resource_reference((struct pipe_resource **)&entry->data, NULL);
+   }
+   _mesa_hash_table_clear(sctx->dirty_implicit_resources, NULL);
 }
 
 void si_decompress_dcc(struct si_context *sctx, struct si_texture *tex)

@@ -463,14 +463,6 @@ void
 intel_get_image_dims(struct gl_texture_image *image,
                      int *width, int *height, int *depth);
 
-void
-intel_get_tile_masks(enum isl_tiling tiling, uint32_t cpp,
-                     uint32_t *mask_x, uint32_t *mask_y);
-
-void
-intel_get_tile_dims(enum isl_tiling tiling, uint32_t cpp,
-                    uint32_t *tile_w, uint32_t *tile_h);
-
 uint32_t
 intel_miptree_get_tile_offsets(const struct intel_mipmap_tree *mt,
                                GLuint level, GLuint slice,
@@ -702,9 +694,7 @@ intel_miptree_set_clear_color(struct brw_context *brw,
 
 /* Get a clear color suitable for filling out an ISL surface state. */
 union isl_color_value
-intel_miptree_get_clear_color(const struct gen_device_info *devinfo,
-                              const struct intel_mipmap_tree *mt,
-                              enum isl_format view_format, bool sampling,
+intel_miptree_get_clear_color(const struct intel_mipmap_tree *mt,
                               struct brw_bo **clear_color_bo,
                               uint64_t *clear_color_offset);
 

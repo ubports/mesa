@@ -86,7 +86,6 @@ def install_shared_library(env, sources, version = ()):
 def msvc2013_compat(env):
     if env['gcc']:
         env.Append(CCFLAGS = [
-            '-Werror=vla',
             '-Werror=pointer-arith',
         ])
 
@@ -399,11 +398,12 @@ def generate(env):
             #'_UNICODE',
             #'UNICODE',
             # http://msdn.microsoft.com/en-us/library/aa383745.aspx
-            ('_WIN32_WINNT', '0x0601'),
-            ('WINVER', '0x0601'),
+            ('_WIN32_WINNT', '0x0A00'),
+            ('WINVER', '0x0A00'),
         ]
         if gcc_compat:
             cppdefines += [('__MSVCRT_VERSION__', '0x0700')]
+            cppdefines += ['_USE_MATH_DEFINES']
         if msvc:
             cppdefines += [
                 'VC_EXTRALEAN',
@@ -496,6 +496,7 @@ def generate(env):
             cflags += ['-std=gnu11']
         else:
             cflags += ['-std=gnu99']
+        cxxflags += ['-std=c++14']
     if icc:
         cflags += [
             '-std=gnu99',
@@ -709,7 +710,7 @@ def generate(env):
     env.AddMethod(msvc2013_compat, 'MSVC2013Compat')
     env.AddMethod(unit_test, 'UnitTest')
 
-    env.PkgCheckModules('X11', ['x11', 'xext', 'xdamage >= 1.1', 'xfixes', 'glproto >= 1.4.13', 'dri2proto >= 2.8'])
+    env.PkgCheckModules('X11', ['x11', 'xext', 'xfixes', 'glproto >= 1.4.13', 'dri2proto >= 2.8'])
     env.PkgCheckModules('XCB', ['x11-xcb', 'xcb-glx >= 1.8.1', 'xcb-dri2 >= 1.8'])
     env.PkgCheckModules('XF86VIDMODE', ['xxf86vm'])
     env.PkgCheckModules('DRM', ['libdrm >= 2.4.75'])

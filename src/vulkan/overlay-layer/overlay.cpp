@@ -928,12 +928,16 @@ static void compute_swapchain_display(struct swapchain_data *data)
    ImGui::NewFrame();
    position_layer(data);
    ImGui::Begin("Mesa overlay");
-   ImGui::Text("Device: %s", device_data->properties.deviceName);
+   if (instance_data->params.enabled[OVERLAY_PARAM_ENABLED_device])
+      ImGui::Text("Device: %s", device_data->properties.deviceName);
 
-   const char *format_name = vk_Format_to_str(data->format);
-   format_name = format_name ? (format_name + strlen("VK_FORMAT_")) : "unknown";
-   ImGui::Text("Swapchain format: %s", format_name);
-   ImGui::Text("Frames: %" PRIu64, data->n_frames);
+   if (instance_data->params.enabled[OVERLAY_PARAM_ENABLED_format]) {
+      const char *format_name = vk_Format_to_str(data->format);
+      format_name = format_name ? (format_name + strlen("VK_FORMAT_")) : "unknown";
+      ImGui::Text("Swapchain format: %s", format_name);
+   }
+   if (instance_data->params.enabled[OVERLAY_PARAM_ENABLED_frame])
+      ImGui::Text("Frames: %" PRIu64, data->n_frames);
    if (instance_data->params.enabled[OVERLAY_PARAM_ENABLED_fps])
       ImGui::Text("FPS: %.2f" , data->fps);
 
@@ -1326,7 +1330,7 @@ static struct overlay_draw *render_swapchain_display(struct swapchain_data *data
    if (device_data->graphic_queue->family_index != present_queue->family_index)
    {
       /* Transfer the image back to the present queue family
-       * image layout was already changed to present by the render pass 
+       * image layout was already changed to present by the render pass
        */
       imb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
       imb.pNext = nullptr;
@@ -2466,18 +2470,31 @@ static VkResult overlay_CreateDevice(
    chain_info->u.pLayerInfo = chain_info->u.pLayerInfo->pNext;
 
    VkPhysicalDeviceFeatures device_features = {};
-   VkDeviceCreateInfo device_info = *pCreateInfo;
+   VkPhysicalDeviceFeatures *device_features_ptr = NULL;
 
-   if (pCreateInfo->pEnabledFeatures)
-      device_features = *(pCreateInfo->pEnabledFeatures);
-   if (instance_data->pipeline_statistics_enabled) {
-      device_features.inheritedQueries = true;
-      device_features.pipelineStatisticsQuery = true;
+   VkDeviceCreateInfo *device_info = (VkDeviceCreateInfo *)
+      clone_chain((const struct VkBaseInStructure *)pCreateInfo);
+
+   VkPhysicalDeviceFeatures2 *device_features2 = (VkPhysicalDeviceFeatures2 *)
+      vk_find_struct(device_info, PHYSICAL_DEVICE_FEATURES_2);
+   if (device_features2) {
+      /* Can't use device_info->pEnabledFeatures when VkPhysicalDeviceFeatures2 is present */
+      device_features_ptr = &device_features2->features;
+   } else {
+      if (device_info->pEnabledFeatures)
+         device_features = *(device_info->pEnabledFeatures);
+      device_features_ptr = &device_features;
+      device_info->pEnabledFeatures = &device_features;
    }
-   device_info.pEnabledFeatures = &device_features;
+
+   if (instance_data->pipeline_statistics_enabled) {
+      device_features_ptr->inheritedQueries = true;
+      device_features_ptr->pipelineStatisticsQuery = true;
+   }
 
 
-   VkResult result = fpCreateDevice(physicalDevice, &device_info, pAllocator, pDevice);
+   VkResult result = fpCreateDevice(physicalDevice, device_info, pAllocator, pDevice);
+   free_chain((struct VkBaseOutStructure *)device_info);
    if (result != VK_SUCCESS) return result;
 
    struct device_data *device_data = new_device_data(*pDevice, instance_data);
@@ -2569,6 +2586,7 @@ static const struct {
    const char *name;
    void *ptr;
 } name_to_funcptr_map[] = {
+   { "vkGetInstanceProcAddr", (void *) vkGetInstanceProcAddr },
    { "vkGetDeviceProcAddr", (void *) vkGetDeviceProcAddr },
 #define ADD_HOOK(fn) { "vk" # fn, (void *) overlay_ ## fn }
 #define ADD_ALIAS_HOOK(alias, fn) { "vk" # alias, (void *) overlay_ ## fn }

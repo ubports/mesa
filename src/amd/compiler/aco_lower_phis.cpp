@@ -76,10 +76,10 @@ Operand get_ssa(Program *program, unsigned block_idx, ssa_state *state, bool bef
               !(program->blocks[state->phi_block_idx].kind & block_kind_loop_exit)) {
       return Operand(program->lane_mask);
    } else {
-      Temp res = Temp(program->allocateId(), program->lane_mask);
+      Temp res = Temp(program->allocateTmp(program->lane_mask));
       state->latest[block_idx] = Operand(res);
 
-      Operand ops[pred];
+      Operand *const ops = (Operand *)alloca(pred * sizeof(Operand));
       for (unsigned i = 0; i < pred; i++)
          ops[i] = get_ssa(program, block.linear_preds[i], state, false);
 
@@ -103,8 +103,8 @@ Operand get_ssa(Program *program, unsigned block_idx, ssa_state *state, bool bef
 
 void insert_before_logical_end(Block *block, aco_ptr<Instruction> instr)
 {
-   auto IsLogicalEnd = [] (const aco_ptr<Instruction>& instr) -> bool {
-      return instr->opcode == aco_opcode::p_logical_end;
+   auto IsLogicalEnd = [] (const aco_ptr<Instruction>& inst) -> bool {
+      return inst->opcode == aco_opcode::p_logical_end;
    };
    auto it = std::find_if(block->instructions.crbegin(), block->instructions.crend(), IsLogicalEnd);
 
@@ -128,12 +128,12 @@ void build_merge_code(Program *program, Block *block, Definition dst, Operand pr
    bld.reset(&block->instructions, std::prev(it.base()));
 
    if (prev.isUndefined()) {
-      bld.sop1(Builder::s_mov, dst, cur);
+      bld.copy(dst, cur);
       return;
    }
 
-   bool prev_is_constant = prev.isConstant() && prev.constantValue64(true) + 1u < 2u;
-   bool cur_is_constant = cur.isConstant() && cur.constantValue64(true) + 1u < 2u;
+   bool prev_is_constant = prev.isConstant() && prev.constantValue() + 1u < 2u;
+   bool cur_is_constant = cur.isConstant() && cur.constantValue() + 1u < 2u;
 
    if (!prev_is_constant) {
       if (!cur_is_constant) {
@@ -141,25 +141,25 @@ void build_merge_code(Program *program, Block *block, Definition dst, Operand pr
          bld.sop2(Builder::s_andn2, Definition(tmp1), bld.def(s1, scc), prev, Operand(exec, bld.lm));
          bld.sop2(Builder::s_and, Definition(tmp2), bld.def(s1, scc), cur, Operand(exec, bld.lm));
          bld.sop2(Builder::s_or, dst, bld.def(s1, scc), tmp1, tmp2);
-      } else if (cur.constantValue64(true)) {
+      } else if (cur.constantValue()) {
          bld.sop2(Builder::s_or, dst, bld.def(s1, scc), prev, Operand(exec, bld.lm));
       } else {
          bld.sop2(Builder::s_andn2, dst, bld.def(s1, scc), prev, Operand(exec, bld.lm));
       }
-   } else if (prev.constantValue64(true)) {
+   } else if (prev.constantValue()) {
       if (!cur_is_constant)
          bld.sop2(Builder::s_orn2, dst, bld.def(s1, scc), cur, Operand(exec, bld.lm));
-      else if (cur.constantValue64(true))
-         bld.sop1(Builder::s_mov, dst, program->wave_size == 64 ? Operand(UINT64_MAX) : Operand(UINT32_MAX));
+      else if (cur.constantValue())
+         bld.copy(dst, Operand(UINT32_MAX, bld.lm == s2));
       else
          bld.sop1(Builder::s_not, dst, bld.def(s1, scc), Operand(exec, bld.lm));
    } else {
       if (!cur_is_constant)
          bld.sop2(Builder::s_and, dst, bld.def(s1, scc), cur, Operand(exec, bld.lm));
-      else if (cur.constantValue64(true))
-         bld.sop1(Builder::s_mov, dst, Operand(exec, bld.lm));
+      else if (cur.constantValue())
+         bld.copy(dst, Operand(exec, bld.lm));
       else
-         bld.sop1(Builder::s_mov, dst, program->wave_size == 64 ? Operand((uint64_t)0u) : Operand(0u));
+         bld.copy(dst, Operand(0u, bld.lm == s2));
    }
 }
 
@@ -207,7 +207,7 @@ void lower_divergent_bool_phi(Program *program, ssa_state *state, Block *block, 
       if (phi->operands[i].isUndefined())
          continue;
 
-      state->writes[block->logical_preds[i]] = program->allocateId();
+      state->writes[block->logical_preds[i]] = program->allocateId(program->lane_mask);
    }
 
    bool uniform_merge = block->kind & block_kind_loop_header;
@@ -266,7 +266,7 @@ void lower_subdword_phis(Program *program, Block *block, aco_ptr<Instruction>& p
 
       assert(phi_src.regClass().type() == RegType::sgpr);
       Temp tmp = bld.tmp(RegClass(RegType::vgpr, phi_src.size()));
-      insert_before_logical_end(pred, bld.pseudo(aco_opcode::p_create_vector, Definition(tmp), phi_src).get_ptr());
+      insert_before_logical_end(pred, bld.copy(Definition(tmp), phi_src).get_ptr());
       Temp new_phi_src = bld.tmp(phi->definitions[0].regClass());
       insert_before_logical_end(pred, bld.pseudo(aco_opcode::p_extract_vector, Definition(new_phi_src), tmp, Operand(0u)).get_ptr());
 

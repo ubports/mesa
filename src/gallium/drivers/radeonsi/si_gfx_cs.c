@@ -30,22 +30,15 @@
 #include "util/u_upload_mgr.h"
 
 /* initialize */
-void si_need_gfx_cs_space(struct si_context *ctx)
+void si_need_gfx_cs_space(struct si_context *ctx, unsigned num_draws)
 {
-   struct radeon_cmdbuf *cs = ctx->gfx_cs;
-
-   /* There is no need to flush the DMA IB here, because
-    * si_need_dma_space always flushes the GFX IB if there is
-    * a conflict, which means any unflushed DMA commands automatically
-    * precede the GFX IB (= they had no dependency on the GFX IB when
-    * they were submitted).
-    */
+   struct radeon_cmdbuf *cs = &ctx->gfx_cs;
 
    /* There are two memory usage counters in the winsys for all buffers
     * that have been added (cs_add_buffer) and two counters in the pipe
     * driver for those that haven't been added yet.
     */
-   if (unlikely(!radeon_cs_memory_below_limit(ctx->screen, ctx->gfx_cs, ctx->vram, ctx->gtt))) {
+   if (unlikely(!radeon_cs_memory_below_limit(ctx->screen, &ctx->gfx_cs, ctx->vram, ctx->gtt))) {
       ctx->gtt = 0;
       ctx->vram = 0;
       si_flush_gfx_cs(ctx, RADEON_FLUSH_ASYNC_START_NEXT_GFX_IB_NOW, NULL);
@@ -54,23 +47,14 @@ void si_need_gfx_cs_space(struct si_context *ctx)
    ctx->gtt = 0;
    ctx->vram = 0;
 
-   unsigned need_dwords = si_get_minimum_num_gfx_cs_dwords(ctx);
+   unsigned need_dwords = si_get_minimum_num_gfx_cs_dwords(ctx, num_draws);
    if (!ctx->ws->cs_check_space(cs, need_dwords, false))
       si_flush_gfx_cs(ctx, RADEON_FLUSH_ASYNC_START_NEXT_GFX_IB_NOW, NULL);
 }
 
-void si_unref_sdma_uploads(struct si_context *sctx)
-{
-   for (unsigned i = 0; i < sctx->num_sdma_uploads; i++) {
-      si_resource_reference(&sctx->sdma_uploads[i].dst, NULL);
-      si_resource_reference(&sctx->sdma_uploads[i].src, NULL);
-   }
-   sctx->num_sdma_uploads = 0;
-}
-
 void si_flush_gfx_cs(struct si_context *ctx, unsigned flags, struct pipe_fence_handle **fence)
 {
-   struct radeon_cmdbuf *cs = ctx->gfx_cs;
+   struct radeon_cmdbuf *cs = &ctx->gfx_cs;
    struct radeon_winsys *ws = ctx->ws;
    struct si_screen *sscreen = ctx->screen;
    const unsigned wait_ps_cs = SI_CONTEXT_PS_PARTIAL_FLUSH | SI_CONTEXT_CS_PARTIAL_FLUSH;
@@ -97,12 +81,19 @@ void si_flush_gfx_cs(struct si_context *ctx, unsigned flags, struct pipe_fence_h
    } else if (ctx->chip_class == GFX6) {
       /* The kernel flushes L2 before shaders are finished. */
       wait_flags |= wait_ps_cs;
-   } else if (!(flags & RADEON_FLUSH_START_NEXT_GFX_IB_NOW)) {
+   } else if (!(flags & RADEON_FLUSH_START_NEXT_GFX_IB_NOW) ||
+              ((flags & RADEON_FLUSH_TOGGLE_SECURE_SUBMISSION) &&
+                !ws->cs_is_secure(cs))) {
+      /* TODO: this workaround fixes subtitles rendering with mpv -vo=vaapi and
+       * tmz but shouldn't be necessary.
+       */
       wait_flags |= wait_ps_cs;
    }
 
    /* Drop this flush if it's a no-op. */
-   if (!radeon_emitted(cs, ctx->initial_gfx_cs_size) && (!wait_flags || !ctx->gfx_last_ib_is_busy))
+   if (!radeon_emitted(cs, ctx->initial_gfx_cs_size) &&
+       (!wait_flags || !ctx->gfx_last_ib_is_busy) &&
+       !(flags & RADEON_FLUSH_TOGGLE_SECURE_SUBMISSION))
       return;
 
    if (ctx->b.get_device_reset_status(&ctx->b) != PIPE_NO_RESET)
@@ -113,35 +104,8 @@ void si_flush_gfx_cs(struct si_context *ctx, unsigned flags, struct pipe_fence_h
 
    ctx->gfx_flush_in_progress = true;
 
-   /* If the gallium frontend is flushing the GFX IB, si_flush_from_st is
-    * responsible for flushing the DMA IB and merging the fences from both.
-    * If the driver flushes the GFX IB internally, and it should never ask
-    * for a fence handle.
-    */
-   assert(!radeon_emitted(ctx->sdma_cs, 0) || fence == NULL);
-
-   /* Update the sdma_uploads list by flushing the uploader. */
-   u_upload_unmap(ctx->b.const_uploader);
-
-   /* Execute SDMA uploads. */
-   ctx->sdma_uploads_in_progress = true;
-   for (unsigned i = 0; i < ctx->num_sdma_uploads; i++) {
-      struct si_sdma_upload *up = &ctx->sdma_uploads[i];
-
-      assert(up->src_offset % 4 == 0 && up->dst_offset % 4 == 0 && up->size % 4 == 0);
-
-      si_sdma_copy_buffer(ctx, &up->dst->b.b, &up->src->b.b, up->dst_offset, up->src_offset,
-                          up->size);
-   }
-   ctx->sdma_uploads_in_progress = false;
-   si_unref_sdma_uploads(ctx);
-
-   /* Flush SDMA (preamble IB). */
-   if (radeon_emitted(ctx->sdma_cs, 0))
-      si_flush_dma_cs(ctx, flags, NULL);
-
-   if (radeon_emitted(ctx->prim_discard_compute_cs, 0)) {
-      struct radeon_cmdbuf *compute_cs = ctx->prim_discard_compute_cs;
+   if (radeon_emitted(&ctx->prim_discard_compute_cs, 0)) {
+      struct radeon_cmdbuf *compute_cs = &ctx->prim_discard_compute_cs;
       si_compute_signal_gfx(ctx);
 
       /* Make sure compute shaders are idle before leaving the IB, so that
@@ -177,12 +141,12 @@ void si_flush_gfx_cs(struct si_context *ctx, unsigned flags, struct pipe_fence_h
    /* Make sure CP DMA is idle at the end of IBs after L2 prefetches
     * because the kernel doesn't wait for it. */
    if (ctx->chip_class >= GFX7)
-      si_cp_dma_wait_for_idle(ctx);
+      si_cp_dma_wait_for_idle(ctx, &ctx->gfx_cs);
 
    /* Wait for draw calls to finish if needed. */
    if (wait_flags) {
       ctx->flags |= wait_flags;
-      ctx->emit_cache_flush(ctx);
+      ctx->emit_cache_flush(ctx, &ctx->gfx_cs);
    }
    ctx->gfx_last_ib_is_busy = (wait_flags & wait_ps_cs) != wait_ps_cs;
 
@@ -199,9 +163,9 @@ void si_flush_gfx_cs(struct si_context *ctx, unsigned flags, struct pipe_fence_h
 
    if (si_compute_prim_discard_enabled(ctx)) {
       /* The compute IB can start after the previous gfx IB starts. */
-      if (radeon_emitted(ctx->prim_discard_compute_cs, 0) && ctx->last_gfx_fence) {
+      if (radeon_emitted(&ctx->prim_discard_compute_cs, 0) && ctx->last_gfx_fence) {
          ctx->ws->cs_add_fence_dependency(
-            ctx->gfx_cs, ctx->last_gfx_fence,
+            &ctx->gfx_cs, ctx->last_gfx_fence,
             RADEON_DEPENDENCY_PARALLEL_COMPUTE_ONLY | RADEON_DEPENDENCY_START_FENCE);
       }
 
@@ -219,6 +183,9 @@ void si_flush_gfx_cs(struct si_context *ctx, unsigned flags, struct pipe_fence_h
          ws->fence_reference(&ctx->last_ib_barrier_fence, NULL);
       }
    }
+
+   if (ctx->is_noop)
+      flags |= RADEON_FLUSH_NOOP;
 
    /* Flush the CS. */
    ws->cs_flush(cs, flags, &ctx->last_gfx_fence);
@@ -246,6 +213,11 @@ void si_flush_gfx_cs(struct si_context *ctx, unsigned flags, struct pipe_fence_h
       ctx->ws->fence_wait(ctx->ws, ctx->last_gfx_fence, 800 * 1000 * 1000);
 
       si_check_vm_faults(ctx, &ctx->current_saved_cs->gfx, RING_GFX);
+   }
+
+   if (unlikely(ctx->thread_trace &&
+                (flags & PIPE_FLUSH_END_OF_FRAME))) {
+      si_handle_thread_trace(ctx, &ctx->gfx_cs);
    }
 
    if (ctx->current_saved_cs)
@@ -280,16 +252,16 @@ static void si_begin_gfx_cs_debug(struct si_context *ctx)
 
    si_trace_emit(ctx);
 
-   radeon_add_to_buffer_list(ctx, ctx->gfx_cs, ctx->current_saved_cs->trace_buf,
+   radeon_add_to_buffer_list(ctx, &ctx->gfx_cs, ctx->current_saved_cs->trace_buf,
                              RADEON_USAGE_READWRITE, RADEON_PRIO_TRACE);
 }
 
 static void si_add_gds_to_buffer_list(struct si_context *sctx)
 {
    if (sctx->gds) {
-      sctx->ws->cs_add_buffer(sctx->gfx_cs, sctx->gds, RADEON_USAGE_READWRITE, 0, 0);
+      sctx->ws->cs_add_buffer(&sctx->gfx_cs, sctx->gds, RADEON_USAGE_READWRITE, 0, 0);
       if (sctx->gds_oa) {
-         sctx->ws->cs_add_buffer(sctx->gfx_cs, sctx->gds_oa, RADEON_USAGE_READWRITE, 0, 0);
+         sctx->ws->cs_add_buffer(&sctx->gfx_cs, sctx->gds_oa, RADEON_USAGE_READWRITE, 0, 0);
       }
    }
 }
@@ -306,8 +278,8 @@ void si_allocate_gds(struct si_context *sctx)
    /* 4 streamout GDS counters.
     * We need 256B (64 dw) of GDS, otherwise streamout hangs.
     */
-   sctx->gds = ws->buffer_create(ws, 256, 4, RADEON_DOMAIN_GDS, 0);
-   sctx->gds_oa = ws->buffer_create(ws, 4, 1, RADEON_DOMAIN_OA, 0);
+   sctx->gds = ws->buffer_create(ws, 256, 4, RADEON_DOMAIN_GDS, RADEON_FLAG_DRIVER_INTERNAL);
+   sctx->gds_oa = ws->buffer_create(ws, 4, 1, RADEON_DOMAIN_OA, RADEON_FLAG_DRIVER_INTERNAL);
 
    assert(sctx->gds && sctx->gds_oa);
    si_add_gds_to_buffer_list(sctx);
@@ -337,6 +309,7 @@ void si_set_tracked_regs_to_clear_state(struct si_context *ctx)
    ctx->tracked_regs.reg_value[SI_TRACKED_PA_CL_CLIP_CNTL] = 0x00090000;
    ctx->tracked_regs.reg_value[SI_TRACKED_PA_SC_BINNER_CNTL_0] = 0x00000003;
    ctx->tracked_regs.reg_value[SI_TRACKED_DB_DFSM_CONTROL] = 0x00000000;
+   ctx->tracked_regs.reg_value[SI_TRACKED_DB_VRS_OVERRIDE_CNTL] = 0x00000000;
    ctx->tracked_regs.reg_value[SI_TRACKED_PA_CL_GB_VERT_CLIP_ADJ] = 0x3f800000;
    ctx->tracked_regs.reg_value[SI_TRACKED_PA_CL_GB_VERT_DISC_ADJ] = 0x3f800000;
    ctx->tracked_regs.reg_value[SI_TRACKED_PA_CL_GB_HORZ_CLIP_ADJ] = 0x3f800000;
@@ -385,6 +358,17 @@ void si_set_tracked_regs_to_clear_state(struct si_context *ctx)
 
 void si_begin_new_gfx_cs(struct si_context *ctx, bool first_cs)
 {
+   bool is_secure = false;
+
+   if (unlikely(radeon_uses_secure_bos(ctx->ws))) {
+      /* Disable features that don't work with TMZ:
+       *   - primitive discard
+       */
+      ctx->prim_discard_vertex_count_threshold = UINT_MAX;
+
+      is_secure = ctx->ws->cs_is_secure(&ctx->gfx_cs);
+   }
+
    if (ctx->is_debug)
       si_begin_gfx_cs_debug(ctx);
 
@@ -403,10 +387,14 @@ void si_begin_new_gfx_cs(struct si_context *ctx, bool first_cs)
    ctx->flags |= SI_CONTEXT_INV_ICACHE | SI_CONTEXT_INV_SCACHE | SI_CONTEXT_INV_VCACHE |
                  SI_CONTEXT_INV_L2 | SI_CONTEXT_START_PIPELINE_STATS;
 
-   radeon_add_to_buffer_list(ctx, ctx->gfx_cs, ctx->border_color_buffer,
+   /* We don't know if the last draw call used GS fast launch, so assume it didn't. */
+   if (ctx->chip_class == GFX10 && ctx->ngg_culling & SI_NGG_CULL_GS_FAST_LAUNCH_ALL)
+      ctx->flags |= SI_CONTEXT_VGT_FLUSH;
+
+   radeon_add_to_buffer_list(ctx, &ctx->gfx_cs, ctx->border_color_buffer,
                              RADEON_USAGE_READ, RADEON_PRIO_BORDER_COLORS);
    if (ctx->shadowed_regs) {
-      radeon_add_to_buffer_list(ctx, ctx->gfx_cs, ctx->shadowed_regs,
+      radeon_add_to_buffer_list(ctx, &ctx->gfx_cs, ctx->shadowed_regs,
                                 RADEON_USAGE_READWRITE,
                                 RADEON_PRIO_DESCRIPTORS);
    }
@@ -419,12 +407,13 @@ void si_begin_new_gfx_cs(struct si_context *ctx, bool first_cs)
    }
 
    if (!ctx->has_graphics) {
-      ctx->initial_gfx_cs_size = ctx->gfx_cs->current.cdw;
+      ctx->initial_gfx_cs_size = ctx->gfx_cs.current.cdw;
       return;
    }
 
    if (ctx->tess_rings) {
-      radeon_add_to_buffer_list(ctx, ctx->gfx_cs, si_resource(ctx->tess_rings),
+      radeon_add_to_buffer_list(ctx, &ctx->gfx_cs,
+                                unlikely(is_secure) ? si_resource(ctx->tess_rings_tmz) : si_resource(ctx->tess_rings),
                                 RADEON_USAGE_READWRITE, RADEON_PRIO_SHADER_RINGS);
    }
 
@@ -436,6 +425,9 @@ void si_begin_new_gfx_cs(struct si_context *ctx, bool first_cs)
    /* The CS initialization should be emitted before everything else. */
    if (ctx->cs_preamble_state)
       si_pm4_emit(ctx, ctx->cs_preamble_state);
+   if (ctx->cs_preamble_tess_rings)
+      si_pm4_emit(ctx, unlikely(is_secure) ? ctx->cs_preamble_tess_rings_tmz :
+         ctx->cs_preamble_tess_rings);
    if (ctx->cs_preamble_gs_rings)
       si_pm4_emit(ctx, ctx->cs_preamble_gs_rings);
 
@@ -465,15 +457,14 @@ void si_begin_new_gfx_cs(struct si_context *ctx, bool first_cs)
       ctx->framebuffer.dirty_cbufs = u_bit_consecutive(0, 8);
       ctx->framebuffer.dirty_zsbuf = true;
    }
-   /* This should always be marked as dirty to set the framebuffer scissor
-    * at least.
-    *
-    * Even with shadowed registers, we have to add buffers to the buffer list.
-    * All of these do that.
+
+   /* Even with shadowed registers, we have to add buffers to the buffer list.
+    * These atoms are the only ones that add buffers.
     */
    si_mark_atom_dirty(ctx, &ctx->atoms.s.framebuffer);
    si_mark_atom_dirty(ctx, &ctx->atoms.s.render_cond);
-   si_mark_atom_dirty(ctx, &ctx->atoms.s.viewports);
+   if (ctx->screen->use_ngg_culling)
+      si_mark_atom_dirty(ctx, &ctx->atoms.s.ngg_cull_state);
 
    if (first_cs || !ctx->shadowed_regs) {
       /* These don't add any buffers, so skip them with shadowing. */
@@ -503,10 +494,11 @@ void si_begin_new_gfx_cs(struct si_context *ctx, bool first_cs)
          si_mark_atom_dirty(ctx, &ctx->atoms.s.window_rectangles);
       si_mark_atom_dirty(ctx, &ctx->atoms.s.guardband);
       si_mark_atom_dirty(ctx, &ctx->atoms.s.scissors);
+      si_mark_atom_dirty(ctx, &ctx->atoms.s.viewports);
 
       /* Invalidate various draw states so that they are emitted before
        * the first draw call. */
-      si_invalidate_draw_sh_constants(ctx);
+      si_invalidate_draw_constants(ctx);
       ctx->last_index_size = -1;
       ctx->last_primitive_restart_en = -1;
       ctx->last_restart_index = SI_RESTART_INDEX_UNKNOWN;
@@ -545,9 +537,8 @@ void si_begin_new_gfx_cs(struct si_context *ctx, bool first_cs)
    if (!list_is_empty(&ctx->active_queries))
       si_resume_queries(ctx);
 
-   assert(!ctx->gfx_cs->prev_dw);
-   ctx->initial_gfx_cs_size = ctx->gfx_cs->current.cdw;
-   ctx->small_prim_cull_info_dirty = ctx->small_prim_cull_info_buf != NULL;
+   assert(!ctx->gfx_cs.prev_dw);
+   ctx->initial_gfx_cs_size = ctx->gfx_cs.current.cdw;
    ctx->prim_discard_compute_ib_initialized = false;
 
    /* Compute-based primitive discard:

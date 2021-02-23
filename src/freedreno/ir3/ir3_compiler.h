@@ -28,6 +28,7 @@
 #define IR3_COMPILER_H_
 
 #include "util/disk_cache.h"
+#include "util/log.h"
 
 #include "ir3.h"
 
@@ -96,10 +97,21 @@ struct ir3_compiler {
 	/* The maximum number of constants, in vec4's, for compute shaders. */
 	uint16_t max_const_compute;
 
+	/* Number of instructions that the shader's base address and length
+	 * (instrlen divides instruction count by this) must be aligned to.
+	 */
+	uint32_t instr_align;
+
 	/* on a3xx, the unit of indirect const load is higher than later gens (in
 	 * vec4 units):
 	 */
 	uint32_t const_upload_unit;
+
+	/* Whether clip+cull distances are supported */
+	bool has_clip_cull;
+
+	/* Whether private memory is supported */
+	bool has_pvtmem;
 };
 
 void ir3_compiler_destroy(struct ir3_compiler *compiler);

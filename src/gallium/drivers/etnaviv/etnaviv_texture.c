@@ -98,6 +98,7 @@ etna_configure_sampler_ts(struct etna_sampler_ts *sts, struct pipe_sampler_view 
    assert(rsc->ts_bo && lev->ts_valid);
 
    sts->mode = lev->ts_mode;
+   sts->comp = lev->ts_compress_fmt >= 0;
    sts->TS_SAMPLER_CONFIG =
       VIVS_TS_SAMPLER_CONFIG_ENABLE |
       COND(lev->ts_compress_fmt >= 0, VIVS_TS_SAMPLER_CONFIG_COMPRESSION) |
@@ -246,8 +247,10 @@ set_sampler_views(struct etna_context *ctx, unsigned start, unsigned end,
    uint32_t prev_active_sampler_views = ctx->active_sampler_views;
 
    for (i = start, j = 0; j < nr; i++, j++, mask <<= 1) {
-      pipe_sampler_view_reference(&ctx->sampler_view[i], views[j]);
-      if (views[j]) {
+      struct pipe_sampler_view *view = views ? views[i] : NULL;
+
+      pipe_sampler_view_reference(&ctx->sampler_view[i], view);
+      if (view) {
          ctx->active_sampler_views |= mask;
          ctx->dirty_sampler_views |= mask;
       } else

@@ -307,11 +307,6 @@ v3d_write_uniforms(struct v3d_context *v3d, struct v3d_job *job,
                                                       data));
                         break;
 
-                case QUNIFORM_ALPHA_REF:
-                        cl_aligned_f(&uniforms,
-                                     v3d->zsa->base.alpha.ref_value);
-                        break;
-
                 case QUNIFORM_LINE_WIDTH:
                         cl_aligned_f(&uniforms,
                                      v3d->rasterizer->base.line_width);
@@ -352,7 +347,7 @@ v3d_write_uniforms(struct v3d_context *v3d, struct v3d_job *job,
                         break;
                 }
 
-                case QUNIFORM_GET_BUFFER_SIZE:
+                case QUNIFORM_GET_SSBO_SIZE:
                         cl_aligned_u32(&uniforms,
                                        v3d->ssbo[stage].sb[data].buffer_size);
                         break;
@@ -457,7 +452,7 @@ v3d_set_shader_uniform_dirty_flags(struct v3d_compiled_shader *shader)
                         break;
 
                 case QUNIFORM_SSBO_OFFSET:
-                case QUNIFORM_GET_BUFFER_SIZE:
+                case QUNIFORM_GET_SSBO_SIZE:
                         dirty |= VC5_DIRTY_SSBO;
                         break;
 
@@ -467,10 +462,6 @@ v3d_set_shader_uniform_dirty_flags(struct v3d_compiled_shader *shader)
                 case QUNIFORM_IMAGE_DEPTH:
                 case QUNIFORM_IMAGE_ARRAY_SIZE:
                         dirty |= VC5_DIRTY_SHADER_IMAGE;
-                        break;
-
-                case QUNIFORM_ALPHA_REF:
-                        dirty |= VC5_DIRTY_ZSA;
                         break;
 
                 case QUNIFORM_LINE_WIDTH:

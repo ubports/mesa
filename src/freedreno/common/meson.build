@@ -21,9 +21,13 @@
 libfreedreno_common = static_library(
   'freedreno_common',
   [
+    'disasm.h',
+    'freedreno_dev_info.c',
+    'freedreno_dev_info.h',
     'freedreno_uuid.c',
     'freedreno_uuid.h',
     'freedreno_guardband.h',
+    sha1_h,
   ],
   include_directories : [inc_freedreno, inc_include, inc_src, inc_gallium],
   c_args : [no_override_init_args],

@@ -147,6 +147,7 @@ struct brw_wm_prog_key;
 struct brw_wm_prog_data;
 struct brw_cs_prog_key;
 struct brw_cs_prog_data;
+struct brw_label;
 
 enum brw_pipeline {
    BRW_RENDER_PIPELINE,
@@ -387,7 +388,7 @@ struct brw_cache {
 
 #define perf_debug(...) do {                                    \
    static GLuint msg_id = 0;                                    \
-   if (unlikely(INTEL_DEBUG & DEBUG_PERF))                      \
+   if (INTEL_DEBUG & DEBUG_PERF)                                \
       dbg_printf(__VA_ARGS__);                                  \
    if (brw->perf_debug)                                         \
       _mesa_gl_debugf(&brw->ctx, &msg_id,                       \
@@ -812,8 +813,6 @@ struct brw_context
    bool disable_throttling;
    bool precompile;
    bool dual_color_blend_by_location;
-
-   driOptionCache optionCache;
    /** @} */
 
    GLuint primitive; /**< Hardware primitive, such as _3DPRIM_TRILIST. */
@@ -1201,6 +1200,7 @@ struct brw_context
    struct {
       bool in_progress;
       bool enable_cut_index;
+      unsigned restart_index;
    } prim_restart;
 
    /** Computed depth/stencil/hiz state from the current attached
@@ -1250,6 +1250,7 @@ struct brw_context
 
    __DRIcontext *driContext;
    struct intel_screen *screen;
+   void *mem_ctx;
 };
 
 /* brw_clear.c */

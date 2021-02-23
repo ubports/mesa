@@ -103,9 +103,6 @@ brw_blorp_init(struct brw_context *brw)
    case 9:
       brw->blorp.exec = gen9_blorp_exec;
       break;
-   case 10:
-      brw->blorp.exec = gen10_blorp_exec;
-      break;
    case 11:
       brw->blorp.exec = gen11_blorp_exec;
       break;
@@ -164,8 +161,7 @@ blorp_surf_for_miptree(struct brw_context *brw,
        * surface.  Without one, it does nothing.
        */
       surf->clear_color =
-         intel_miptree_get_clear_color(devinfo, mt, mt->surf.format,
-                                       !is_render_target, (struct brw_bo **)
+         intel_miptree_get_clear_color(mt, (struct brw_bo **)
                                        &surf->clear_color_addr.buffer,
                                        &surf->clear_color_addr.offset);
 
@@ -449,8 +445,6 @@ brw_blorp_copy_miptrees(struct brw_context *brw,
                         unsigned dst_x, unsigned dst_y,
                         unsigned src_width, unsigned src_height)
 {
-   const struct gen_device_info *devinfo = &brw->screen->devinfo;
-
    DBG("%s from %dx %s mt %p %d %d (%d,%d) %dx%d"
        "to %dx %s mt %p %d %d (%d,%d)\n",
        __func__,
@@ -475,12 +469,7 @@ brw_blorp_copy_miptrees(struct brw_context *brw,
    case ISL_AUX_USAGE_MCS:
    case ISL_AUX_USAGE_CCS_E:
       src_aux_usage = src_mt->aux_usage;
-      /* Prior to gen9, fast-clear only supported 0/1 clear colors.  Since
-       * we're going to re-interpret the format as an integer format possibly
-       * with a different number of components, we can't handle clear colors
-       * until gen9.
-       */
-      src_clear_supported = devinfo->gen >= 9;
+      src_clear_supported = false;
       break;
    default:
       src_aux_usage = ISL_AUX_USAGE_NONE;
@@ -492,12 +481,7 @@ brw_blorp_copy_miptrees(struct brw_context *brw,
    case ISL_AUX_USAGE_MCS:
    case ISL_AUX_USAGE_CCS_E:
       dst_aux_usage = dst_mt->aux_usage;
-      /* Prior to gen9, fast-clear only supported 0/1 clear colors.  Since
-       * we're going to re-interpret the format as an integer format possibly
-       * with a different number of components, we can't handle clear colors
-       * until gen9.
-       */
-      dst_clear_supported = devinfo->gen >= 9;
+      dst_clear_supported = false;
       break;
    default:
       dst_aux_usage = ISL_AUX_USAGE_NONE;
@@ -853,7 +837,6 @@ blorp_get_client_bo(struct brw_context *brw,
                                                    format, type,
                                                    d - 1, h - 1, w);
    const uint32_t stride = _mesa_image_row_stride(packing, w, format, type);
-   const uint32_t cpp = _mesa_bytes_per_pixel(format, type);
    const uint32_t size = last_pixel - first_pixel;
 
    *row_stride_out = stride;
@@ -861,9 +844,15 @@ blorp_get_client_bo(struct brw_context *brw,
 
    if (packing->BufferObj) {
       const uint32_t offset = first_pixel + (intptr_t)pixels;
-      if (!read_only && ((offset % cpp) || (stride % cpp))) {
-         perf_debug("Bad PBO alignment; fallback to CPU mapping\n");
-         return NULL;
+
+      if (!read_only) {
+         const int32_t cpp = _mesa_bytes_per_pixel(format, type);
+         assert(cpp > 0);
+
+         if ((offset % cpp) || (stride % cpp)) {
+            perf_debug("Bad PBO alignment; fallback to CPU mapping\n");
+            return NULL;
+         }
       }
 
       /* This is a user-provided PBO. We just need to get the BO out */

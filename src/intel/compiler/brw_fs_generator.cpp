@@ -191,9 +191,9 @@ fs_generator::fs_generator(const struct brw_compiler *compiler, void *log_data,
 
    : compiler(compiler), log_data(log_data),
      devinfo(compiler->devinfo),
-     prog_data(prog_data),
+     prog_data(prog_data), dispatch_width(0),
      runtime_check_aads_emit(runtime_check_aads_emit), debug_flag(false),
-     stage(stage), mem_ctx(mem_ctx)
+     shader_name(NULL), stage(stage), mem_ctx(mem_ctx)
 {
    p = rzalloc(mem_ctx, struct brw_codegen);
    brw_init_codegen(devinfo, p, mem_ctx);
@@ -222,7 +222,7 @@ public:
 };
 
 bool
-fs_generator::patch_discard_jumps_to_fb_writes()
+fs_generator::patch_halt_jumps()
 {
    if (this->discard_halt_patches.is_empty())
       return false;
@@ -468,7 +468,15 @@ fs_generator::generate_mov_indirect(fs_inst *inst,
 
       reg.nr = imm_byte_offset / REG_SIZE;
       reg.subnr = imm_byte_offset % REG_SIZE;
-      brw_MOV(p, dst, reg);
+      if (type_sz(reg.type) > 4 && !devinfo->has_64bit_float) {
+         brw_MOV(p, subscript(dst, BRW_REGISTER_TYPE_D, 0),
+                    subscript(reg, BRW_REGISTER_TYPE_D, 0));
+         brw_set_default_swsb(p, tgl_swsb_null());
+         brw_MOV(p, subscript(dst, BRW_REGISTER_TYPE_D, 1),
+                    subscript(reg, BRW_REGISTER_TYPE_D, 1));
+      } else {
+         brw_MOV(p, dst, reg);
+      }
    } else {
       /* Prior to Broadwell, there are only 8 address registers. */
       assert(inst->exec_size <= 8 || devinfo->gen >= 8);
@@ -591,6 +599,9 @@ fs_generator::generate_shuffle(fs_inst *inst,
                                struct brw_reg src,
                                struct brw_reg idx)
 {
+   assert(src.file == BRW_GENERAL_REGISTER_FILE);
+   assert(!src.abs && !src.negate);
+
    /* Ivy bridge has some strange behavior that makes this a real pain to
     * implement for 64-bit values so we just don't bother.
     */
@@ -642,15 +653,54 @@ fs_generator::generate_shuffle(fs_inst *inst,
             group_idx = retype(spread(group_idx, 2), BRW_REGISTER_TYPE_W);
          }
 
+         uint32_t src_start_offset = src.nr * REG_SIZE + src.subnr;
+
+         /* From the Haswell PRM:
+          *
+          *    "When a sequence of NoDDChk and NoDDClr are used, the last
+          *    instruction that completes the scoreboard clear must have a
+          *    non-zero execution mask. This means, if any kind of predication
+          *    can change the execution mask or channel enable of the last
+          *    instruction, the optimization must be avoided.  This is to
+          *    avoid instructions being shot down the pipeline when no writes
+          *    are required."
+          *
+          * Whenever predication is enabled or the instructions being emitted
+          * aren't the full width, it's possible that it will be run with zero
+          * channels enabled so we can't use dependency control without
+          * running the risk of a hang if an instruction gets shot down.
+          */
+         const bool use_dep_ctrl = !inst->predicate &&
+                                   lower_width == dispatch_width;
+         brw_inst *insn;
+
+         /* Due to a hardware bug some platforms (particularly Gen11+) seem
+          * to require the address components of all channels to be valid
+          * whether or not they're active, which causes issues if we use VxH
+          * addressing under non-uniform control-flow.  We can easily work
+          * around that by initializing the whole address register with a
+          * pipelined NoMask MOV instruction.
+          */
+         insn = brw_MOV(p, addr, brw_imm_uw(src_start_offset));
+         brw_inst_set_mask_control(devinfo, insn, BRW_MASK_DISABLE);
+         brw_inst_set_pred_control(devinfo, insn, BRW_PREDICATE_NONE);
+         if (devinfo->gen >= 12)
+            brw_set_default_swsb(p, tgl_swsb_null());
+         else
+            brw_inst_set_no_dd_clear(devinfo, insn, use_dep_ctrl);
+
          /* Take into account the component size and horizontal stride. */
          assert(src.vstride == src.hstride + src.width);
-         brw_SHL(p, addr, group_idx,
-                 brw_imm_uw(util_logbase2(type_sz(src.type)) +
-                            src.hstride - 1));
+         insn = brw_SHL(p, addr, group_idx,
+                        brw_imm_uw(util_logbase2(type_sz(src.type)) +
+                                   src.hstride - 1));
+         if (devinfo->gen >= 12)
+            brw_set_default_swsb(p, tgl_swsb_regdist(1));
+         else
+            brw_inst_set_no_dd_check(devinfo, insn, use_dep_ctrl);
 
          /* Add on the register start offset */
-         brw_set_default_swsb(p, tgl_swsb_regdist(1));
-         brw_ADD(p, addr, addr, brw_imm_uw(src.nr * REG_SIZE + src.subnr));
+         brw_ADD(p, addr, addr, brw_imm_uw(src_start_offset));
 
          if (type_sz(src.type) > 4 &&
              ((devinfo->gen == 7 && !devinfo->is_haswell) ||
@@ -790,22 +840,7 @@ fs_generator::generate_urb_read(fs_inst *inst,
 void
 fs_generator::generate_urb_write(fs_inst *inst, struct brw_reg payload)
 {
-   brw_inst *insn;
-
-    /* WaClearTDRRegBeforeEOTForNonPS.
-     *
-     *   WA: Clear tdr register before send EOT in all non-PS shader kernels
-     *
-     *   mov(8) tdr0:ud 0x0:ud {NoMask}"
-     */
-   if (inst->eot && p->devinfo->gen == 10) {
-      brw_push_insn_state(p);
-      brw_set_default_mask_control(p, BRW_MASK_DISABLE);
-      brw_MOV(p, brw_tdr_reg(), brw_imm_uw(0));
-      brw_pop_insn_state(p);
-   }
-
-   insn = brw_next_insn(p, BRW_OPCODE_SEND);
+   brw_inst *insn = brw_next_insn(p, BRW_OPCODE_SEND);
 
    brw_set_dest(p, insn, brw_null_reg());
    brw_set_src0(p, insn, payload);
@@ -1418,7 +1453,7 @@ fs_generator::generate_ddy(const fs_inst *inst,
 }
 
 void
-fs_generator::generate_discard_jump(fs_inst *)
+fs_generator::generate_halt(fs_inst *)
 {
    /* This HALT will be patched up at FB write time to point UIP at the end of
     * the program, and at brw_uip_jip() JIP will be set to the end of the
@@ -1484,6 +1519,76 @@ fs_generator::generate_scratch_read_gen7(fs_inst *inst, struct brw_reg dst)
    assert(inst->exec_size <= 16 || inst->force_writemask_all);
 
    gen7_block_read_scratch(p, dst, inst->exec_size / 8, inst->offset);
+}
+
+/* The A32 messages take a buffer base address in header.5:[31:0] (See
+ * MH1_A32_PSM for typed messages or MH_A32_GO for byte/dword scattered
+ * and OWord block messages in the SKL PRM Vol. 2d for more details.)
+ * Unfortunately, there are a number of subtle differences:
+ *
+ * For the block read/write messages:
+ *
+ *   - We always stomp header.2 to fill in the actual scratch address (in
+ *     units of OWORDs) so we don't care what's in there.
+ *
+ *   - They rely on per-thread scratch space value in header.3[3:0] to do
+ *     bounds checking so that needs to be valid.  The upper bits of
+ *     header.3 are ignored, though, so we can copy all of g0.3.
+ *
+ *   - They ignore header.5[9:0] and assumes the address is 1KB aligned.
+ *
+ *
+ * For the byte/dword scattered read/write messages:
+ *
+ *   - We want header.2 to be zero because that gets added to the per-channel
+ *     offset in the non-header portion of the message.
+ *
+ *   - Contrary to what the docs claim, they don't do any bounds checking so
+ *     the value of header.3[3:0] doesn't matter.
+ *
+ *   - They consider all of header.5 for the base address and header.5[9:0]
+ *     are not ignored.  This means that we can't copy g0.5 verbatim because
+ *     g0.5[9:0] contains the FFTID on most platforms.  Instead, we have to
+ *     use an AND to mask off the bottom 10 bits.
+ *
+ *
+ * For block messages, just copying g0 gives a valid header because all the
+ * garbage gets ignored except for header.2 which we stomp as part of message
+ * setup.  For byte/dword scattered messages, we can just zero out the header
+ * and copy over the bits we need from g0.5.  This opcode, however, tries to
+ * satisfy the requirements of both by starting with 0 and filling out the
+ * information required by either set of opcodes.
+ */
+void
+fs_generator::generate_scratch_header(fs_inst *inst, struct brw_reg dst)
+{
+   assert(inst->exec_size == 8 && inst->force_writemask_all);
+   assert(dst.file == BRW_GENERAL_REGISTER_FILE);
+
+   dst.type = BRW_REGISTER_TYPE_UD;
+
+   brw_inst *insn = brw_MOV(p, dst, brw_imm_ud(0));
+   if (devinfo->gen >= 12)
+      brw_set_default_swsb(p, tgl_swsb_null());
+   else
+      brw_inst_set_no_dd_clear(p->devinfo, insn, true);
+
+   /* Copy the per-thread scratch space size from g0.3[3:0] */
+   brw_set_default_exec_size(p, BRW_EXECUTE_1);
+   insn = brw_AND(p, suboffset(dst, 3),
+                     retype(brw_vec1_grf(0, 3), BRW_REGISTER_TYPE_UD),
+                     brw_imm_ud(INTEL_MASK(3, 0)));
+   if (devinfo->gen < 12) {
+      brw_inst_set_no_dd_clear(p->devinfo, insn, true);
+      brw_inst_set_no_dd_check(p->devinfo, insn, true);
+   }
+
+   /* Copy the scratch base address from g0.5[31:10] */
+   insn = brw_AND(p, suboffset(dst, 5),
+                     retype(brw_vec1_grf(0, 5), BRW_REGISTER_TYPE_UD),
+                     brw_imm_ud(INTEL_MASK(31, 10)));
+   if (devinfo->gen < 12)
+      brw_inst_set_no_dd_check(p->devinfo, insn, true);
 }
 
 void
@@ -1775,8 +1880,7 @@ fs_generator::generate_code(const cfg_t *cfg, int dispatch_width,
                             struct brw_compile_stats *stats)
 {
    /* align to 64 byte boundary. */
-   while (p->next_insn_offset % 64)
-      brw_NOP(p);
+   brw_realign(p, 64);
 
    this->dispatch_width = dispatch_width;
 
@@ -2013,6 +2117,18 @@ fs_generator::generate_code(const cfg_t *cfg, int dispatch_width,
          }
          brw_CMP(p, dst, inst->conditional_mod, src[0], src[1]);
 	 break;
+      case BRW_OPCODE_CMPN:
+         if (inst->exec_size >= 16 && devinfo->gen == 7 && !devinfo->is_haswell &&
+             dst.file == BRW_ARCHITECTURE_REGISTER_FILE) {
+            /* For unknown reasons the WaCMPInstFlagDepClearedEarly workaround
+             * implemented in the compiler is not sufficient. Overriding the
+             * type when the destination is the null register is necessary but
+             * not sufficient by itself.
+             */
+            dst.type = BRW_REGISTER_TYPE_D;
+         }
+         brw_CMPN(p, dst, inst->conditional_mod, src[0], src[1]);
+         break;
       case BRW_OPCODE_SEL:
 	 brw_SEL(p, dst, src[0], src[1]);
 	 break;
@@ -2219,8 +2335,17 @@ fs_generator::generate_code(const cfg_t *cfg, int dispatch_width,
          fill_count++;
 	 break;
 
+      case SHADER_OPCODE_SCRATCH_HEADER:
+         generate_scratch_header(inst, dst);
+         break;
+
       case SHADER_OPCODE_MOV_INDIRECT:
          generate_mov_indirect(inst, dst, src[0], src[1]);
+         break;
+
+      case SHADER_OPCODE_MOV_RELOC_IMM:
+         assert(src[0].file == BRW_IMMEDIATE_VALUE);
+         brw_MOV_reloc_imm(p, dst, dst.type, src[0].ud);
          break;
 
       case SHADER_OPCODE_URB_READ_SIMD8:
@@ -2265,8 +2390,8 @@ fs_generator::generate_code(const cfg_t *cfg, int dispatch_width,
          send_count++;
          break;
 
-      case FS_OPCODE_DISCARD_JUMP:
-         generate_discard_jump(inst);
+      case BRW_OPCODE_HALT:
+         generate_halt(inst);
          break;
 
       case SHADER_OPCODE_SHADER_TIME_ADD:
@@ -2419,11 +2544,11 @@ fs_generator::generate_code(const cfg_t *cfg, int dispatch_width,
           generate_pack_half_2x16_split(inst, dst, src[0], src[1]);
           break;
 
-      case FS_OPCODE_PLACEHOLDER_HALT:
+      case SHADER_OPCODE_HALT_TARGET:
          /* This is the place where the final HALT needs to be inserted if
           * we've emitted any discards.  If not, this will emit no code.
           */
-         if (!patch_discard_jumps_to_fb_writes()) {
+         if (!patch_halt_jumps()) {
             if (unlikely(debug_flag)) {
                disasm_info->use_tail = true;
             }
@@ -2481,6 +2606,35 @@ fs_generator::generate_code(const cfg_t *cfg, int dispatch_width,
          assert(src[0].file == BRW_IMMEDIATE_VALUE);
          assert(src[1].file == BRW_IMMEDIATE_VALUE);
          brw_float_controls_mode(p, src[0].d, src[1].d);
+         break;
+
+      case SHADER_OPCODE_GET_DSS_ID:
+         /* The Slice, Dual-SubSlice, SubSlice, EU, and Thread IDs are all
+          * stored in sr0.0.  Normally, for reading from HW regs, we'd just do
+          * this in the IR and let the back-end generate some code but these
+          * live in the state register which tends to have special rules.
+          *
+          * For convenience, we combine Slice ID and Dual-SubSlice ID into a
+          * single ID.
+          */
+         if (devinfo->gen == 12) {
+            /* There is a SWSB restriction that requires that any time sr0 is
+             * accessed both the instruction doing the access and the next one
+             * have SWSB set to RegDist(1).
+             */
+            if (brw_get_default_swsb(p).mode != TGL_SBID_NULL)
+               brw_SYNC(p, TGL_SYNC_NOP);
+            brw_set_default_swsb(p, tgl_swsb_regdist(1));
+            brw_SHR(p, dst, brw_sr0_reg(0), brw_imm_ud(9));
+            brw_set_default_swsb(p, tgl_swsb_regdist(1));
+            brw_AND(p, dst, dst, brw_imm_ud(0x1f));
+         } else {
+            /* These move around basically every hardware generation, so don't
+             * do any >= checks and fail if the platform hasn't explicitly
+             * been enabled here.
+             */
+            unreachable("Unsupported platform");
+         }
          break;
 
       default:
@@ -2553,12 +2707,19 @@ fs_generator::generate_code(const cfg_t *cfg, int dispatch_width,
 
       /* overriding the shader makes disasm_info invalid */
       if (!brw_try_override_assembly(p, start_offset, sha1buf)) {
-         dump_assembly(p->store, disasm_info, perf.block_latency);
+         dump_assembly(p->store, start_offset, p->next_insn_offset,
+                       disasm_info, perf.block_latency);
       } else {
          fprintf(stderr, "Successfully overrode shader with sha1 %s\n\n", sha1buf);
       }
    }
    ralloc_free(disasm_info);
+#ifndef NDEBUG
+   if (!validated && !debug_flag) {
+      fprintf(stderr,
+            "Validation failed. Rerun with INTEL_DEBUG=shaders to get more information.\n");
+   }
+#endif
    assert(validated);
 
    compiler->shader_debug_log(log_data,
@@ -2587,8 +2748,20 @@ fs_generator::generate_code(const cfg_t *cfg, int dispatch_width,
    return start_offset;
 }
 
+void
+fs_generator::add_const_data(void *data, unsigned size)
+{
+   assert(prog_data->const_data_size == 0);
+   if (size > 0) {
+      prog_data->const_data_size = size;
+      prog_data->const_data_offset = brw_append_data(p, data, size, 32);
+   }
+}
+
 const unsigned *
 fs_generator::get_assembly()
 {
+   prog_data->relocs = brw_get_shader_relocs(p, &prog_data->num_relocs);
+
    return brw_get_program(p, &prog_data->program_size);
 }

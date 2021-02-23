@@ -42,13 +42,14 @@
 #include "ir/lima_ir.h"
 
 static const nir_shader_compiler_options vs_nir_options = {
-   .lower_ffma = true,
+   .lower_ffma16 = true,
+   .lower_ffma32 = true,
+   .lower_ffma64 = true,
    .lower_fpow = true,
    .lower_ffract = true,
    .lower_fdiv = true,
    .lower_fmod = true,
    .lower_fsqrt = true,
-   .lower_sub = true,
    .lower_flrp32 = true,
    .lower_flrp64 = true,
    /* could be implemented by clamp */
@@ -60,11 +61,12 @@ static const nir_shader_compiler_options vs_nir_options = {
 };
 
 static const nir_shader_compiler_options fs_nir_options = {
-   .lower_ffma = true,
+   .lower_ffma16 = true,
+   .lower_ffma32 = true,
+   .lower_ffma64 = true,
    .lower_fpow = true,
    .lower_fdiv = true,
    .lower_fmod = true,
-   .lower_sub = true,
    .lower_flrp32 = true,
    .lower_flrp64 = true,
    .lower_fsign = true,
@@ -187,6 +189,17 @@ lima_alu_to_scalar_filter_cb(const nir_instr *instr, const void *data)
    return false;
 }
 
+static bool
+lima_vec_to_movs_filter_cb(const nir_instr *instr, unsigned writemask,
+                           const void *data)
+{
+   assert(writemask > 0);
+   if (util_bitcount(writemask) == 1)
+      return true;
+
+   return !lima_alu_to_scalar_filter_cb(instr, data);
+}
+
 void
 lima_program_optimize_fs_nir(struct nir_shader *s,
                              struct nir_lower_tex_options *tex_options)
@@ -201,7 +214,7 @@ lima_program_optimize_fs_nir(struct nir_shader *s,
 
    do {
       progress = false;
-      NIR_PASS(progress, s, nir_opt_vectorize);
+      NIR_PASS(progress, s, nir_opt_vectorize, NULL, NULL);
    } while (progress);
 
    do {
@@ -248,7 +261,7 @@ lima_program_optimize_fs_nir(struct nir_shader *s,
    NIR_PASS_V(s, nir_remove_dead_variables, nir_var_function_temp, NULL);
 
    NIR_PASS_V(s, nir_move_vec_src_uses_to_dest);
-   NIR_PASS_V(s, nir_lower_vec_to_movs);
+   NIR_PASS_V(s, nir_lower_vec_to_movs, lima_vec_to_movs_filter_cb, NULL);
 
    NIR_PASS_V(s, lima_nir_duplicate_load_uniforms);
    NIR_PASS_V(s, lima_nir_duplicate_load_inputs);

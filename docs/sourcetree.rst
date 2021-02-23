@@ -195,7 +195,7 @@ each directory.
 
          -  **d3dadapter9** - d3dadapter9.so for Wine
          -  **dri** - libgallium_dri.so loaded by libGL.so
-         -  **graw** - raw gallium interface without a frontend
+         -  **graw** - raw Gallium interface without a frontend
          -  XXX more
 
    -  **glx** - The GLX library code for building libGL.so using DRI
@@ -204,8 +204,10 @@ each directory.
    -  **panfrost** - Panfrost-specific sources
 
          -  **bifrost** - shader compiler for the Bifrost generation GPUs
+         -  **lib** - GPU data structures (command stream) support code`
          -  **midgard** - shader compiler for the Midgard generation GPUs
-         -  **pandecode** - command stream debugger
+         -  **shared** - shared Mali code between Lima and Panfrost
+         -  **util** - shared code between Midgard and Bifrost shader compilers
 
    -  **util** - Various utility codes
    -  **vulkan** - Common code for Vulkan drivers

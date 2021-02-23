@@ -44,11 +44,6 @@
 #include <util/timespec.h>
 #include <util/u_vector.h>
 
-#define typed_memcpy(dest, src, count) ({ \
-   STATIC_ASSERT(sizeof(*src) == sizeof(*dest)); \
-   memcpy((dest), (src), (count) * sizeof(*(src))); \
-})
-
 struct wsi_wayland;
 
 struct wsi_wl_display_drm {
@@ -551,7 +546,7 @@ wsi_wl_surface_get_capabilities(VkIcdSurfaceBase *surface,
    /* There is no real maximum */
    caps->maxImageCount = 0;
 
-   caps->currentExtent = (VkExtent2D) { -1, -1 };
+   caps->currentExtent = (VkExtent2D) { UINT32_MAX, UINT32_MAX };
    caps->minImageExtent = (VkExtent2D) { 1, 1 };
    caps->maxImageExtent = (VkExtent2D) {
       wsi_device->maxImageDimension2D,
@@ -695,7 +690,7 @@ wsi_wl_surface_get_present_rectangles(VkIcdSurfaceBase *surface,
       /* We don't know a size so just return the usual "I don't know." */
       *rect = (VkRect2D) {
          .offset = { 0, 0 },
-         .extent = { -1, -1 },
+         .extent = { UINT32_MAX, UINT32_MAX },
       };
    }
 

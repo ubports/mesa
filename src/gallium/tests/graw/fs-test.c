@@ -238,7 +238,7 @@ static void draw( void )
 
    graw_save_surface_to_file(ctx, surf, NULL);
 
-   screen->flush_frontbuffer(screen, rttex, 0, 0, window, NULL);
+   screen->flush_frontbuffer(screen, ctx, rttex, 0, 0, window, NULL);
 }
 
 #define SIZE 16
@@ -314,7 +314,7 @@ static void init_tex( void )
    ctx->texture_subdata(ctx,
                         samptex,
                         0,
-                        PIPE_TRANSFER_WRITE,
+                        PIPE_MAP_WRITE,
                         &box,
                         tex2d,
                         sizeof tex2d[0],
@@ -328,7 +328,7 @@ static void init_tex( void )
       uint32_t *ptr;
       ptr = pipe_transfer_map(ctx, samptex,
                               0, 0, /* level, layer */
-                              PIPE_TRANSFER_READ,
+                              PIPE_MAP_READ,
                               0, 0, SIZE, SIZE, &t); /* x, y, width, height */
 
       if (memcmp(ptr, tex2d, sizeof tex2d) != 0) {

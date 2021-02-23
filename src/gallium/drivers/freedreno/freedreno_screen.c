@@ -57,12 +57,14 @@
 #include "a5xx/fd5_screen.h"
 #include "a6xx/fd6_screen.h"
 
+/* for fd_get_driver/device_uuid() */
+#include "common/freedreno_uuid.h"
 
 #include "ir3/ir3_nir.h"
 #include "ir3/ir3_compiler.h"
 #include "a2xx/ir2.h"
 
-static const struct debug_named_value debug_options[] = {
+static const struct debug_named_value fd_debug_options[] = {
 		{"msgs",      FD_DBG_MSGS,   "Print debug messages"},
 		{"disasm",    FD_DBG_DISASM, "Dump TGSI and adreno shader disassembly (a2xx only, see IR3_SHADER_DEBUG)"},
 		{"dclear",    FD_DBG_DCLEAR, "Mark all state dirty after clear"},
@@ -70,7 +72,7 @@ static const struct debug_named_value debug_options[] = {
 		{"noscis",    FD_DBG_NOSCIS, "Disable scissor optimization"},
 		{"direct",    FD_DBG_DIRECT, "Force inline (SS_DIRECT) state loads"},
 		{"nobypass",  FD_DBG_NOBYPASS, "Disable GMEM bypass"},
-		{"log",       FD_DBG_LOG,    "Enable GPU timestamp based logging (a6xx+)"},
+		/* BIT(7) */
 		{"nobin",     FD_DBG_NOBIN,  "Disable hw binning"},
 		{"nogmem",    FD_DBG_NOGMEM,  "Disable GMEM rendering (bypass only)"},
 		/* BIT(10) */
@@ -95,7 +97,7 @@ static const struct debug_named_value debug_options[] = {
 		DEBUG_NAMED_VALUE_END
 };
 
-DEBUG_GET_ONCE_FLAGS_OPTION(fd_mesa_debug, "FD_MESA_DEBUG", debug_options, 0)
+DEBUG_GET_ONCE_FLAGS_OPTION(fd_mesa_debug, "FD_MESA_DEBUG", fd_debug_options, 0)
 
 int fd_mesa_debug = 0;
 bool fd_binning_enabled = true;
@@ -159,6 +161,8 @@ fd_screen_destroy(struct pipe_screen *pscreen)
 	slab_destroy_parent(&screen->transfer_pool);
 
 	simple_mtx_destroy(&screen->lock);
+
+	u_transfer_helper_destroy(pscreen->transfer_helper);
 
 	if (screen->compiler)
 		ir3_compiler_destroy(screen->compiler);
@@ -230,7 +234,6 @@ fd_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 	case PIPE_CAP_PCI_BUS:
 	case PIPE_CAP_PCI_DEVICE:
 	case PIPE_CAP_PCI_FUNCTION:
-	case PIPE_CAP_DEPTH_CLIP_DISABLE_SEPARATE:
 		return 0;
 
 	case PIPE_CAP_FRAGMENT_SHADER_TEXTURE_LOD:
@@ -260,10 +263,16 @@ fd_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 		return is_a6xx(screen);
 
 	case PIPE_CAP_DEPTH_CLIP_DISABLE:
-		return is_a3xx(screen) || is_a4xx(screen);
+		return is_a3xx(screen) || is_a4xx(screen) || is_a6xx(screen);
+
+	case PIPE_CAP_DEPTH_CLIP_DISABLE_SEPARATE:
+		return is_a6xx(screen);
 
 	case PIPE_CAP_POLYGON_OFFSET_CLAMP:
 		return is_a4xx(screen) || is_a5xx(screen) || is_a6xx(screen);
+
+	case PIPE_CAP_PREFER_IMM_ARRAYS_AS_CONSTBUF:
+		return 0;
 
 	case PIPE_CAP_TEXTURE_BUFFER_OFFSET_ALIGNMENT:
 		if (is_a3xx(screen)) return 16;
@@ -296,11 +305,16 @@ fd_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 		return is_a4xx(screen);
 
 	case PIPE_CAP_CONSTANT_BUFFER_OFFSET_ALIGNMENT:
-		return 64;
+		return is_a2xx(screen) ? 64 : 32;
 
 	case PIPE_CAP_GLSL_FEATURE_LEVEL:
 	case PIPE_CAP_GLSL_FEATURE_LEVEL_COMPATIBILITY:
-		return is_ir3(screen) ? 140 : 120;
+		if (is_a6xx(screen))
+			return 330;
+		else if (is_ir3(screen))
+			return 140;
+		else
+			return 120;
 
 	case PIPE_CAP_ESSL_FEATURE_LEVEL:
 		/* we can probably enable 320 for a5xx too, but need to test: */
@@ -358,7 +372,7 @@ fd_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 		return 1;
 
 	case PIPE_CAP_MAX_VARYINGS:
-		return 16;
+		return is_a6xx(screen) ? 31 : 16;
 
 	case PIPE_CAP_MAX_SHADER_PATCH_VARYINGS:
 		/* We don't really have a limit on this, it all goes into the main
@@ -430,7 +444,7 @@ fd_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 	case PIPE_CAP_MAX_RENDER_TARGETS:
 		return screen->max_rts;
 	case PIPE_CAP_MAX_DUAL_SOURCE_RENDER_TARGETS:
-		return is_a3xx(screen) ? 1 : 0;
+		return (is_a3xx(screen) || is_a6xx(screen)) ? 1 : 0;
 
 	/* Queries. */
 	case PIPE_CAP_OCCLUSION_QUERY:
@@ -451,8 +465,16 @@ fd_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 		return 10;
 	case PIPE_CAP_UMA:
 		return 1;
+	case PIPE_CAP_MEMOBJ:
+		return fd_device_version(screen->dev) >= FD_VERSION_MEMORY_FD;
 	case PIPE_CAP_NATIVE_FENCE_FD:
 		return fd_device_version(screen->dev) >= FD_VERSION_FENCE_FD;
+	case PIPE_CAP_FENCE_SIGNAL:
+		return screen->has_syncobj;
+	case PIPE_CAP_CULL_DISTANCE:
+		return is_a6xx(screen);
+	case PIPE_CAP_SHADER_STENCIL_EXPORT:
+		return is_a6xx(screen);
 	default:
 		return u_pipe_screen_get_param_defaults(pscreen, param);
 	}
@@ -486,7 +508,7 @@ fd_screen_get_paramf(struct pipe_screen *pscreen, enum pipe_capf param)
 	case PIPE_CAPF_CONSERVATIVE_RASTER_DILATE_GRANULARITY:
 		return 0.0f;
 	}
-	debug_printf("unknown paramf %d\n", param);
+	mesa_loge("unknown paramf %d", param);
 	return 0;
 }
 
@@ -513,7 +535,7 @@ fd_screen_get_shader_param(struct pipe_screen *pscreen,
 			break;
 		return 0;
 	default:
-		DBG("unknown shader type %d", shader);
+		mesa_loge("unknown shader type %d", shader);
 		return 0;
 	}
 
@@ -527,8 +549,11 @@ fd_screen_get_shader_param(struct pipe_screen *pscreen,
 	case PIPE_SHADER_CAP_MAX_CONTROL_FLOW_DEPTH:
 		return 8; /* XXX */
 	case PIPE_SHADER_CAP_MAX_INPUTS:
+		if (shader == PIPE_SHADER_GEOMETRY && is_a6xx(screen))
+			return 16;
+		return is_a6xx(screen) ? 32 : 16;
 	case PIPE_SHADER_CAP_MAX_OUTPUTS:
-		return 16;
+		return is_a6xx(screen) ? 32 : 16;
 	case PIPE_SHADER_CAP_MAX_TEMPS:
 		return 64; /* Max native temporaries. */
 	case PIPE_SHADER_CAP_MAX_CONST_BUFFER_SIZE:
@@ -574,7 +599,7 @@ fd_screen_get_shader_param(struct pipe_screen *pscreen,
 	case PIPE_SHADER_CAP_INT64_ATOMICS:
 	case PIPE_SHADER_CAP_FP16_DERIVATIVES:
 	case PIPE_SHADER_CAP_INT16:
-	case PIPE_SHADER_CAP_GLSL_16BIT_TEMPS:
+	case PIPE_SHADER_CAP_GLSL_16BIT_CONSTS:
 		return 0;
 	case PIPE_SHADER_CAP_FP16:
 		return ((is_a5xx(screen) || is_a6xx(screen)) &&
@@ -626,7 +651,7 @@ fd_screen_get_shader_param(struct pipe_screen *pscreen,
 		}
 		return 0;
 	}
-	debug_printf("unknown shader param %d\n", param);
+	mesa_loge("unknown shader param %d", param);
 	return 0;
 }
 
@@ -787,6 +812,27 @@ fd_screen_query_dmabuf_modifiers(struct pipe_screen *pscreen,
 	*count = num;
 }
 
+static bool
+fd_screen_is_dmabuf_modifier_supported(struct pipe_screen *pscreen,
+		uint64_t modifier,
+		enum pipe_format format,
+		bool *external_only)
+{
+	struct fd_screen *screen = fd_screen(pscreen);
+	int i;
+
+	for (i = 0; i < screen->num_supported_modifiers; i++) {
+		if (modifier == screen->supported_modifiers[i]) {
+			if (external_only)
+				*external_only = false;
+
+			return true;
+		}
+	}
+
+	return false;
+}
+
 struct fd_bo *
 fd_screen_bo_from_handle(struct pipe_screen *pscreen,
 		struct winsys_handle *whandle)
@@ -818,6 +864,20 @@ static void _fd_fence_ref(struct pipe_screen *pscreen,
 		struct pipe_fence_handle *pfence)
 {
 	fd_fence_ref(ptr, pfence);
+}
+
+static void
+fd_screen_get_device_uuid(struct pipe_screen *pscreen, char *uuid)
+{
+	struct fd_screen *screen = fd_screen(pscreen);
+
+	fd_get_device_uuid(uuid, screen->gpu_id);
+}
+
+static void
+fd_screen_get_driver_uuid(struct pipe_screen *pscreen, char *uuid)
+{
+	fd_get_driver_uuid(uuid);
 }
 
 struct pipe_screen *
@@ -859,7 +919,7 @@ fd_screen_create(struct fd_device *dev, struct renderonly *ro)
 		DBG("could not get GMEM size");
 		goto fail;
 	}
-	screen->gmemsize_bytes = val;
+	screen->gmemsize_bytes = env_var_as_unsigned("FD_MESA_GMEM", val);
 
 	if (fd_device_version(dev) >= FD_VERSION_GMEM_BASE) {
 		fd_pipe_get_param(screen->pipe, FD_GMEM_BASE, &screen->gmem_base);
@@ -912,6 +972,8 @@ fd_screen_create(struct fd_device *dev, struct renderonly *ro)
 	if (fd_device_version(dev) >= FD_VERSION_ROBUSTNESS)
 		screen->has_robustness = true;
 
+	screen->has_syncobj = fd_has_syncobj(screen->dev);
+
 	struct sysinfo si;
 	sysinfo(&si);
 	screen->ram_size = si.totalram;
@@ -962,25 +1024,11 @@ fd_screen_create(struct fd_device *dev, struct renderonly *ro)
 		fd6_screen_init(pscreen);
 		break;
 	default:
-		debug_printf("unsupported GPU: a%03d\n", screen->gpu_id);
+		mesa_loge("unsupported GPU: a%03d", screen->gpu_id);
 		goto fail;
 	}
 
-	if (screen->gpu_id >= 600) {
-		screen->gmem_alignw = 16;
-		screen->gmem_alignh = 4;
-		screen->tile_alignw = is_a650(screen) ? 96 : 32;
-		screen->tile_alignh = 32;
-		screen->num_vsc_pipes = 32;
-	} else if (screen->gpu_id >= 500) {
-		screen->gmem_alignw = screen->tile_alignw = 64;
-		screen->gmem_alignh = screen->tile_alignh = 32;
-		screen->num_vsc_pipes = 16;
-	} else {
-		screen->gmem_alignw = screen->tile_alignw = 32;
-		screen->gmem_alignh = screen->tile_alignh = 32;
-		screen->num_vsc_pipes = 8;
-	}
+	freedreno_dev_info_init(&screen->info, screen->gpu_id);
 
 	if (fd_mesa_debug & FD_DBG_PERFC) {
 		screen->perfcntr_groups = fd_perfcntrs(screen->gpu_id,
@@ -1026,6 +1074,10 @@ fd_screen_create(struct fd_device *dev, struct renderonly *ro)
 	pscreen->fence_get_fd = fd_fence_get_fd;
 
 	pscreen->query_dmabuf_modifiers = fd_screen_query_dmabuf_modifiers;
+	pscreen->is_dmabuf_modifier_supported = fd_screen_is_dmabuf_modifier_supported;
+
+	pscreen->get_device_uuid = fd_screen_get_device_uuid;
+	pscreen->get_driver_uuid = fd_screen_get_driver_uuid;
 
 	slab_create_parent(&screen->transfer_pool, sizeof(struct fd_transfer), 16);
 

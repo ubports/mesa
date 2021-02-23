@@ -103,6 +103,18 @@ trace_screen_get_device_vendor(struct pipe_screen *_screen)
 }
 
 
+static const void *
+trace_screen_get_compiler_options(struct pipe_screen *_screen,
+                                  enum pipe_shader_ir ir,
+                                  enum pipe_shader_type shader)
+{
+   struct trace_screen *tr_scr = trace_screen(_screen);
+   struct pipe_screen *screen = tr_scr->screen;
+
+   return screen->get_compiler_options(screen, ir, shader);
+}
+
+
 static struct disk_cache *
 trace_screen_get_disk_shader_cache(struct pipe_screen *_screen)
 {
@@ -279,6 +291,7 @@ trace_screen_context_create(struct pipe_screen *_screen, void *priv,
 
 static void
 trace_screen_flush_frontbuffer(struct pipe_screen *_screen,
+                               struct pipe_context *_pipe,
                                struct pipe_resource *resource,
                                unsigned level, unsigned layer,
                                void *context_private,
@@ -286,6 +299,7 @@ trace_screen_flush_frontbuffer(struct pipe_screen *_screen,
 {
    struct trace_screen *tr_scr = trace_screen(_screen);
    struct pipe_screen *screen = tr_scr->screen;
+   struct pipe_context *pipe = _pipe ? trace_context(_pipe)->pipe : NULL;
 
    trace_dump_call_begin("pipe_screen", "flush_frontbuffer");
 
@@ -297,7 +311,7 @@ trace_screen_flush_frontbuffer(struct pipe_screen *_screen,
    trace_dump_arg(ptr, context_private);
    */
 
-   screen->flush_frontbuffer(screen, resource, level, layer, context_private, sub_box);
+   screen->flush_frontbuffer(screen, pipe, resource, level, layer, context_private, sub_box);
 
    trace_dump_call_end();
 }
@@ -413,6 +427,7 @@ trace_screen_resource_get_param(struct pipe_screen *_screen,
                                 struct pipe_resource *resource,
                                 unsigned plane,
                                 unsigned layer,
+                                unsigned level,
                                 enum pipe_resource_param param,
                                 unsigned handle_usage,
                                 uint64_t *value)
@@ -424,7 +439,7 @@ trace_screen_resource_get_param(struct pipe_screen *_screen,
    /* TODO trace call */
 
    return screen->resource_get_param(screen, tr_pipe ? tr_pipe->pipe : NULL,
-                                     resource, plane, layer, param,
+                                     resource, plane, layer, level, param,
                                      handle_usage, value);
 }
 
@@ -704,6 +719,7 @@ trace_screen_create(struct pipe_screen *screen)
    tr_scr->base.get_name = trace_screen_get_name;
    tr_scr->base.get_vendor = trace_screen_get_vendor;
    tr_scr->base.get_device_vendor = trace_screen_get_device_vendor;
+   SCR_INIT(get_compiler_options);
    SCR_INIT(get_disk_shader_cache);
    tr_scr->base.get_param = trace_screen_get_param;
    tr_scr->base.get_shader_param = trace_screen_get_shader_param;

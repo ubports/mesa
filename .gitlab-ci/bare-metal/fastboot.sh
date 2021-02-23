@@ -57,7 +57,6 @@ set -ex
 # Clear out any previous run's artifacts.
 rm -rf results/
 mkdir -p results
-find artifacts/ -name serial\*.txt  | xargs rm -f
 
 # Create the rootfs in a temp dir
 rsync -a --delete $BM_ROOTFS/ rootfs/
@@ -65,15 +64,41 @@ rsync -a --delete $BM_ROOTFS/ rootfs/
 
 # Finally, pack it up into a cpio rootfs.  Skip the vulkan CTS since none of
 # these devices use it and it would take up space in the initrd.
+
+if [ -n "$PIGLIT_PROFILES" ]; then
+  EXCLUDE_FILTER="deqp|arb_gpu_shader5|arb_gpu_shader_fp64|arb_gpu_shader_int64|glsl-4.[0123456]0|arb_tessellation_shader"
+else
+  EXCLUDE_FILTER="piglit|python"
+fi
+
 pushd rootfs
 find -H | \
   egrep -v "external/(openglcts|vulkancts|amber|glslang|spirv-tools)" |
-  egrep -v "traces-db|apitrace|renderdoc|python" | \
+  egrep -v "traces-db|apitrace|renderdoc" | \
+  egrep -v $EXCLUDE_FILTER | \
   cpio -H newc -o | \
   xz --check=crc32 -T4 - > $CI_PROJECT_DIR/rootfs.cpio.gz
 popd
 
-cat $BM_KERNEL $BM_DTB > Image.gz-dtb
+# Make the combined kernel image and dtb for passing to fastboot.  For normal
+# Mesa development, we build the kernel and store it in the docker container
+# that this script is running in.
+#
+# However, container builds are expensive, so when you're hacking on the
+# kernel, it's nice to be able to skip the half hour container build and plus
+# moving that container to the runner.  So, if BM_KERNEL+BM_DTB are URLs,
+# fetch them instead of looking in the container.
+if echo "$BM_KERNEL $BM_DTB" | grep -q http; then
+  apt install -y wget
+
+  wget $BM_KERNEL -O kernel
+  wget $BM_DTB -O dtb
+
+  cat kernel dtb > Image.gz-dtb
+  rm kernel dtb
+else
+  cat $BM_KERNEL $BM_DTB > Image.gz-dtb
+fi
 
 abootimg \
   --create artifacts/fastboot.img \
@@ -90,38 +115,19 @@ if [ -n "$WEBDAV_CMDLINE" ]; then
   nginx
 fi
 
-# Start watching serial, and power up the device.
-if [ -n "$BM_SERIAL" ]; then
-  $BM/serial-buffer.py $BM_SERIAL | tee artifacts/serial-output.txt &
-else
-  PATH=$BM:$PATH $BM_SERIAL_SCRIPT | tee artifacts/serial-output.txt &
+export PATH=$BM:$PATH
+
+# Start background command for talking to serial if we have one.
+if [ -n "$BM_SERIAL_SCRIPT" ]; then
+  $BM_SERIAL_SCRIPT | tee results/serial-output.txt &
+
+  while [ ! -e results/serial-output.txt ]; do
+    sleep 1
+  done
 fi
 
-while [ ! -e artifacts/serial-output.txt ]; do
-  sleep 1
-done
-PATH=$BM:$PATH $BM_POWERUP
-
-# Once fastboot is ready, boot our image.
-$BM/expect-output.sh artifacts/serial-output.txt \
-  -f "fastboot: processing commands" \
-  -f "Listening for fastboot command on" \
-  -e "data abort"
-
-fastboot boot -s $BM_FASTBOOT_SERIAL artifacts/fastboot.img
-
-# Wait for the device to complete the deqp run
-$BM/expect-output.sh artifacts/serial-output.txt \
-    -f "bare-metal result" \
-    -e "---. end Kernel panic"
-
-# power down the device
-PATH=$BM:$PATH $BM_POWERDOWN
-
-set +e
-if grep -q "bare-metal result: pass" artifacts/serial-output.txt; then
-   exit 0
-else
-   exit 1
-fi
-
+$BM/fastboot_run.py \
+  --dev="$BM_SERIAL" \
+  --fbserial="$BM_FASTBOOT_SERIAL" \
+  --powerup="$BM_POWERUP" \
+  --powerdown="$BM_POWERDOWN"

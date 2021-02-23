@@ -27,7 +27,7 @@
 #include "u_queue.h"
 
 #include "c11/threads.h"
-
+#include "util/u_cpu_detect.h"
 #include "util/os_time.h"
 #include "util/u_string.h"
 #include "util/u_thread.h"
@@ -251,19 +251,16 @@ util_queue_thread_func(void *input)
 
    free(input);
 
-#ifdef HAVE_PTHREAD_SETAFFINITY
    if (queue->flags & UTIL_QUEUE_INIT_SET_FULL_THREAD_AFFINITY) {
       /* Don't inherit the thread affinity from the parent thread.
        * Set the full mask.
        */
-      cpu_set_t cpuset;
-      CPU_ZERO(&cpuset);
-      for (unsigned i = 0; i < CPU_SETSIZE; i++)
-         CPU_SET(i, &cpuset);
+      uint32_t mask[UTIL_MAX_CPUS / 32];
 
-      pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
+      memset(mask, 0xff, sizeof(mask));
+      util_set_current_thread_affinity(mask, NULL,
+                                       util_cpu_caps.num_cpu_mask_bits);
    }
-#endif
 
 #if defined(__linux__)
    if (queue->flags & UTIL_QUEUE_INIT_USE_MINIMUM_PRIORITY) {
@@ -696,5 +693,5 @@ util_queue_get_thread_time_nano(struct util_queue *queue, unsigned thread_index)
    if (thread_index >= queue->num_threads)
       return 0;
 
-   return u_thread_get_time_nano(queue->threads[thread_index]);
+   return util_thread_get_time_nano(queue->threads[thread_index]);
 }

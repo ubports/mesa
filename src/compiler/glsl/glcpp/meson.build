@@ -60,6 +60,7 @@ libglcpp_standalone = static_library(
   'glcpp_standalone',
   'pp_standalone_scaffolding.c',
   link_with : libglcpp,
+  dependencies : idep_mesautil,
   include_directories : [inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux],
   c_args : [no_override_init_args, c_msvc_compat_args, _extra_args],
   cpp_args : [cpp_msvc_compat_args, _extra_args],
@@ -70,7 +71,7 @@ libglcpp_standalone = static_library(
 glcpp = executable(
   'glcpp',
   'glcpp.c',
-  dependencies : [dep_m, idep_getopt],
+  dependencies : [dep_m, idep_getopt, idep_mesautil],
   include_directories : [inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux],
   link_with : [libglcpp_standalone, libglsl_util],
   c_args : [no_override_init_args, c_msvc_compat_args],
@@ -80,11 +81,18 @@ glcpp = executable(
 
 # FIXME: these fail on windows due to whitespace differences
 if with_any_opengl and with_tests and host_machine.system() != 'windows'
-  modes = ['unix', 'windows', 'oldmac', 'bizarro']
+  modes = ['unix', 'oldmac', 'bizarro']
   if dep_valgrind.found()
     modes += ['valgrind']
   endif
 
+  # For some unfathomable reason, three out of these four tests often time out
+  # when running within CI. On the assumption that there is some
+  # parallelisation badness happening rather than the non-UNIX tests entering
+  # infinite loops, try just marking them as serial-only.
+  #
+  # This should have a negligible impact on runtime since they are quick to
+  # execute.
   foreach m : modes
     test(
       'glcpp test (@0@)'.format(m),
@@ -96,6 +104,7 @@ if with_any_opengl and with_tests and host_machine.system() != 'windows'
       ],
       suite : ['compiler', 'glcpp'],
       timeout: 60,
+      is_parallel: false,
     )
   endforeach
 endif

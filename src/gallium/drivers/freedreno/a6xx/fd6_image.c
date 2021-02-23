@@ -38,7 +38,6 @@
 struct fd6_image {
 	struct pipe_resource *prsc;
 	enum pipe_format pfmt;
-	enum a6xx_format fmt;
 	enum a6xx_tex_type type;
 	bool srgb;
 	uint32_t cpp;
@@ -67,7 +66,6 @@ static void translate_image(struct fd6_image *img, const struct pipe_image_view 
 
 	img->prsc      = prsc;
 	img->pfmt      = format;
-	img->fmt       = fd6_pipe2tex(format);
 	img->type      = fd6_tex_type(prsc->target);
 	img->srgb      = util_format_is_srgb(format);
 	img->cpp       = rsc->layout.cpp;
@@ -91,6 +89,7 @@ static void translate_image(struct fd6_image *img, const struct pipe_image_view 
 		img->width  = sz & MASK(15);
 		img->height = sz >> 15;
 		img->depth  = 0;
+		img->level = 0;
 	} else {
 		img->buffer = false;
 
@@ -144,7 +143,6 @@ static void translate_buf(struct fd6_image *img, const struct pipe_shader_buffer
 
 	img->prsc      = prsc;
 	img->pfmt      = format;
-	img->fmt       = fd6_pipe2tex(format);
 	img->type      = fd6_tex_type(prsc->target);
 	img->srgb      = util_format_is_srgb(format);
 	img->cpp       = rsc->layout.cpp;
@@ -155,6 +153,7 @@ static void translate_buf(struct fd6_image *img, const struct pipe_shader_buffer
 	img->offset = pimg->buffer_offset;
 	img->pitch  = 0;
 	img->array_pitch = 0;
+	img->level = 0;
 
 	/* size is encoded with low 15b in WIDTH and high bits in HEIGHT,
 	 * in units of elements:
@@ -180,7 +179,8 @@ static void emit_image_tex(struct fd_ringbuffer *ring, struct fd6_image *img)
 		A6XX_TEX_CONST_2_TYPE(img->type) |
 		A6XX_TEX_CONST_2_PITCH(img->pitch));
 	OUT_RING(ring, A6XX_TEX_CONST_3_ARRAY_PITCH(img->array_pitch) |
-		COND(ubwc_enabled, A6XX_TEX_CONST_3_FLAG | A6XX_TEX_CONST_3_TILE_ALL));
+		COND(ubwc_enabled, A6XX_TEX_CONST_3_FLAG) |
+		COND(rsc->layout.tile_all, A6XX_TEX_CONST_3_TILE_ALL));
 	if (img->bo) {
 		OUT_RELOC(ring, img->bo, img->offset,
 				(uint64_t)A6XX_TEX_CONST_5_DEPTH(img->depth) << 32, 0);
@@ -246,7 +246,7 @@ static void emit_image_ssbo(struct fd_ringbuffer *ring, struct fd6_image *img)
 	enum a6xx_tile_mode tile_mode = fd_resource_tile_mode(img->prsc, img->level);
 	bool ubwc_enabled = fd_resource_ubwc_enabled(rsc, img->level);
 
-	OUT_RING(ring, A6XX_IBO_0_FMT(img->fmt) |
+	OUT_RING(ring, A6XX_IBO_0_FMT(fd6_pipe2tex(img->pfmt)) |
 		A6XX_IBO_0_TILE_MODE(tile_mode));
 	OUT_RING(ring, A6XX_IBO_1_WIDTH(img->width) |
 		A6XX_IBO_1_HEIGHT(img->height));

@@ -14,8 +14,16 @@ blit_resolve(struct zink_context *ctx, const struct pipe_blit_info *info)
        util_format_get_mask(info->src.format) != info->mask ||
        util_format_is_depth_or_stencil(info->dst.format) ||
        info->scissor_enable ||
-       info->alpha_blend ||
-       info->render_condition_enable)
+       info->alpha_blend)
+      return false;
+
+   if (info->src.box.width != info->dst.box.width ||
+       info->src.box.height != info->dst.box.height ||
+       info->src.box.depth != info->dst.box.depth)
+      return false;
+
+   if (info->render_condition_enable &&
+       ctx->render_condition_active)
       return false;
 
    struct zink_resource *src = zink_resource(info->src.resource);
@@ -28,34 +36,44 @@ blit_resolve(struct zink_context *ctx, const struct pipe_blit_info *info)
 
    struct zink_batch *batch = zink_batch_no_rp(ctx);
 
-   zink_batch_reference_resoure(batch, src);
-   zink_batch_reference_resoure(batch, dst);
+   zink_batch_reference_resource_rw(batch, src, false);
+   zink_batch_reference_resource_rw(batch, dst, true);
 
-   if (src->layout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
-      zink_resource_barrier(batch->cmdbuf, src, src->aspect,
-                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-
-   if (dst->layout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
-      zink_resource_barrier(batch->cmdbuf, dst, dst->aspect,
-                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+   zink_resource_setup_transfer_layouts(batch, src, dst);
 
    VkImageResolve region = {};
 
    region.srcSubresource.aspectMask = src->aspect;
    region.srcSubresource.mipLevel = info->src.level;
-   region.srcSubresource.baseArrayLayer = 0; // no clue
-   region.srcSubresource.layerCount = 1; // no clue
    region.srcOffset.x = info->src.box.x;
    region.srcOffset.y = info->src.box.y;
-   region.srcOffset.z = info->src.box.z;
+
+   if (src->base.array_size > 1) {
+      region.srcOffset.z = 0;
+      region.srcSubresource.baseArrayLayer = info->src.box.z;
+      region.srcSubresource.layerCount = info->src.box.depth;
+   } else {
+      assert(info->src.box.depth == 1);
+      region.srcOffset.z = info->src.box.z;
+      region.srcSubresource.baseArrayLayer = 0;
+      region.srcSubresource.layerCount = 1;
+   }
 
    region.dstSubresource.aspectMask = dst->aspect;
    region.dstSubresource.mipLevel = info->dst.level;
-   region.dstSubresource.baseArrayLayer = 0; // no clue
-   region.dstSubresource.layerCount = 1; // no clue
    region.dstOffset.x = info->dst.box.x;
    region.dstOffset.y = info->dst.box.y;
-   region.dstOffset.z = info->dst.box.z;
+
+   if (dst->base.array_size > 1) {
+      region.dstOffset.z = 0;
+      region.dstSubresource.baseArrayLayer = info->dst.box.z;
+      region.dstSubresource.layerCount = info->dst.box.depth;
+   } else {
+      assert(info->dst.box.depth == 1);
+      region.dstOffset.z = info->dst.box.z;
+      region.dstSubresource.baseArrayLayer = 0;
+      region.dstSubresource.layerCount = 1;
+   }
 
    region.extent.width = info->dst.box.width;
    region.extent.height = info->dst.box.height;
@@ -73,8 +91,11 @@ blit_native(struct zink_context *ctx, const struct pipe_blit_info *info)
    if (util_format_get_mask(info->dst.format) != info->mask ||
        util_format_get_mask(info->src.format) != info->mask ||
        info->scissor_enable ||
-       info->alpha_blend ||
-       info->render_condition_enable)
+       info->alpha_blend)
+      return false;
+
+   if (info->render_condition_enable &&
+       ctx->render_condition_active)
       return false;
 
    if (util_format_is_depth_or_stencil(info->dst.format) &&
@@ -94,38 +115,10 @@ blit_native(struct zink_context *ctx, const struct pipe_blit_info *info)
       return false;
 
    struct zink_batch *batch = zink_batch_no_rp(ctx);
-   zink_batch_reference_resoure(batch, src);
-   zink_batch_reference_resoure(batch, dst);
+   zink_batch_reference_resource_rw(batch, src, false);
+   zink_batch_reference_resource_rw(batch, dst, true);
 
-   if (src == dst) {
-      /* The Vulkan 1.1 specification says the following about valid usage
-       * of vkCmdBlitImage:
-       *
-       * "srcImageLayout must be VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR,
-       *  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL or VK_IMAGE_LAYOUT_GENERAL"
-       *
-       * and:
-       *
-       * "dstImageLayout must be VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR,
-       *  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL or VK_IMAGE_LAYOUT_GENERAL"
-       *
-       * Since we cant have the same image in two states at the same time,
-       * we're effectively left with VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR or
-       * VK_IMAGE_LAYOUT_GENERAL. And since this isn't a present-related
-       * operation, VK_IMAGE_LAYOUT_GENERAL seems most appropriate.
-       */
-      if (src->layout != VK_IMAGE_LAYOUT_GENERAL)
-         zink_resource_barrier(batch->cmdbuf, src, src->aspect,
-                               VK_IMAGE_LAYOUT_GENERAL);
-   } else {
-      if (src->layout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
-         zink_resource_barrier(batch->cmdbuf, src, src->aspect,
-                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-
-      if (dst->layout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
-         zink_resource_barrier(batch->cmdbuf, dst, dst->aspect,
-                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-   }
+   zink_resource_setup_transfer_layouts(batch, src, dst);
 
    VkImageBlit region = {};
    region.srcSubresource.aspectMask = src->aspect;
@@ -191,8 +184,17 @@ zink_blit(struct pipe_context *pctx,
    struct zink_resource *src = zink_resource(info->src.resource);
    struct zink_resource *dst = zink_resource(info->dst.resource);
    /* if we're copying between resources with matching aspects then we can probably just copy_region */
-   if (src->aspect == dst->aspect && util_try_blit_via_copy_region(pctx, info))
-      return;
+   if (src->aspect == dst->aspect) {
+      struct pipe_blit_info new_info = *info;
+
+      if (src->aspect & VK_IMAGE_ASPECT_STENCIL_BIT &&
+          new_info.render_condition_enable &&
+          !ctx->render_condition_active)
+         new_info.render_condition_enable = false;
+
+      if (util_try_blit_via_copy_region(pctx, &new_info))
+         return;
+   }
 
    if (!util_blitter_is_blit_supported(ctx->blitter, info)) {
       debug_printf("blit unsupported %s -> %s\n",
@@ -202,12 +204,15 @@ zink_blit(struct pipe_context *pctx,
    }
 
    util_blitter_save_blend(ctx->blitter, ctx->gfx_pipeline_state.blend_state);
-   util_blitter_save_depth_stencil_alpha(ctx->blitter, ctx->gfx_pipeline_state.depth_stencil_alpha_state);
+   util_blitter_save_depth_stencil_alpha(ctx->blitter, ctx->dsa_state);
    util_blitter_save_vertex_elements(ctx->blitter, ctx->element_state);
    util_blitter_save_stencil_ref(ctx->blitter, &ctx->stencil_ref);
    util_blitter_save_rasterizer(ctx->blitter, ctx->rast_state);
    util_blitter_save_fragment_shader(ctx->blitter, ctx->gfx_stages[PIPE_SHADER_FRAGMENT]);
    util_blitter_save_vertex_shader(ctx->blitter, ctx->gfx_stages[PIPE_SHADER_VERTEX]);
+   util_blitter_save_tessctrl_shader(ctx->blitter, ctx->gfx_stages[PIPE_SHADER_TESS_CTRL]);
+   util_blitter_save_tesseval_shader(ctx->blitter, ctx->gfx_stages[PIPE_SHADER_TESS_EVAL]);
+   util_blitter_save_geometry_shader(ctx->blitter, ctx->gfx_stages[PIPE_SHADER_GEOMETRY]);
    util_blitter_save_framebuffer(ctx->blitter, &ctx->fb_state);
    util_blitter_save_viewport(ctx->blitter, ctx->viewport_states);
    util_blitter_save_scissor(ctx->blitter, ctx->scissor_states);

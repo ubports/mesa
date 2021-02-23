@@ -155,6 +155,17 @@ namespace {
       }
    };
 
+   /// (De)serialize a printf format
+   template<>
+   struct _serializer<module::printf_info> {
+      template<typename S, typename QT>
+      static void
+      proc(S & s, QT &x) {
+         _proc(s, x.arg_sizes);
+         _proc(s, x.strings);
+      }
+   };
+
    /// (De)serialize a module::section.
    template<>
    struct _serializer<module::section> {
@@ -190,6 +201,8 @@ namespace {
       static void
       proc(S &s, QT &x) {
          _proc(s, x.name);
+         _proc(s, x.attributes);
+         _proc(s, x.reqd_work_group_size);
          _proc(s, x.section);
          _proc(s, x.offset);
          _proc(s, x.args);
@@ -204,6 +217,8 @@ namespace {
       proc(S &s, QT &x) {
          _proc(s, x.syms);
          _proc(s, x.secs);
+         _proc(s, x.printf_infos);
+         _proc(s, x.printf_strings_in_buffer);
       }
    };
 };

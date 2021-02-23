@@ -437,6 +437,7 @@ instruction_requires_packed_data(fs_inst *inst)
    case FS_OPCODE_DDX_COARSE:
    case FS_OPCODE_DDY_FINE:
    case FS_OPCODE_DDY_COARSE:
+   case SHADER_OPCODE_QUAD_SWIZZLE:
       return true;
    default:
       return false;
@@ -524,7 +525,7 @@ fs_visitor::try_copy_propagate(fs_inst *inst, int arg, acp_entry *entry)
     */
    const unsigned entry_stride = (entry->src.file == FIXED_GRF ? 1 :
                                   entry->src.stride);
-   if (instruction_requires_packed_data(inst) && entry_stride > 1)
+   if (instruction_requires_packed_data(inst) && entry_stride != 1)
       return false;
 
    /* Bail if the result of composing both strides would exceed the
@@ -866,6 +867,8 @@ fs_visitor::try_constant_propagate(fs_inst *inst, acp_entry *entry)
       case SHADER_OPCODE_LOD_LOGICAL:
       case SHADER_OPCODE_TG4_LOGICAL:
       case SHADER_OPCODE_TG4_OFFSET_LOGICAL:
+      case SHADER_OPCODE_SAMPLEINFO_LOGICAL:
+      case SHADER_OPCODE_IMAGE_SIZE_LOGICAL:
       case SHADER_OPCODE_UNTYPED_ATOMIC_LOGICAL:
       case SHADER_OPCODE_UNTYPED_ATOMIC_FLOAT_LOGICAL:
       case SHADER_OPCODE_UNTYPED_SURFACE_READ_LOGICAL:

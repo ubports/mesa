@@ -25,6 +25,8 @@
 
 #include "pipe/p_compiler.h"
 
+#include "util/compiler.h"
+
 /**
  * Determine the semantic index that is used when the given varying is mapped
  * to TGSI_SEMANTIC_GENERIC.
@@ -157,7 +159,7 @@ tgsi_get_gl_varying_semantic(gl_varying_slot attr,
          *semantic_index = attr - VARYING_SLOT_TEX0;
          break;
       }
-      /* fall through */
+      FALLTHROUGH;
    case VARYING_SLOT_VAR0:
    default:
       assert(attr >= VARYING_SLOT_VAR0 ||
@@ -288,5 +290,22 @@ tgsi_get_sysval_semantic(unsigned sysval)
 
    default:
       unreachable("Unexpected system value to TGSI");
+   }
+}
+
+enum tgsi_interpolate_mode
+tgsi_get_interp_mode(enum glsl_interp_mode mode, bool color)
+{
+   switch (mode) {
+   case INTERP_MODE_NONE:
+      return color ? TGSI_INTERPOLATE_COLOR : TGSI_INTERPOLATE_PERSPECTIVE;
+   case INTERP_MODE_FLAT:
+      return TGSI_INTERPOLATE_CONSTANT;
+   case INTERP_MODE_NOPERSPECTIVE:
+      return TGSI_INTERPOLATE_LINEAR;
+   case INTERP_MODE_SMOOTH:
+      return TGSI_INTERPOLATE_PERSPECTIVE;
+   default:
+      unreachable("unknown interpolation mode");
    }
 }

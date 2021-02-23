@@ -288,8 +288,7 @@ static void radv_amdgpu_cs_destroy(struct radeon_cmdbuf *rcs)
 		cs->ws->base.buffer_destroy(cs->old_ib_buffers[i]);
 
 	for (unsigned i = 0; i < cs->num_old_cs_buffers; ++i) {
-		struct radeon_cmdbuf *rcs = &cs->old_cs_buffers[i];
-		free(rcs->buf);
+		free(cs->old_cs_buffers[i].buf);
 	}
 
 	free(cs->old_cs_buffers);
@@ -324,7 +323,7 @@ radv_amdgpu_cs_create(struct radeon_winsys *ws,
 
 	if (cs->ws->use_ib_bos) {
 		cs->ib_buffer = ws->buffer_create(ws, ib_size, 0,
-						  RADEON_DOMAIN_GTT,
+						  cs->ws->cs_bo_domain,
 						  RADEON_FLAG_CPU_ACCESS |
 						  RADEON_FLAG_NO_INTERPROCESS_SHARING |
 						  RADEON_FLAG_READ_ONLY |
@@ -451,7 +450,7 @@ static void radv_amdgpu_cs_grow(struct radeon_cmdbuf *_cs, size_t min_size)
 	cs->old_ib_buffers[cs->num_old_ib_buffers++] = cs->ib_buffer;
 
 	cs->ib_buffer = cs->ws->base.buffer_create(&cs->ws->base, ib_size, 0,
-						   RADEON_DOMAIN_GTT,
+						   cs->ws->cs_bo_domain,
 						   RADEON_FLAG_CPU_ACCESS |
 						   RADEON_FLAG_NO_INTERPROCESS_SHARING |
 						   RADEON_FLAG_READ_ONLY |
@@ -638,7 +637,7 @@ static void radv_amdgpu_cs_add_virtual_buffer(struct radeon_cmdbuf *_cs,
 			MAX2(2, cs->max_num_virtual_buffers * 2);
 		struct radeon_winsys_bo **virtual_buffers =
 			realloc(cs->virtual_buffers,
-				sizeof(struct radv_amdgpu_virtual_virtual_buffer*) * max_num_virtual_buffers);
+				sizeof(struct radeon_winsys_bo*) * max_num_virtual_buffers);
 		if (!virtual_buffers) {
 			cs->status = VK_ERROR_OUT_OF_HOST_MEMORY;
 			return;
@@ -727,11 +726,8 @@ radv_amdgpu_get_bo_list(struct radv_amdgpu_winsys *ws,
 	if (ws->debug_all_bos) {
 		struct radv_amdgpu_winsys_bo *bo;
 
-		pthread_mutex_lock(&ws->global_bo_list_lock);
-
 		handles = malloc(sizeof(handles[0]) * ws->num_buffers);
 		if (!handles) {
-			pthread_mutex_unlock(&ws->global_bo_list_lock);
 			return VK_ERROR_OUT_OF_HOST_MEMORY;
 		}
 
@@ -741,8 +737,6 @@ radv_amdgpu_get_bo_list(struct radv_amdgpu_winsys *ws,
 			handles[num_handles].bo_priority = bo->priority;
 			num_handles++;
 		}
-
-		pthread_mutex_unlock(&ws->global_bo_list_lock);
 	} else if (count == 1 && !num_extra_bo && !extra_cs && !radv_bo_list &&
 	           !radv_amdgpu_cs(cs_array[0])->num_virtual_buffers) {
 		struct radv_amdgpu_cs *cs = (struct radv_amdgpu_cs*)cs_array[0];
@@ -894,6 +888,7 @@ radv_amdgpu_winsys_cs_submit_chained(struct radeon_winsys_ctx *_ctx,
 	struct radv_amdgpu_ctx *ctx = radv_amdgpu_ctx(_ctx);
 	struct radv_amdgpu_fence *fence = (struct radv_amdgpu_fence *)_fence;
 	struct radv_amdgpu_cs *cs0 = radv_amdgpu_cs(cs_array[0]);
+	struct radv_amdgpu_winsys *aws = cs0->ws;
 	struct drm_amdgpu_bo_list_entry *handles = NULL;
 	struct radv_amdgpu_cs_request request = {0};
 	struct amdgpu_cs_ib_info ibs[2];
@@ -923,12 +918,15 @@ radv_amdgpu_winsys_cs_submit_chained(struct radeon_winsys_ctx *_ctx,
 		}
 	}
 
+	if (aws->debug_all_bos)
+		u_rwlock_rdlock(&aws->global_bo_list_lock);
+
 	/* Get the BO list. */
 	result = radv_amdgpu_get_bo_list(cs0->ws, cs_array, cs_count, NULL, 0,
 					 initial_preamble_cs, radv_bo_list,
 					 &num_handles, &handles);
 	if (result != VK_SUCCESS)
-		return result;
+		goto fail;
 
 	/* Configure the CS request. */
 	if (initial_preamble_cs) {
@@ -953,14 +951,17 @@ radv_amdgpu_winsys_cs_submit_chained(struct radeon_winsys_ctx *_ctx,
 	free(request.handles);
 
 	if (result != VK_SUCCESS)
-		return result;
+		goto fail;
 
 	if (fence)
 		radv_amdgpu_request_to_fence(ctx, fence, &request);
 
 	radv_assign_last_submit(ctx, &request);
 
-	return VK_SUCCESS;
+fail:
+	if (aws->debug_all_bos)
+		u_rwlock_rdunlock(&aws->global_bo_list_lock);
+	return result;
 }
 
 static VkResult
@@ -977,30 +978,37 @@ radv_amdgpu_winsys_cs_submit_fallback(struct radeon_winsys_ctx *_ctx,
 	struct radv_amdgpu_ctx *ctx = radv_amdgpu_ctx(_ctx);
 	struct radv_amdgpu_fence *fence = (struct radv_amdgpu_fence *)_fence;
 	struct drm_amdgpu_bo_list_entry *handles = NULL;
-	struct radv_amdgpu_cs_request request = {};
+	struct radv_amdgpu_cs_request request = {0};
 	struct amdgpu_cs_ib_info *ibs;
 	struct radv_amdgpu_cs *cs0;
+	struct radv_amdgpu_winsys *aws;
 	unsigned num_handles = 0;
 	unsigned number_of_ibs;
 	VkResult result;
 
 	assert(cs_count);
 	cs0 = radv_amdgpu_cs(cs_array[0]);
+	aws = cs0->ws;
 
 	/* Compute the number of IBs for this submit. */
 	number_of_ibs = cs_count + !!initial_preamble_cs;
+
+	if (aws->debug_all_bos)
+		u_rwlock_rdlock(&aws->global_bo_list_lock);
 
 	/* Get the BO list. */
 	result = radv_amdgpu_get_bo_list(cs0->ws, &cs_array[0], cs_count, NULL, 0,
 					 initial_preamble_cs, radv_bo_list,
 					 &num_handles, &handles);
-	if (result != VK_SUCCESS)
-		return result;
+	if (result != VK_SUCCESS) {
+		goto fail;
+	}
 
 	ibs = malloc(number_of_ibs * sizeof(*ibs));
 	if (!ibs) {
-		free(request.handles);
-		return VK_ERROR_OUT_OF_HOST_MEMORY;
+		free(handles);
+		result = VK_ERROR_OUT_OF_HOST_MEMORY;
+		goto fail;
 	}
 
 	/* Configure the CS request. */
@@ -1033,14 +1041,17 @@ radv_amdgpu_winsys_cs_submit_fallback(struct radeon_winsys_ctx *_ctx,
 	free(ibs);
 
 	if (result != VK_SUCCESS)
-		return result;
+		goto fail;
 
 	if (fence)
 		radv_amdgpu_request_to_fence(ctx, fence, &request);
 
 	radv_assign_last_submit(ctx, &request);
 
-	return VK_SUCCESS;
+fail:
+	if (aws->debug_all_bos)
+		u_rwlock_rdunlock(&aws->global_bo_list_lock);
+	return result;
 }
 
 static VkResult
@@ -1058,6 +1069,7 @@ radv_amdgpu_winsys_cs_submit_sysmem(struct radeon_winsys_ctx *_ctx,
 	struct radv_amdgpu_fence *fence = (struct radv_amdgpu_fence *)_fence;
 	struct radv_amdgpu_cs *cs0 = radv_amdgpu_cs(cs_array[0]);
 	struct radeon_winsys *ws = (struct radeon_winsys*)cs0->ws;
+	struct radv_amdgpu_winsys *aws = cs0->ws;
 	struct radv_amdgpu_cs_request request;
 	uint32_t pad_word = PKT3_NOP_PAD;
 	bool emit_signal_sem = sem_info->cs_emit_signal;
@@ -1078,7 +1090,6 @@ radv_amdgpu_winsys_cs_submit_sysmem(struct radeon_winsys_ctx *_ctx,
 		unsigned number_of_ibs;
 		uint32_t *ptr;
 		unsigned cnt = 0;
-		unsigned size = 0;
 		unsigned pad_words = 0;
 
 		/* Compute the number of IBs for this submit. */
@@ -1127,7 +1138,7 @@ radv_amdgpu_winsys_cs_submit_sysmem(struct radeon_winsys_ctx *_ctx,
 				}
 
 				bos[j] = ws->buffer_create(ws, 4 * size, 4096,
-							   RADEON_DOMAIN_GTT,
+							   aws->cs_bo_domain,
 							   RADEON_FLAG_CPU_ACCESS |
 							   RADEON_FLAG_NO_INTERPROCESS_SHARING |
 							   RADEON_FLAG_READ_ONLY,
@@ -1153,6 +1164,8 @@ radv_amdgpu_winsys_cs_submit_sysmem(struct radeon_winsys_ctx *_ctx,
 			cnt++;
 			free(new_cs_array);
 		} else {
+			unsigned size = 0;
+
 			if (preamble_cs)
 				size += preamble_cs->cdw;
 
@@ -1168,7 +1181,7 @@ radv_amdgpu_winsys_cs_submit_sysmem(struct radeon_winsys_ctx *_ctx,
 			assert(cnt);
 
 			bos[0] = ws->buffer_create(ws, 4 * size, 4096,
-						   RADEON_DOMAIN_GTT,
+						   aws->cs_bo_domain,
 						   RADEON_FLAG_CPU_ACCESS |
 						   RADEON_FLAG_NO_INTERPROCESS_SHARING |
 						   RADEON_FLAG_READ_ONLY,
@@ -1181,9 +1194,9 @@ radv_amdgpu_winsys_cs_submit_sysmem(struct radeon_winsys_ctx *_ctx,
 			}
 
 			for (unsigned j = 0; j < cnt; ++j) {
-				struct radv_amdgpu_cs *cs = radv_amdgpu_cs(cs_array[i + j]);
-				memcpy(ptr, cs->base.buf, 4 * cs->base.cdw);
-				ptr += cs->base.cdw;
+				struct radv_amdgpu_cs *cs2 = radv_amdgpu_cs(cs_array[i + j]);
+				memcpy(ptr, cs2->base.buf, 4 * cs2->base.cdw);
+				ptr += cs2->base.cdw;
 
 			}
 
@@ -1195,6 +1208,9 @@ radv_amdgpu_winsys_cs_submit_sysmem(struct radeon_winsys_ctx *_ctx,
 			ibs[0].flags = 0;
 		}
 
+		if (aws->debug_all_bos)
+			u_rwlock_rdlock(&aws->global_bo_list_lock);
+
 		result = radv_amdgpu_get_bo_list(cs0->ws, &cs_array[i], cnt,
 						 (struct radv_amdgpu_winsys_bo **)bos,
 						 number_of_ibs, preamble_cs,
@@ -1203,6 +1219,8 @@ radv_amdgpu_winsys_cs_submit_sysmem(struct radeon_winsys_ctx *_ctx,
 		if (result != VK_SUCCESS) {
 			free(ibs);
 			free(bos);
+			if (aws->debug_all_bos)
+				u_rwlock_rdunlock(&aws->global_bo_list_lock);
 			return result;
 		}
 
@@ -1220,6 +1238,8 @@ radv_amdgpu_winsys_cs_submit_sysmem(struct radeon_winsys_ctx *_ctx,
 		result = radv_amdgpu_cs_submit(ctx, &request, sem_info);
 
 		free(request.handles);
+		if (aws->debug_all_bos)
+			u_rwlock_rdunlock(&aws->global_bo_list_lock);
 
 		for (unsigned j = 0; j < number_of_ibs; j++) {
 			ws->buffer_destroy(bos[j]);
@@ -1290,17 +1310,17 @@ static void *radv_amdgpu_winsys_get_cpu_addr(void *_cs, uint64_t addr)
 		}
 	}
 	if(cs->ws->debug_all_bos) {
-		pthread_mutex_lock(&cs->ws->global_bo_list_lock);
+		u_rwlock_rdlock(&cs->ws->global_bo_list_lock);
 		list_for_each_entry(struct radv_amdgpu_winsys_bo, bo,
 		                    &cs->ws->global_bo_list, global_list_item) {
 			if (addr >= bo->base.va && addr - bo->base.va < bo->size) {
 				if (amdgpu_bo_cpu_map(bo->bo, &ret) == 0) {
-					pthread_mutex_unlock(&cs->ws->global_bo_list_lock);
+					u_rwlock_rdunlock(&cs->ws->global_bo_list_lock);
 					return (char *)ret + (addr - bo->base.va);
 				}
 			}
 		}
-		pthread_mutex_unlock(&cs->ws->global_bo_list_lock);
+		u_rwlock_rdunlock(&cs->ws->global_bo_list_lock);
 	}
 	return ret;
 }
@@ -1450,22 +1470,151 @@ static int radv_amdgpu_signal_sems(struct radv_amdgpu_ctx *ctx,
 	return 0;
 }
 
-static struct drm_amdgpu_cs_chunk_sem *radv_amdgpu_cs_alloc_syncobj_chunk(struct radv_winsys_sem_counts *counts,
-									  struct drm_amdgpu_cs_chunk *chunk, int chunk_id)
+static void *radv_amdgpu_cs_alloc_syncobj_chunk(struct radv_winsys_sem_counts *counts,
+						const uint32_t *syncobj_override,
+						struct drm_amdgpu_cs_chunk *chunk, int chunk_id)
 {
+	const uint32_t *src = syncobj_override ? syncobj_override : counts->syncobj;
 	struct drm_amdgpu_cs_chunk_sem *syncobj = malloc(sizeof(struct drm_amdgpu_cs_chunk_sem) * counts->syncobj_count);
 	if (!syncobj)
 		return NULL;
 
 	for (unsigned i = 0; i < counts->syncobj_count; i++) {
 		struct drm_amdgpu_cs_chunk_sem *sem = &syncobj[i];
-		sem->handle = counts->syncobj[i];
+		sem->handle = src[i];
 	}
 
 	chunk->chunk_id = chunk_id;
 	chunk->length_dw = sizeof(struct drm_amdgpu_cs_chunk_sem) / 4 * counts->syncobj_count;
 	chunk->chunk_data = (uint64_t)(uintptr_t)syncobj;
 	return syncobj;
+}
+
+static void *
+radv_amdgpu_cs_alloc_timeline_syncobj_chunk(struct radv_winsys_sem_counts *counts,
+                                            const uint32_t *syncobj_override,
+                                            struct drm_amdgpu_cs_chunk *chunk, int chunk_id)
+{
+	const uint32_t *src = syncobj_override ? syncobj_override : counts->syncobj;
+	struct drm_amdgpu_cs_chunk_syncobj *syncobj = malloc(sizeof(struct drm_amdgpu_cs_chunk_syncobj) *
+	                                                     (counts->syncobj_count + counts->timeline_syncobj_count));
+	if (!syncobj)
+		return NULL;
+
+	for (unsigned i = 0; i < counts->syncobj_count; i++) {
+		struct drm_amdgpu_cs_chunk_syncobj *sem = &syncobj[i];
+		sem->handle = src[i];
+		sem->flags = 0;
+		sem->point = 0;
+	}
+
+	for (unsigned i = 0; i < counts->timeline_syncobj_count; i++) {
+		struct drm_amdgpu_cs_chunk_syncobj *sem = &syncobj[i + counts->syncobj_count];
+		sem->handle = counts->syncobj[i + counts->syncobj_count];
+		sem->flags = DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT;
+		sem->point = counts->points[i];
+	}
+
+	chunk->chunk_id = chunk_id;
+	chunk->length_dw = sizeof(struct drm_amdgpu_cs_chunk_syncobj) / 4 *
+		(counts->syncobj_count + counts->timeline_syncobj_count);
+	chunk->chunk_data = (uint64_t)(uintptr_t)syncobj;
+	return syncobj;
+}
+
+static int radv_amdgpu_cache_alloc_syncobjs(struct radv_amdgpu_winsys *ws, unsigned count, uint32_t *dst)
+{
+	pthread_mutex_lock(&ws->syncobj_lock);
+	if (count > ws->syncobj_capacity) {
+		if (ws->syncobj_capacity > UINT32_MAX / 2)
+			goto fail;
+
+		unsigned new_capacity = MAX2(count, ws->syncobj_capacity * 2);
+		uint32_t *n = realloc(ws->syncobj, new_capacity * sizeof(*ws->syncobj));
+		if (!n)
+			goto fail;
+		ws->syncobj_capacity = new_capacity;
+		ws->syncobj = n;
+	}
+
+	while(ws->syncobj_count < count) {
+		int r = amdgpu_cs_create_syncobj(ws->dev, ws->syncobj + ws->syncobj_count);
+		if (r)
+			goto fail;
+		++ws->syncobj_count;
+	}
+
+	for (unsigned i = 0; i < count; ++i)
+		dst[i] = ws->syncobj[--ws->syncobj_count];
+
+	pthread_mutex_unlock(&ws->syncobj_lock);
+	return 0;
+
+fail:
+	pthread_mutex_unlock(&ws->syncobj_lock);
+	return -ENOMEM;
+}
+
+static void radv_amdgpu_cache_free_syncobjs(struct radv_amdgpu_winsys *ws, unsigned count, uint32_t *src)
+{
+	pthread_mutex_lock(&ws->syncobj_lock);
+
+	uint32_t cache_count = MIN2(count, UINT32_MAX - ws->syncobj_count);
+	if (cache_count + ws->syncobj_count > ws->syncobj_capacity) {
+		unsigned new_capacity = MAX2(ws->syncobj_count + cache_count, ws->syncobj_capacity * 2);
+		uint32_t* n = realloc(ws->syncobj, new_capacity * sizeof(*ws->syncobj));
+		if (n) {
+			ws->syncobj_capacity = new_capacity;
+			ws->syncobj = n;
+		}
+	}
+
+	for (unsigned i = 0; i < count; ++i) {
+		if (ws->syncobj_count < ws->syncobj_capacity)
+			ws->syncobj[ws->syncobj_count++] = src[i];
+		else
+			amdgpu_cs_destroy_syncobj(ws->dev, src[i]);
+	}
+
+	pthread_mutex_unlock(&ws->syncobj_lock);
+
+}
+
+static int radv_amdgpu_cs_prepare_syncobjs(struct radv_amdgpu_winsys *ws,
+                                           struct radv_winsys_sem_counts *counts,
+                                           uint32_t **out_syncobjs)
+{
+	int r = 0;
+
+	if (!ws->info.has_timeline_syncobj || !counts->syncobj_count) {
+		*out_syncobjs = NULL;
+		return 0;
+	}
+
+	*out_syncobjs = malloc(counts->syncobj_count * sizeof(**out_syncobjs));
+	if (!*out_syncobjs)
+		return -ENOMEM;
+
+	r = radv_amdgpu_cache_alloc_syncobjs(ws, counts->syncobj_count, *out_syncobjs);
+	if (r)
+		return r;
+	
+	for (unsigned i = 0; i < counts->syncobj_count; ++i) {
+		r = amdgpu_cs_syncobj_transfer(ws->dev, (*out_syncobjs)[i], 0, counts->syncobj[i], 0, DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT);
+		if (r)
+			goto fail;
+	}
+
+	r = amdgpu_cs_syncobj_reset(ws->dev, counts->syncobj, counts->syncobj_reset_count);
+	if (r)
+		goto fail;
+
+	return 0;
+fail:
+	radv_amdgpu_cache_free_syncobjs(ws, counts->syncobj_count, *out_syncobjs);
+	free(*out_syncobjs);
+	*out_syncobjs = NULL;
+	return r;
 }
 
 static VkResult
@@ -1480,9 +1629,10 @@ radv_amdgpu_cs_submit(struct radv_amdgpu_ctx *ctx,
 	struct drm_amdgpu_cs_chunk *chunks;
 	struct drm_amdgpu_cs_chunk_data *chunk_data;
 	struct drm_amdgpu_cs_chunk_dep *sem_dependencies = NULL;
-	struct drm_amdgpu_cs_chunk_sem *wait_syncobj = NULL, *signal_syncobj = NULL;
 	bool use_bo_list_create = ctx->ws->info.drm_minor < 27;
 	struct drm_amdgpu_bo_list_in bo_list_in;
+	void *wait_syncobj = NULL, *signal_syncobj = NULL;
+	uint32_t *in_syncobjs = NULL;
 	int i;
 	struct amdgpu_cs_fence *sem;
 	uint32_t bo_list = 0;
@@ -1532,10 +1682,22 @@ radv_amdgpu_cs_submit(struct radv_amdgpu_ctx *ctx,
 						   &chunk_data[i]);
 	}
 
-	if (sem_info->wait.syncobj_count && sem_info->cs_emit_wait) {
-		wait_syncobj = radv_amdgpu_cs_alloc_syncobj_chunk(&sem_info->wait,
-								  &chunks[num_chunks],
-								  AMDGPU_CHUNK_ID_SYNCOBJ_IN);
+	if ((sem_info->wait.syncobj_count || sem_info->wait.timeline_syncobj_count) && sem_info->cs_emit_wait) {
+		r = radv_amdgpu_cs_prepare_syncobjs(ctx->ws, &sem_info->wait, &in_syncobjs);
+		if (r)
+			goto error_out;
+
+		if (ctx->ws->info.has_timeline_syncobj) {
+			wait_syncobj = radv_amdgpu_cs_alloc_timeline_syncobj_chunk(&sem_info->wait,
+										   in_syncobjs,
+										   &chunks[num_chunks],
+										   AMDGPU_CHUNK_ID_SYNCOBJ_TIMELINE_WAIT);
+		} else {
+			wait_syncobj = radv_amdgpu_cs_alloc_syncobj_chunk(&sem_info->wait,
+									  in_syncobjs,
+									  &chunks[num_chunks],
+									  AMDGPU_CHUNK_ID_SYNCOBJ_IN);
+		}
 		if (!wait_syncobj) {
 			result = VK_ERROR_OUT_OF_HOST_MEMORY;
 			goto error_out;
@@ -1576,10 +1738,18 @@ radv_amdgpu_cs_submit(struct radv_amdgpu_ctx *ctx,
 		sem_info->cs_emit_wait = false;
 	}
 
-	if (sem_info->signal.syncobj_count && sem_info->cs_emit_signal) {
-		signal_syncobj = radv_amdgpu_cs_alloc_syncobj_chunk(&sem_info->signal,
-								    &chunks[num_chunks],
-								    AMDGPU_CHUNK_ID_SYNCOBJ_OUT);
+	if ((sem_info->signal.syncobj_count || sem_info->signal.timeline_syncobj_count) && sem_info->cs_emit_signal) {
+		if (ctx->ws->info.has_timeline_syncobj) {
+			signal_syncobj = radv_amdgpu_cs_alloc_timeline_syncobj_chunk(&sem_info->signal,
+										     NULL,
+										     &chunks[num_chunks],
+										     AMDGPU_CHUNK_ID_SYNCOBJ_TIMELINE_SIGNAL);
+		} else {
+			signal_syncobj = radv_amdgpu_cs_alloc_syncobj_chunk(&sem_info->signal,
+									    NULL,
+									    &chunks[num_chunks],
+									    AMDGPU_CHUNK_ID_SYNCOBJ_OUT);
+		}
 		if (!signal_syncobj) {
 			result = VK_ERROR_OUT_OF_HOST_MEMORY;
 			goto error_out;
@@ -1624,9 +1794,6 @@ radv_amdgpu_cs_submit(struct radv_amdgpu_ctx *ctx,
 				 chunks,
 				 &request->seq_no);
 
-	if (bo_list)
-		amdgpu_bo_list_destroy_raw(ctx->ws->dev, bo_list);
-
 	if (r) {
 		if (r == -ENOMEM) {
 			fprintf(stderr, "amdgpu: Not enough memory for command submission.\n");
@@ -1641,7 +1808,14 @@ radv_amdgpu_cs_submit(struct radv_amdgpu_ctx *ctx,
 		}
 	}
 
+	if (bo_list)
+		amdgpu_bo_list_destroy_raw(ctx->ws->dev, bo_list);
+
 error_out:
+	if (in_syncobjs) {
+		radv_amdgpu_cache_free_syncobjs(ctx->ws, sem_info->wait.syncobj_count, in_syncobjs);
+		free(in_syncobjs);
+	}
 	free(chunks);
 	free(chunk_data);
 	free(sem_dependencies);
@@ -1678,10 +1852,30 @@ static void radv_amdgpu_reset_syncobj(struct radeon_winsys *_ws,
 }
 
 static void radv_amdgpu_signal_syncobj(struct radeon_winsys *_ws,
-				    uint32_t handle)
+				    uint32_t handle, uint64_t point)
 {
 	struct radv_amdgpu_winsys *ws = radv_amdgpu_winsys(_ws);
-	amdgpu_cs_syncobj_signal(ws->dev, &handle, 1);
+	if (point)
+		amdgpu_cs_syncobj_timeline_signal(ws->dev, &handle, &point, 1);
+	else
+		amdgpu_cs_syncobj_signal(ws->dev, &handle, 1);
+}
+
+static VkResult radv_amdgpu_query_syncobj(struct radeon_winsys *_ws,
+                                      uint32_t handle, uint64_t *point)
+{
+	struct radv_amdgpu_winsys *ws = radv_amdgpu_winsys(_ws);
+	int ret = amdgpu_cs_syncobj_query(ws->dev, &handle, point, 1);
+	if (ret == 0)
+		return VK_SUCCESS;
+	else if (ret == -ENOMEM)
+		return VK_ERROR_OUT_OF_HOST_MEMORY;
+	else {
+		/* Remaining error are driver internal issues: EFAULT for
+		 * dangling pointers and ENOENT for non-existing syncobj. */
+		fprintf(stderr, "amdgpu: internal error in radv_amdgpu_query_syncobj. (%d)\n", ret);
+		return VK_ERROR_UNKNOWN;
+	}
 }
 
 static bool radv_amdgpu_wait_syncobj(struct radeon_winsys *_ws, const uint32_t *handles,
@@ -1706,6 +1900,32 @@ static bool radv_amdgpu_wait_syncobj(struct radeon_winsys *_ws, const uint32_t *
 		return false;
 	}
 }
+
+static bool radv_amdgpu_wait_timeline_syncobj(struct radeon_winsys *_ws, const uint32_t *handles,
+                                              const uint64_t *points, uint32_t handle_count,
+                                              bool wait_all, bool available, uint64_t timeout)
+{
+	struct radv_amdgpu_winsys *ws = radv_amdgpu_winsys(_ws);
+
+	/* The timeouts are signed, while vulkan timeouts are unsigned. */
+	timeout = MIN2(timeout, INT64_MAX);
+
+	int ret = amdgpu_cs_syncobj_timeline_wait(ws->dev, (uint32_t*)handles, (uint64_t*)points,
+	                                          handle_count, timeout,
+	                                          DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT |
+	                                          (wait_all ? DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL : 0) |
+	                                          (available ? DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE : 0),
+	                                          NULL);
+	if (ret == 0) {
+		return true;
+	} else if (ret == -ETIME) {
+		return false;
+	} else {
+		fprintf(stderr, "amdgpu: radv_amdgpu_wait_syncobj failed! (%d)\n", errno);
+		return false;
+	}
+}
+
 
 static int radv_amdgpu_export_syncobj(struct radeon_winsys *_ws,
 				      uint32_t syncobj,
@@ -1769,7 +1989,9 @@ void radv_amdgpu_cs_init_functions(struct radv_amdgpu_winsys *ws)
 	ws->base.destroy_syncobj = radv_amdgpu_destroy_syncobj;
 	ws->base.reset_syncobj = radv_amdgpu_reset_syncobj;
 	ws->base.signal_syncobj = radv_amdgpu_signal_syncobj;
+	ws->base.query_syncobj = radv_amdgpu_query_syncobj;
 	ws->base.wait_syncobj = radv_amdgpu_wait_syncobj;
+	ws->base.wait_timeline_syncobj = radv_amdgpu_wait_timeline_syncobj;
 	ws->base.export_syncobj = radv_amdgpu_export_syncobj;
 	ws->base.import_syncobj = radv_amdgpu_import_syncobj;
 	ws->base.export_syncobj_to_sync_file = radv_amdgpu_export_syncobj_to_sync_file;

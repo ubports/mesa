@@ -25,6 +25,7 @@
 #include <sys/sysinfo.h>
 
 #include "common/v3d_device_info.h"
+#include "common/v3d_limits.h"
 #include "util/os_misc.h"
 #include "pipe/p_defines.h"
 #include "pipe/p_screen.h"
@@ -258,6 +259,9 @@ v3d_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
         case PIPE_CAP_UMA:
                 return 1;
 
+        case PIPE_CAP_ALPHA_TEST:
+                return 0;
+
         /* Geometry shaders */
         case PIPE_CAP_MAX_GEOMETRY_TOTAL_OUTPUT_COMPONENTS:
                 /* Minimum required by GLES 3.2 */
@@ -279,11 +283,11 @@ v3d_screen_get_paramf(struct pipe_screen *pscreen, enum pipe_capf param)
         switch (param) {
         case PIPE_CAPF_MAX_LINE_WIDTH:
         case PIPE_CAPF_MAX_LINE_WIDTH_AA:
-                return 32;
+                return V3D_MAX_LINE_WIDTH;
 
         case PIPE_CAPF_MAX_POINT_WIDTH:
         case PIPE_CAPF_MAX_POINT_WIDTH_AA:
-                return 512.0f;
+                return V3D_MAX_POINT_SIZE;
 
         case PIPE_CAPF_MAX_TEXTURE_ANISOTROPY:
                 return 0.0f;
@@ -375,7 +379,7 @@ v3d_screen_get_shader_param(struct pipe_screen *pscreen, unsigned shader,
         case PIPE_SHADER_CAP_FP16:
         case PIPE_SHADER_CAP_FP16_DERIVATIVES:
         case PIPE_SHADER_CAP_INT16:
-        case PIPE_SHADER_CAP_GLSL_16BIT_TEMPS:
+        case PIPE_SHADER_CAP_GLSL_16BIT_CONSTS:
         case PIPE_SHADER_CAP_TGSI_DROUND_SUPPORTED:
         case PIPE_SHADER_CAP_TGSI_DFRACEXP_DLDEXP_SUPPORTED:
         case PIPE_SHADER_CAP_TGSI_LDEXP_SUPPORTED:
@@ -387,7 +391,7 @@ v3d_screen_get_shader_param(struct pipe_screen *pscreen, unsigned shader,
                 return 0;
         case PIPE_SHADER_CAP_MAX_TEXTURE_SAMPLERS:
         case PIPE_SHADER_CAP_MAX_SAMPLER_VIEWS:
-                return V3D_MAX_TEXTURE_SAMPLERS;
+                return V3D_OPENGL_MAX_TEXTURE_SAMPLERS;
 
         case PIPE_SHADER_CAP_MAX_SHADER_BUFFERS:
                 if (screen->has_cache_flush) {
@@ -556,6 +560,7 @@ v3d_screen_is_format_supported(struct pipe_screen *pscreen,
                 case PIPE_FORMAT_R16G16B16_SSCALED:
                 case PIPE_FORMAT_R16G16_SSCALED:
                 case PIPE_FORMAT_R16_SSCALED:
+                case PIPE_FORMAT_B8G8R8A8_UNORM:
                 case PIPE_FORMAT_R8G8B8A8_UNORM:
                 case PIPE_FORMAT_R8G8B8_UNORM:
                 case PIPE_FORMAT_R8G8_UNORM:
@@ -626,6 +631,11 @@ v3d_screen_get_compiler_options(struct pipe_screen *pscreen,
         return &v3d_nir_options;
 }
 
+static const uint64_t v3d_available_modifiers[] = {
+   DRM_FORMAT_MOD_BROADCOM_UIF,
+   DRM_FORMAT_MOD_LINEAR,
+};
+
 static void
 v3d_screen_query_dmabuf_modifiers(struct pipe_screen *pscreen,
                                   enum pipe_format format, int max,
@@ -634,11 +644,7 @@ v3d_screen_query_dmabuf_modifiers(struct pipe_screen *pscreen,
                                   int *count)
 {
         int i;
-        uint64_t available_modifiers[] = {
-                DRM_FORMAT_MOD_BROADCOM_UIF,
-                DRM_FORMAT_MOD_LINEAR,
-        };
-        int num_modifiers = ARRAY_SIZE(available_modifiers);
+        int num_modifiers = ARRAY_SIZE(v3d_available_modifiers);
 
         if (!modifiers) {
                 *count = num_modifiers;
@@ -647,10 +653,30 @@ v3d_screen_query_dmabuf_modifiers(struct pipe_screen *pscreen,
 
         *count = MIN2(max, num_modifiers);
         for (i = 0; i < *count; i++) {
-                modifiers[i] = available_modifiers[i];
+                modifiers[i] = v3d_available_modifiers[i];
                 if (external_only)
                         external_only[i] = false;
        }
+}
+
+static bool
+v3d_screen_is_dmabuf_modifier_supported(struct pipe_screen *pscreen,
+                                        uint64_t modifier,
+                                        enum pipe_format format,
+                                        bool *external_only)
+{
+        int i;
+
+        for (i = 0; i < ARRAY_SIZE(v3d_available_modifiers); i++) {
+                if (v3d_available_modifiers[i] == modifier) {
+                        if (external_only)
+                                *external_only = false;
+
+                        return true;
+                }
+        }
+
+        return false;
 }
 
 struct pipe_screen *
@@ -717,6 +743,8 @@ v3d_screen_create(int fd, const struct pipe_screen_config *config,
         pscreen->get_device_vendor = v3d_screen_get_vendor;
         pscreen->get_compiler_options = v3d_screen_get_compiler_options;
         pscreen->query_dmabuf_modifiers = v3d_screen_query_dmabuf_modifiers;
+        pscreen->is_dmabuf_modifier_supported =
+                v3d_screen_is_dmabuf_modifier_supported;
 
         return pscreen;
 

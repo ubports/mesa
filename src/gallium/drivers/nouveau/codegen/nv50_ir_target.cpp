@@ -351,29 +351,8 @@ CodeEmitter::prepareEmission(BasicBlock *bb)
    func->binSize += bb->binSize;
 }
 
-void
-Program::emitSymbolTable(struct nv50_ir_prog_info *info)
-{
-   unsigned int n = 0, nMax = allFuncs.getSize();
-
-   info->bin.syms =
-      (struct nv50_ir_prog_symbol *)MALLOC(nMax * sizeof(*info->bin.syms));
-
-   for (ArrayList::Iterator fi = allFuncs.iterator();
-        !fi.end();
-        fi.next(), ++n) {
-      Function *f = (Function *)fi.get();
-      assert(n < nMax);
-
-      info->bin.syms[n].label = f->getLabel();
-      info->bin.syms[n].offset = f->binPos;
-   }
-
-   info->bin.numSyms = n;
-}
-
 bool
-Program::emitBinary(struct nv50_ir_prog_info *info)
+Program::emitBinary(struct nv50_ir_prog_info_out *info)
 {
    CodeEmitter *emit = target->getCodeEmitter(progType);
 
@@ -410,8 +389,6 @@ Program::emitBinary(struct nv50_ir_prog_info *info)
    info->io.fp64 |= fp64;
    info->bin.relocData = emit->getRelocInfo();
    info->bin.fixupData = emit->getFixupInfo();
-
-   emitSymbolTable(info);
 
    // the nvc0 driver will print the binary iself together with the header
    if ((dbgFlags & NV50_IR_DEBUG_BASIC) && getTarget()->getChipset() < 0xc0)
@@ -518,7 +495,7 @@ nv50_ir_relocate_code(void *relocData, uint32_t *code,
 void
 nv50_ir_apply_fixups(void *fixupData, uint32_t *code,
                      bool force_persample_interp, bool flatshade,
-                     uint8_t alphatest)
+                     uint8_t alphatest, bool msaa)
 {
    nv50_ir::FixupInfo *info = reinterpret_cast<nv50_ir::FixupInfo *>(
       fixupData);
@@ -526,7 +503,8 @@ nv50_ir_apply_fixups(void *fixupData, uint32_t *code,
    // force_persample_interp: all non-flat -> per-sample
    // flatshade: all color -> flat
    // alphatest: PIPE_FUNC_* to use with alphatest
-   nv50_ir::FixupData data(force_persample_interp, flatshade, alphatest);
+   // msaa: false = sample id -> 0 for interpolateAtSample
+   nv50_ir::FixupData data(force_persample_interp, flatshade, alphatest, msaa);
    for (unsigned i = 0; i < info->count; ++i)
       info->entry[i].apply(&info->entry[i], code, data);
 }

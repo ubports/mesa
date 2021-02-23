@@ -45,16 +45,15 @@ void si_test_dma_perf(struct si_screen *sscreen)
    struct si_context *sctx = (struct si_context *)ctx;
    const uint32_t clear_value = 0x12345678;
    static const unsigned cs_dwords_per_thread_list[] = {64, 32, 16, 8, 4, 2, 1};
-   static const unsigned cs_waves_per_sh_list[] = {0, 2, 4, 8, 16};
+   static const unsigned cs_waves_per_sh_list[] = {0, 4, 8, 16};
 
 #define NUM_SHADERS ARRAY_SIZE(cs_dwords_per_thread_list)
-#define NUM_METHODS (4 + 3 * NUM_SHADERS * ARRAY_SIZE(cs_waves_per_sh_list))
+#define NUM_METHODS (3 + 3 * NUM_SHADERS * ARRAY_SIZE(cs_waves_per_sh_list))
 
    static const char *method_str[] = {
       "CP MC   ",
       "CP L2   ",
       "CP L2   ",
-      "SDMA    ",
    };
    static const char *placement_str[] = {
       /* Clear */
@@ -80,7 +79,6 @@ void si_test_dma_perf(struct si_screen *sscreen)
    struct si_result {
       bool is_valid;
       bool is_cp;
-      bool is_sdma;
       bool is_cs;
       unsigned cache_policy;
       unsigned dwords_per_thread;
@@ -100,9 +98,8 @@ void si_test_dma_perf(struct si_screen *sscreen)
 
       for (unsigned method = 0; method < NUM_METHODS; method++) {
          bool test_cp = method <= 2;
-         bool test_sdma = method == 3;
-         bool test_cs = method >= 4;
-         unsigned cs_method = method - 4;
+         bool test_cs = method >= 3;
+         unsigned cs_method = method - 3;
          unsigned cs_waves_per_sh =
             test_cs ? cs_waves_per_sh_list[cs_method / (3 * NUM_SHADERS)] : 0;
          cs_method %= 3 * NUM_SHADERS;
@@ -110,9 +107,6 @@ void si_test_dma_perf(struct si_screen *sscreen)
             test_cp ? method % 3 : test_cs ? (cs_method / NUM_SHADERS) : 0;
          unsigned cs_dwords_per_thread =
             test_cs ? cs_dwords_per_thread_list[cs_method % NUM_SHADERS] : 0;
-
-         if (test_sdma && !sctx->sdma_cs)
-            continue;
 
          if (sctx->chip_class == GFX6) {
             /* GFX6 doesn't support CP DMA operations through L2. */
@@ -142,6 +136,12 @@ void si_test_dma_perf(struct si_screen *sscreen)
          else
             printf("  ,");
 
+         void *compute_shader = NULL;
+         if (test_cs) {
+            compute_shader = si_create_dma_compute_shader(ctx, cs_dwords_per_thread,
+                                              cache_policy == L2_STREAM, is_copy);
+         }
+
          double score = 0;
          for (unsigned size = MIN_SIZE; size <= MAX_SIZE; size <<= SIZE_SHIFT) {
             /* Don't test bigger sizes if it's too slow. Print 0. */
@@ -152,16 +152,8 @@ void si_test_dma_perf(struct si_screen *sscreen)
 
             enum pipe_resource_usage dst_usage, src_usage;
             struct pipe_resource *dst, *src;
-            struct pipe_query *q[NUM_RUNS];
             unsigned query_type = PIPE_QUERY_TIME_ELAPSED;
             unsigned flags = cache_policy == L2_BYPASS ? SI_RESOURCE_FLAG_UNCACHED : 0;
-
-            if (test_sdma) {
-               if (sctx->chip_class == GFX6)
-                  query_type = SI_QUERY_TIME_ELAPSED_SDMA_SI;
-               else
-                  query_type = SI_QUERY_TIME_ELAPSED_SDMA;
-            }
 
             if (placement == 0 || placement == 2 || placement == 4)
                dst_usage = PIPE_USAGE_DEFAULT;
@@ -176,26 +168,25 @@ void si_test_dma_perf(struct si_screen *sscreen)
             dst = pipe_aligned_buffer_create(screen, flags, dst_usage, size, 256);
             src = is_copy ? pipe_aligned_buffer_create(screen, flags, src_usage, size, 256) : NULL;
 
+            /* Wait for idle before testing, so that other processes don't mess up the results. */
+            sctx->flags |= SI_CONTEXT_CS_PARTIAL_FLUSH |
+                           SI_CONTEXT_FLUSH_AND_INV_CB |
+                           SI_CONTEXT_FLUSH_AND_INV_DB;
+            sctx->emit_cache_flush(sctx, &sctx->gfx_cs);
+
+            struct pipe_query *q = ctx->create_query(ctx, query_type, 0);
+            ctx->begin_query(ctx, q);
+
             /* Run tests. */
             for (unsigned iter = 0; iter < NUM_RUNS; iter++) {
-               q[iter] = ctx->create_query(ctx, query_type, 0);
-               ctx->begin_query(ctx, q[iter]);
-
                if (test_cp) {
                   /* CP DMA */
                   if (is_copy) {
                      si_cp_dma_copy_buffer(sctx, dst, src, 0, 0, size, 0, SI_COHERENCY_NONE,
                                            cache_policy);
                   } else {
-                     si_cp_dma_clear_buffer(sctx, sctx->gfx_cs, dst, 0, size, clear_value, 0,
+                     si_cp_dma_clear_buffer(sctx, &sctx->gfx_cs, dst, 0, size, clear_value, 0,
                                             SI_COHERENCY_NONE, cache_policy);
-                  }
-               } else if (test_sdma) {
-                  /* SDMA */
-                  if (is_copy) {
-                     si_sdma_copy_buffer(sctx, dst, src, 0, 0, size);
-                  } else {
-                     si_sdma_clear_buffer(sctx, dst, 0, size, clear_value);
                   }
                } else {
                   /* Compute */
@@ -209,9 +200,6 @@ void si_test_dma_perf(struct si_screen *sscreen)
 
                   unsigned num_dwords = size / 4;
                   unsigned num_instructions = DIV_ROUND_UP(num_dwords, dwords_per_instruction);
-
-                  void *cs = si_create_dma_compute_shader(ctx, cs_dwords_per_thread,
-                                                          cache_policy == L2_STREAM, is_copy);
 
                   struct pipe_grid_info info = {};
                   info.block[0] = MIN2(64, num_instructions);
@@ -233,55 +221,43 @@ void si_test_dma_perf(struct si_screen *sscreen)
                         sctx->cs_user_data[i] = clear_value;
                   }
 
-                  sctx->flags |= SI_CONTEXT_INV_VCACHE | SI_CONTEXT_INV_SCACHE;
-
                   ctx->set_shader_buffers(ctx, PIPE_SHADER_COMPUTE, 0, is_copy ? 2 : 1, sb, 0x1);
-                  ctx->bind_compute_state(ctx, cs);
+                  ctx->bind_compute_state(ctx, compute_shader);
                   sctx->cs_max_waves_per_sh = cs_waves_per_sh;
 
                   ctx->launch_grid(ctx, &info);
 
                   ctx->bind_compute_state(ctx, NULL);
-                  ctx->delete_compute_state(ctx, cs);
                   sctx->cs_max_waves_per_sh = 0; /* disable the limit */
-
-                  sctx->flags |= SI_CONTEXT_CS_PARTIAL_FLUSH;
                }
 
-               /* Flush L2, so that we don't just test L2 cache performance. */
-               if (!test_sdma) {
-                  sctx->flags |= SI_CONTEXT_WB_L2;
-                  sctx->emit_cache_flush(sctx);
-               }
-
-               ctx->end_query(ctx, q[iter]);
-               ctx->flush(ctx, NULL, PIPE_FLUSH_ASYNC);
+               /* Flush L2, so that we don't just test L2 cache performance except for L2_LRU. */
+               sctx->flags |= SI_CONTEXT_INV_VCACHE |
+                              (cache_policy == L2_LRU ? 0 : SI_CONTEXT_INV_L2) |
+                              SI_CONTEXT_CS_PARTIAL_FLUSH;
+               sctx->emit_cache_flush(sctx, &sctx->gfx_cs);
             }
+
+            ctx->end_query(ctx, q);
+            ctx->flush(ctx, NULL, PIPE_FLUSH_ASYNC);
+
             pipe_resource_reference(&dst, NULL);
             pipe_resource_reference(&src, NULL);
 
             /* Get results. */
-            uint64_t min = ~0ull, max = 0, total = 0;
 
-            for (unsigned iter = 0; iter < NUM_RUNS; iter++) {
-               union pipe_query_result result;
+            union pipe_query_result result;
 
-               ctx->get_query_result(ctx, q[iter], true, &result);
-               ctx->destroy_query(ctx, q[iter]);
+            ctx->get_query_result(ctx, q, true, &result);
+            ctx->destroy_query(ctx, q);
 
-               min = MIN2(min, result.u64);
-               max = MAX2(max, result.u64);
-               total += result.u64;
-            }
-
-            score = get_MBps_rate(size, total / (double)NUM_RUNS);
+            score = get_MBps_rate(size, result.u64 / (double)NUM_RUNS);
             printf("%7.0f ,", score);
             fflush(stdout);
 
             struct si_result *r = &results[util_logbase2(size)][placement][method];
             r->is_valid = true;
             r->is_cp = test_cp;
-            r->is_sdma = test_sdma;
             r->is_cs = test_cs;
             r->cache_policy = cache_policy;
             r->dwords_per_thread = cs_dwords_per_thread;
@@ -290,6 +266,9 @@ void si_test_dma_perf(struct si_screen *sscreen)
             r->index = method;
          }
          puts("");
+
+         if (compute_shader)
+            ctx->delete_compute_state(ctx, compute_shader);
       }
    }
 
@@ -327,7 +306,7 @@ void si_test_dma_perf(struct si_screen *sscreen)
          bool cached = mode == 1;
 
          if (async)
-            puts("      if (async) { /* SDMA or async compute */");
+            puts("      if (async) { /* async compute */");
          else if (cached)
             puts("      if (cached) { /* gfx ring */");
          else
@@ -378,10 +357,6 @@ void si_test_dma_perf(struct si_screen *sscreen)
                   if (r->is_cs && r->waves_per_sh == 0)
                      continue;
                } else {
-                  /* SDMA is always asynchronous */
-                  if (r->is_sdma)
-                     continue;
-
                   if (cached && r->cache_policy == L2_BYPASS)
                      continue;
                   if (!cached && r->cache_policy == L2_LRU)
@@ -418,7 +393,7 @@ void si_test_dma_perf(struct si_screen *sscreen)
                 */
                if (!best ||
                    /* If it's the same method as for the previous size: */
-                   (prev->is_cp == best->is_cp && prev->is_sdma == best->is_sdma &&
+                   (prev->is_cp == best->is_cp &&
                     prev->is_cs == best->is_cs && prev->cache_policy == best->cache_policy &&
                     prev->dwords_per_thread == best->dwords_per_thread &&
                     prev->waves_per_sh == best->waves_per_sh) ||
@@ -459,8 +434,6 @@ void si_test_dma_perf(struct si_screen *sscreen)
             if (best->is_cp) {
                printf("CP_DMA(%s);\n", cache_policy_str);
             }
-            if (best->is_sdma)
-               printf("SDMA;\n");
             if (best->is_cs) {
                printf("COMPUTE(%s, %u, %u);\n", cache_policy_str,
                       best->dwords_per_thread, best->waves_per_sh);

@@ -59,15 +59,12 @@ struct amdgpu_winsys_bo {
    struct pb_buffer base;
    union {
       struct {
-         struct pb_cache_entry cache_entry;
-
          amdgpu_va_handle va_handle;
-         int map_count;
-         bool use_reusable_pool;
-
+#if DEBUG
          struct list_head global_list_item;
-
+#endif
          uint32_t kms_handle;
+         int map_count;
       } real;
       struct {
          struct pb_slab_entry entry;
@@ -75,7 +72,6 @@ struct amdgpu_winsys_bo {
       } slab;
       struct {
          amdgpu_va_handle va_handle;
-         enum radeon_bo_flag flags;
 
          uint32_t num_va_pages;
          uint32_t num_backing_pages;
@@ -91,12 +87,11 @@ struct amdgpu_winsys_bo {
    void *cpu_ptr; /* for user_ptr and permanent maps */
 
    amdgpu_bo_handle bo; /* NULL for slab entries and sparse buffers */
-   bool sparse;
    bool is_user_ptr;
+   bool use_reusable_pool;
    uint32_t unique_id;
    uint64_t va;
-   enum radeon_bo_domain initial_domain;
-   enum radeon_bo_flag flags;
+   simple_mtx_t lock;
 
    /* how many command streams is this bo referenced in? */
    int num_cs_references;
@@ -115,7 +110,7 @@ struct amdgpu_winsys_bo {
    unsigned max_fences;
    struct pipe_fence_handle **fences;
 
-   simple_mtx_t lock;
+   struct pb_cache_entry cache_entry[];
 };
 
 struct amdgpu_slab {
@@ -133,7 +128,7 @@ struct pb_buffer *amdgpu_bo_create(struct amdgpu_winsys *ws,
 void amdgpu_bo_destroy(struct pb_buffer *_buf);
 void *amdgpu_bo_map(struct pb_buffer *buf,
                     struct radeon_cmdbuf *rcs,
-                    enum pipe_transfer_usage usage);
+                    enum pipe_map_flags usage);
 void amdgpu_bo_unmap(struct pb_buffer *buf);
 void amdgpu_bo_init_functions(struct amdgpu_screen_winsys *ws);
 

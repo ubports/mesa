@@ -31,6 +31,8 @@
 /// after linking against other bitcode object files.
 ///
 
+#include <llvm/Support/Allocator.h>
+
 #include "llvm/codegen.hpp"
 #include "llvm/compat.hpp"
 #include "llvm/metadata.hpp"
@@ -47,7 +49,7 @@
 #endif
 #include <llvm/Support/raw_ostream.h>
 
-using namespace clover;
+using clover::module;
 using namespace clover::llvm;
 
 namespace {
@@ -55,7 +57,7 @@ namespace {
    emit_code(const ::llvm::Module &mod) {
       ::llvm::SmallVector<char, 1024> data;
       ::llvm::raw_svector_ostream os { data };
-      compat::write_bitcode_to_file(mod, os);
+      ::llvm::WriteBitcodeToFile(mod, os);
       return { os.str().begin(), os.str().end() };
    }
 }
@@ -83,9 +85,11 @@ clover::llvm::parse_module_library(const module &m, ::llvm::LLVMContext &ctx,
    auto mod = ::llvm::parseBitcodeFile(::llvm::MemoryBufferRef(
                                         as_string(m.secs[0].data), " "), ctx);
 
-   compat::handle_module_error(mod, [&](const std::string &s) {
-         fail(r_log, error(CL_INVALID_PROGRAM), s);
+   if (::llvm::Error err = mod.takeError()) {
+      ::llvm::handleAllErrors(std::move(err), [&](::llvm::ErrorInfoBase &eib) {
+         fail(r_log, error(CL_INVALID_PROGRAM), eib.message());
       });
+   }
 
    return std::unique_ptr< ::llvm::Module>(std::move(*mod));
 }

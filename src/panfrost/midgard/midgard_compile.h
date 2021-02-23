@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2018-2019 Alyssa Rosenzweig <alyssa@rosenzweig.io>
+ * Copyright (C) 2019-2020 Collabora, Ltd.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -26,18 +27,20 @@
 
 #include "compiler/nir/nir.h"
 #include "util/u_dynarray.h"
-#include "panfrost-job.h"
 #include "panfrost/util/pan_ir.h"
 
-int
-midgard_compile_shader_nir(nir_shader *nir, panfrost_program *program, bool is_blend, unsigned blend_rt, unsigned gpu_id, bool shaderdb, bool silent);
+panfrost_program *
+midgard_compile_shader_nir(void *mem_ctx, nir_shader *nir,
+                           const struct panfrost_compile_inputs *inputs);
 
 /* NIR options are shared between the standalone compiler and the online
  * compiler. Defining it here is the simplest, though maybe not the Right
  * solution. */
 
 static const nir_shader_compiler_options midgard_nir_options = {
-        .lower_ffma = true,
+        .lower_ffma16 = true,
+        .lower_ffma32 = true,
+        .lower_ffma64 = true,
         .lower_scmp = true,
         .lower_flrp16 = true,
         .lower_flrp32 = true,
@@ -45,7 +48,6 @@ static const nir_shader_compiler_options midgard_nir_options = {
         .lower_ffract = true,
         .lower_fmod = true,
         .lower_fdiv = true,
-        .lower_idiv = true,
         .lower_isign = true,
         .lower_fpow = true,
         .lower_find_lsb = true,
@@ -76,8 +78,13 @@ static const nir_shader_compiler_options midgard_nir_options = {
         .lower_doubles_options = nir_lower_dmod,
 
         .lower_bitfield_extract_to_shifts = true,
+        .has_fsub = true,
+        .has_isub = true,
         .vectorize_io = true,
-        .use_interpolated_input_intrinsics = true
+        .use_interpolated_input_intrinsics = true,
+
+        .has_cs_global_id = true,
+        .lower_cs_local_index_from_id = true,
 };
 
 #endif

@@ -341,7 +341,7 @@ create_shader(struct gl_context *ctx, GLenum type)
    name = _mesa_HashFindFreeKeyBlock(ctx->Shared->ShaderObjects, 1);
    sh = _mesa_new_shader(name, _mesa_shader_enum_to_shader_stage(type));
    sh->Type = type;
-   _mesa_HashInsertLocked(ctx->Shared->ShaderObjects, name, sh);
+   _mesa_HashInsertLocked(ctx->Shared->ShaderObjects, name, sh, true);
    _mesa_HashUnlockMutex(ctx->Shared->ShaderObjects);
 
    return name;
@@ -373,7 +373,7 @@ create_shader_program(struct gl_context *ctx)
 
    shProg = _mesa_new_shader_program(name);
 
-   _mesa_HashInsertLocked(ctx->Shared->ShaderObjects, name, shProg);
+   _mesa_HashInsertLocked(ctx->Shared->ShaderObjects, name, shProg, true);
 
    assert(shProg->RefCount == 1);
 
@@ -1257,7 +1257,7 @@ struct update_programs_in_pipeline_params
 };
 
 static void
-update_programs_in_pipeline(GLuint key, void *data, void *userData)
+update_programs_in_pipeline(void *data, void *userData)
 {
    struct update_programs_in_pipeline_params *params =
       (struct update_programs_in_pipeline_params *) userData;
@@ -2581,6 +2581,7 @@ _mesa_use_program(struct gl_context *ctx, gl_shader_stage stage,
                                      shProg);
       _mesa_reference_program(ctx, target, prog);
       _mesa_update_allow_draw_out_of_order(ctx);
+      _mesa_update_primitive_id_is_unused(ctx);
       if (stage == MESA_SHADER_VERTEX)
          _mesa_update_vertex_processing_mode(ctx);
       return;
@@ -2610,7 +2611,7 @@ _mesa_copy_linked_program_data(const struct gl_shader_program *src,
    case MESA_SHADER_GEOMETRY: {
       dst->info.gs.vertices_in = src->Geom.VerticesIn;
       dst->info.gs.uses_end_primitive = src->Geom.UsesEndPrimitive;
-      dst->info.gs.uses_streams = src->Geom.UsesStreams;
+      dst->info.gs.active_stream_mask = src->Geom.ActiveStreamMask;
       break;
    }
    case MESA_SHADER_FRAGMENT: {
@@ -2936,7 +2937,7 @@ _mesa_GetActiveSubroutineUniformName(GLuint program, GLenum shadertype,
    /* get program resource name */
    _mesa_get_program_resource_name(shProg, resource_type,
                                    index, bufsize,
-                                   length, name, api_name);
+                                   length, name, false, api_name);
 }
 
 
@@ -2968,7 +2969,7 @@ _mesa_GetActiveSubroutineName(GLuint program, GLenum shadertype,
    resource_type = _mesa_shader_stage_to_subroutine(stage);
    _mesa_get_program_resource_name(shProg, resource_type,
                                    index, bufsize,
-                                   length, name, api_name);
+                                   length, name, false, api_name);
 }
 
 GLvoid GLAPIENTRY

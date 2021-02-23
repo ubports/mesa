@@ -1492,6 +1492,7 @@ _mesa_target_can_be_compressed(const struct gl_context *ctx, GLenum target,
       default:
          break;
       }
+      FALLTHROUGH;
    default:
       break;
    }
@@ -2678,7 +2679,7 @@ struct cb_info
  * Check render to texture callback.  Called from _mesa_HashWalk().
  */
 static void
-check_rtt_cb(UNUSED GLuint key, void *data, void *userData)
+check_rtt_cb(void *data, void *userData)
 {
    struct gl_framebuffer *fb = (struct gl_framebuffer *) data;
    const struct cb_info *info = (struct cb_info *) userData;
@@ -2744,9 +2745,9 @@ static inline void
 check_gen_mipmap(struct gl_context *ctx, GLenum target,
                  struct gl_texture_object *texObj, GLint level)
 {
-   if (texObj->GenerateMipmap &&
-       level == texObj->BaseLevel &&
-       level < texObj->MaxLevel) {
+   if (texObj->Attrib.GenerateMipmap &&
+       level == texObj->Attrib.BaseLevel &&
+       level < texObj->Attrib.MaxLevel) {
       assert(ctx->Driver.GenerateMipmap);
       ctx->Driver.GenerateMipmap(ctx, target, texObj);
    }
@@ -2915,7 +2916,9 @@ lookup_texture_ext_dsa(struct gl_context *ctx, GLenum target, GLuint texture,
       texObj = ctx->Shared->DefaultTex[targetIndex];
       assert(texObj);
    } else {
+      bool isGenName;
       texObj = _mesa_lookup_texture(ctx, texture);
+      isGenName = texObj != NULL;
       if (!texObj && ctx->API == API_OPENGL_CORE) {
          _mesa_error(ctx, GL_INVALID_OPERATION, "%s(non-gen name)", caller);
          return NULL;
@@ -2929,7 +2932,7 @@ lookup_texture_ext_dsa(struct gl_context *ctx, GLenum target, GLuint texture,
          }
 
          /* insert into hash table */
-         _mesa_HashInsert(ctx->Shared->TexObjects, texObj->Name, texObj);
+         _mesa_HashInsert(ctx->Shared->TexObjects, texObj->Name, texObj, isGenName);
       }
 
       if (texObj->Target != boundTarget) {
@@ -3572,11 +3575,11 @@ texture_sub_image(struct gl_context *ctx, GLuint dims,
          case 3:
             if (target != GL_TEXTURE_2D_ARRAY)
                zoffset += texImage->Border;
-            /* fall-through */
+            FALLTHROUGH;
          case 2:
             if (target != GL_TEXTURE_1D_ARRAY)
                yoffset += texImage->Border;
-            /* fall-through */
+            FALLTHROUGH;
          case 1:
             xoffset += texImage->Border;
          }
@@ -4201,16 +4204,17 @@ copy_texture_sub_image(struct gl_context *ctx, GLuint dims,
    case 3:
       if (target != GL_TEXTURE_2D_ARRAY)
          zoffset += texImage->Border;
-      /* fall-through */
+      FALLTHROUGH;
    case 2:
       if (target != GL_TEXTURE_1D_ARRAY)
          yoffset += texImage->Border;
-      /* fall-through */
+      FALLTHROUGH;
    case 1:
       xoffset += texImage->Border;
    }
 
-   if (_mesa_clip_copytexsubimage(ctx, &xoffset, &yoffset, &x, &y,
+   if (ctx->Const.NoClippingOnCopyTex ||
+       _mesa_clip_copytexsubimage(ctx, &xoffset, &yoffset, &x, &y,
                                   &width, &height)) {
       struct gl_renderbuffer *srcRb =
          get_copy_tex_image_source(ctx, texImage->TexFormat);
@@ -4416,7 +4420,8 @@ copyteximage(struct gl_context *ctx, GLuint dims, struct gl_texture_object *texO
             /* Allocate texture memory (no pixel data yet) */
             ctx->Driver.AllocTextureImageBuffer(ctx, texImage);
 
-            if (_mesa_clip_copytexsubimage(ctx, &dstX, &dstY, &srcX, &srcY,
+            if (ctx->Const.NoClippingOnCopyTex ||
+                _mesa_clip_copytexsubimage(ctx, &dstX, &dstY, &srcX, &srcY,
                                            &width, &height)) {
                struct gl_renderbuffer *srcRb =
                   get_copy_tex_image_source(ctx, texImage->TexFormat);
@@ -5728,7 +5733,7 @@ compressed_tex_sub_image(unsigned dim, GLenum target, GLuint textureOrIndex,
          break;
       case TEX_MODE_CURRENT_NO_ERROR:
          no_error = true;
-         /* fallthrough */
+         FALLTHROUGH;
       case TEX_MODE_CURRENT_ERROR:
       default:
          assert(textureOrIndex == 0);
@@ -6730,8 +6735,8 @@ texture_image_multisample(struct gl_context *ctx, GLuint dims,
    bool dsa = strstr(func, "ture") ? true : false;
 
    if (MESA_VERBOSE & (VERBOSE_API|VERBOSE_TEXTURE)) {
-      _mesa_debug(ctx, "%s(target=%s, samples=%d)\n", func,
-                  _mesa_enum_to_string(target), samples);
+      _mesa_debug(ctx, "%s(target=%s, samples=%d, internalformat=%s)\n", func,
+                  _mesa_enum_to_string(target), samples, _mesa_enum_to_string(internalformat));
    }
 
    if (!((ctx->Extensions.ARB_texture_multisample

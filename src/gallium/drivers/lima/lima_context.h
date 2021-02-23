@@ -66,11 +66,7 @@ struct lima_vs_shader_state {
    int shader_size;
    int prefetch;
 
-   /* pipe_constant_buffer.size is aligned with some pad bytes,
-    * so record here for the real start place of gpir lowered
-    * uniforms */
-   int uniform_pending_offset;
-
+   int uniform_size;
    void *constant;
    int constant_size;
 
@@ -181,6 +177,7 @@ struct lima_context {
       LIMA_CONTEXT_DIRTY_STENCIL_REF  = (1 << 12),
       LIMA_CONTEXT_DIRTY_CONST_BUFF   = (1 << 13),
       LIMA_CONTEXT_DIRTY_TEXTURES     = (1 << 14),
+      LIMA_CONTEXT_DIRTY_CLIP         = (1 << 15),
    } dirty;
 
    struct u_upload_mgr *uploader;
@@ -201,6 +198,7 @@ struct lima_context {
    struct pipe_blend_color blend_color;
    struct lima_blend_state *blend;
    struct pipe_stencil_ref stencil_ref;
+   struct pipe_clip_state clip;
    struct lima_context_constant_buffer const_buffer[PIPE_SHADER_TYPES];
    struct lima_texture_stateobj tex_stateobj;
    struct lima_pp_stream_state pp_stream;

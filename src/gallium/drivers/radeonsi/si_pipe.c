@@ -47,7 +47,7 @@
 
 static struct pipe_context *si_create_context(struct pipe_screen *screen, unsigned flags);
 
-static const struct debug_named_value debug_options[] = {
+static const struct debug_named_value radeonsi_debug_options[] = {
    /* Shader logging options: */
    {"vs", DBG(VS), "Print vertex shaders"},
    {"ps", DBG(PS), "Print pixel shaders"},
@@ -68,7 +68,6 @@ static const struct debug_named_value debug_options[] = {
    {"w64ge", DBG(W64_GE), "Use Wave64 for vertex, tessellation, and geometry shaders."},
    {"w64ps", DBG(W64_PS), "Use Wave64 for pixel shaders."},
    {"w64cs", DBG(W64_CS), "Use Wave64 for computes shaders."},
-   {"noinfinterp", DBG(KILL_PS_INF_INTERP), "Kill PS with infinite interp coeff"},
 
    /* Shader compiler options (with no effect on the shader cache): */
    {"checkir", DBG(CHECK_IR), "Enable additional sanity checks on shader IR"},
@@ -83,19 +82,15 @@ static const struct debug_named_value debug_options[] = {
    {"cache_stats", DBG(CACHE_STATS), "Print shader cache statistics."},
 
    /* Driver options: */
-   {"forcedma", DBG(FORCE_SDMA), "Use SDMA for all operations when possible."},
-   {"nodma", DBG(NO_SDMA), "Disable SDMA"},
-   {"nodmaclear", DBG(NO_SDMA_CLEARS), "Disable SDMA clears"},
-   {"nodmacopyimage", DBG(NO_SDMA_COPY_IMAGE), "Disable SDMA image copies"},
    {"nowc", DBG(NO_WC), "Disable GTT write combining"},
    {"check_vm", DBG(CHECK_VM), "Check VM faults and dump debug info."},
    {"reserve_vmid", DBG(RESERVE_VMID), "Force VMID reservation per context."},
-   {"zerovram", DBG(ZERO_VRAM), "Clear VRAM allocations."},
    {"shadowregs", DBG(SHADOW_REGS), "Enable CP register shadowing."},
 
    /* 3D engine options: */
    {"nogfx", DBG(NO_GFX), "Disable graphics. Only multimedia compute paths can be used."},
    {"nongg", DBG(NO_NGG), "Disable NGG and use the legacy pipeline."},
+   {"nofastlaunch", DBG(NO_FAST_LAUNCH), "Disable NGG GS fast launch."},
    {"nggc", DBG(ALWAYS_NGG_CULLING_ALL), "Always use NGG culling even when it can hurt."},
    {"nggctess", DBG(ALWAYS_NGG_CULLING_TESS), "Always use NGG culling for tessellation."},
    {"nonggc", DBG(NO_NGG_CULLING), "Disable NGG culling."},
@@ -109,7 +104,6 @@ static const struct debug_named_value debug_options[] = {
    {"dpbb", DBG(DPBB), "Enable DPBB."},
    {"dfsm", DBG(DFSM), "Enable DFSM."},
    {"nohyperz", DBG(NO_HYPERZ), "Disable Hyper-Z"},
-   {"norbplus", DBG(NO_RB_PLUS), "Disable RB+."},
    {"no2d", DBG(NO_2D_TILING), "Disable 2D tiling"},
    {"notiling", DBG(NO_TILING), "Disable tiling"},
    {"nodcc", DBG(NO_DCC), "Disable DCC."},
@@ -118,14 +112,16 @@ static const struct debug_named_value debug_options[] = {
    {"nodccmsaa", DBG(NO_DCC_MSAA), "Disable DCC for MSAA"},
    {"nofmask", DBG(NO_FMASK), "Disable MSAA compression"},
 
+   {"tmz", DBG(TMZ), "Force allocation of scanout/depth/stencil buffer as encrypted"},
+   {"sqtt", DBG(SQTT), "Enable SQTT"},
+
    DEBUG_NAMED_VALUE_END /* must be last */
 };
 
 static const struct debug_named_value test_options[] = {
    /* Tests: */
-   {"testdma", DBG(TEST_DMA), "Invoke SDMA tests and exit."},
+   {"blit", DBG(TEST_BLIT), "Invoke blit tests and exit."},
    {"testvmfaultcp", DBG(TEST_VMFAULT_CP), "Invoke a CP VM fault test and exit."},
-   {"testvmfaultsdma", DBG(TEST_VMFAULT_SDMA), "Invoke a SDMA VM fault test and exit."},
    {"testvmfaultshader", DBG(TEST_VMFAULT_SHADER), "Invoke a shader VM fault test and exit."},
    {"testdmaperf", DBG(TEST_DMA_PERF), "Test DMA performance"},
    {"testgds", DBG(TEST_GDS), "Test GDS."},
@@ -165,6 +161,12 @@ static void si_destroy_compiler(struct ac_llvm_compiler *compiler)
    ac_destroy_llvm_compiler(compiler);
 }
 
+
+static void decref_implicit_resource(struct hash_entry *entry)
+{
+   pipe_resource_reference((struct pipe_resource**)&entry->data, NULL);
+}
+
 /*
  * pipe_context
  */
@@ -185,9 +187,13 @@ static void si_destroy_context(struct pipe_context *context)
    if (sctx->chip_class >= GFX10 && sctx->has_graphics)
       gfx10_destroy_query(sctx);
 
+   if (sctx->thread_trace)
+      si_destroy_thread_trace(sctx);
+
    pipe_resource_reference(&sctx->esgs_ring, NULL);
    pipe_resource_reference(&sctx->gsvs_ring, NULL);
    pipe_resource_reference(&sctx->tess_rings, NULL);
+   pipe_resource_reference(&sctx->tess_rings_tmz, NULL);
    pipe_resource_reference(&sctx->null_const_buf.buffer, NULL);
    pipe_resource_reference(&sctx->sample_pos_buffer, NULL);
    si_resource_reference(&sctx->border_color_buffer, NULL);
@@ -195,10 +201,15 @@ static void si_destroy_context(struct pipe_context *context)
    si_resource_reference(&sctx->scratch_buffer, NULL);
    si_resource_reference(&sctx->compute_scratch_buffer, NULL);
    si_resource_reference(&sctx->wait_mem_scratch, NULL);
+   si_resource_reference(&sctx->wait_mem_scratch_tmz, NULL);
    si_resource_reference(&sctx->small_prim_cull_info_buf, NULL);
 
    if (sctx->cs_preamble_state)
       si_pm4_free_state(sctx, sctx->cs_preamble_state, ~0);
+   if (sctx->cs_preamble_tess_rings)
+      si_pm4_free_state(sctx, sctx->cs_preamble_tess_rings, ~0);
+   if (sctx->cs_preamble_tess_rings_tmz)
+      si_pm4_free_state(sctx, sctx->cs_preamble_tess_rings_tmz, ~0);
    if (sctx->cs_preamble_gs_rings)
       si_pm4_free_state(sctx, sctx->cs_preamble_gs_rings, ~0);
    for (i = 0; i < ARRAY_SIZE(sctx->vgt_shader_config); i++)
@@ -272,16 +283,17 @@ static void si_destroy_context(struct pipe_context *context)
    if (sctx->sh_query_result_shader)
       sctx->b.delete_compute_state(&sctx->b, sctx->sh_query_result_shader);
 
-   if (sctx->gfx_cs)
-      sctx->ws->cs_destroy(sctx->gfx_cs);
-   if (sctx->sdma_cs)
-      sctx->ws->cs_destroy(sctx->sdma_cs);
+   sctx->ws->cs_destroy(&sctx->gfx_cs);
    if (sctx->ctx)
       sctx->ws->ctx_destroy(sctx->ctx);
 
+   if (sctx->dirty_implicit_resources)
+      _mesa_hash_table_destroy(sctx->dirty_implicit_resources,
+                               decref_implicit_resource);
+
    if (sctx->b.stream_uploader)
       u_upload_destroy(sctx->b.stream_uploader);
-   if (sctx->b.const_uploader)
+   if (sctx->b.const_uploader && sctx->b.const_uploader != sctx->b.stream_uploader)
       u_upload_destroy(sctx->b.const_uploader);
    if (sctx->cached_gtt_allocator)
       u_upload_destroy(sctx->cached_gtt_allocator);
@@ -289,13 +301,12 @@ static void si_destroy_context(struct pipe_context *context)
    slab_destroy_child(&sctx->pool_transfers);
    slab_destroy_child(&sctx->pool_transfers_unsync);
 
-   if (sctx->allocator_zeroed_memory)
-      u_suballocator_destroy(sctx->allocator_zeroed_memory);
+   u_suballocator_destroy(&sctx->allocator_zeroed_memory);
 
    sctx->ws->fence_reference(&sctx->last_gfx_fence, NULL);
-   sctx->ws->fence_reference(&sctx->last_sdma_fence, NULL);
    sctx->ws->fence_reference(&sctx->last_ib_barrier_fence, NULL);
    si_resource_reference(&sctx->eop_bug_scratch, NULL);
+   si_resource_reference(&sctx->eop_bug_scratch_tmz, NULL);
    si_resource_reference(&sctx->index_ring, NULL);
    si_resource_reference(&sctx->barrier_buf, NULL);
    si_resource_reference(&sctx->last_ib_barrier_buf, NULL);
@@ -315,8 +326,6 @@ static void si_destroy_context(struct pipe_context *context)
    util_dynarray_fini(&sctx->resident_tex_needs_color_decompress);
    util_dynarray_fini(&sctx->resident_img_needs_color_decompress);
    util_dynarray_fini(&sctx->resident_tex_needs_depth_decompress);
-   si_unref_sdma_uploads(sctx);
-   free(sctx->sdma_uploads);
    FREE(sctx);
 }
 
@@ -415,6 +424,14 @@ static void si_set_context_param(struct pipe_context *ctx, enum pipe_context_par
    }
 }
 
+static void si_set_frontend_noop(struct pipe_context *ctx, bool enable)
+{
+   struct si_context *sctx = (struct si_context *)ctx;
+
+   ctx->flush(ctx, NULL, PIPE_FLUSH_ASYNC);
+   sctx->is_noop = enable;
+}
+
 static struct pipe_context *si_create_context(struct pipe_screen *screen, unsigned flags)
 {
    struct si_screen *sscreen = (struct si_screen *)screen;
@@ -451,60 +468,52 @@ static struct pipe_context *si_create_context(struct pipe_screen *screen, unsign
    sctx->chip_class = sscreen->info.chip_class;
 
    if (sctx->chip_class == GFX7 || sctx->chip_class == GFX8 || sctx->chip_class == GFX9) {
-      sctx->eop_bug_scratch = si_resource(pipe_buffer_create(
-         &sscreen->b, 0, PIPE_USAGE_DEFAULT, 16 * sscreen->info.num_render_backends));
+      sctx->eop_bug_scratch = si_aligned_buffer_create(
+         &sscreen->b, SI_RESOURCE_FLAG_DRIVER_INTERNAL,
+         PIPE_USAGE_DEFAULT, 16 * sscreen->info.max_render_backends, 256);
+      if (sctx->screen->info.has_tmz_support)
+         sctx->eop_bug_scratch_tmz = si_aligned_buffer_create(
+            &sscreen->b, PIPE_RESOURCE_FLAG_ENCRYPTED | SI_RESOURCE_FLAG_DRIVER_INTERNAL,
+            PIPE_USAGE_DEFAULT, 16 * sscreen->info.max_render_backends, 256);
       if (!sctx->eop_bug_scratch)
          goto fail;
    }
 
-   /* Initialize context allocators. */
-   sctx->allocator_zeroed_memory =
-      u_suballocator_create(&sctx->b, 128 * 1024, 0, PIPE_USAGE_DEFAULT,
-                            SI_RESOURCE_FLAG_UNMAPPABLE | SI_RESOURCE_FLAG_CLEAR, false);
-   if (!sctx->allocator_zeroed_memory)
+   /* Initialize the context handle and the command stream. */
+   sctx->ctx = sctx->ws->ctx_create(sctx->ws);
+   if (!sctx->ctx)
       goto fail;
 
-   sctx->b.stream_uploader =
-      u_upload_create(&sctx->b, 1024 * 1024, 0, PIPE_USAGE_STREAM, SI_RESOURCE_FLAG_READ_ONLY);
-   if (!sctx->b.stream_uploader)
-      goto fail;
+   ws->cs_create(&sctx->gfx_cs, sctx->ctx, sctx->has_graphics ? RING_GFX : RING_COMPUTE,
+                 (void *)si_flush_gfx_cs, sctx, stop_exec_on_failure);
+
+   /* Initialize private allocators. */
+   u_suballocator_init(&sctx->allocator_zeroed_memory, &sctx->b, 128 * 1024, 0,
+                       PIPE_USAGE_DEFAULT,
+                       SI_RESOURCE_FLAG_UNMAPPABLE | SI_RESOURCE_FLAG_CLEAR, false);
 
    sctx->cached_gtt_allocator = u_upload_create(&sctx->b, 16 * 1024, 0, PIPE_USAGE_STAGING, 0);
    if (!sctx->cached_gtt_allocator)
       goto fail;
 
-   sctx->ctx = sctx->ws->ctx_create(sctx->ws);
-   if (!sctx->ctx)
+   /* Initialize public allocators. */
+   bool smart_access_memory = sscreen->info.smart_access_memory;
+   sctx->b.stream_uploader =
+      u_upload_create(&sctx->b, 1024 * 1024, 0,
+                      smart_access_memory ? PIPE_USAGE_DEFAULT : PIPE_USAGE_STREAM,
+                      SI_RESOURCE_FLAG_32BIT); /* same flags as const_uploader */
+   if (!sctx->b.stream_uploader)
       goto fail;
 
-   if (sscreen->info.num_rings[RING_DMA] && !(sscreen->debug_flags & DBG(NO_SDMA)) &&
-       /* SDMA causes corruption on RX 580:
-        *    https://gitlab.freedesktop.org/mesa/mesa/-/issues/1399
-        *    https://gitlab.freedesktop.org/mesa/mesa/-/issues/1889
-        */
-       (sctx->chip_class != GFX8 || sscreen->debug_flags & DBG(FORCE_SDMA)) &&
-       /* SDMA timeouts sometimes on gfx10 so disable it for now. See:
-        *    https://bugs.freedesktop.org/show_bug.cgi?id=111481
-        *    https://gitlab.freedesktop.org/mesa/mesa/-/issues/1907
-        */
-       (sctx->chip_class != GFX10 || sscreen->debug_flags & DBG(FORCE_SDMA))) {
-      sctx->sdma_cs = sctx->ws->cs_create(sctx->ctx, RING_DMA, (void *)si_flush_dma_cs, sctx,
-                                          stop_exec_on_failure);
+   if (smart_access_memory) {
+      sctx->b.const_uploader = sctx->b.stream_uploader;
+   } else {
+      sctx->b.const_uploader =
+         u_upload_create(&sctx->b, 256 * 1024, 0, PIPE_USAGE_DEFAULT,
+                         SI_RESOURCE_FLAG_32BIT);
+      if (!sctx->b.const_uploader)
+         goto fail;
    }
-
-   bool use_sdma_upload = sscreen->info.has_dedicated_vram && sctx->sdma_cs;
-   sctx->b.const_uploader =
-      u_upload_create(&sctx->b, 256 * 1024, 0, PIPE_USAGE_DEFAULT,
-                      SI_RESOURCE_FLAG_32BIT |
-                         (use_sdma_upload ? SI_RESOURCE_FLAG_UPLOAD_FLUSH_EXPLICIT_VIA_SDMA : 0));
-   if (!sctx->b.const_uploader)
-      goto fail;
-
-   if (use_sdma_upload)
-      u_upload_enable_flush_explicit(sctx->b.const_uploader);
-
-   sctx->gfx_cs = ws->cs_create(sctx->ctx, sctx->has_graphics ? RING_GFX : RING_COMPUTE,
-                                (void *)si_flush_gfx_cs, sctx, stop_exec_on_failure);
 
    /* Border colors. */
    sctx->border_color_table = malloc(SI_MAX_BORDER_COLORS * sizeof(*sctx->border_color_table));
@@ -517,7 +526,7 @@ static struct pipe_context *si_create_context(struct pipe_screen *screen, unsign
       goto fail;
 
    sctx->border_color_map =
-      ws->buffer_map(sctx->border_color_buffer->buf, NULL, PIPE_TRANSFER_WRITE);
+      ws->buffer_map(sctx->border_color_buffer->buf, NULL, PIPE_MAP_WRITE);
    if (!sctx->border_color_map)
       goto fail;
 
@@ -535,6 +544,7 @@ static struct pipe_context *si_create_context(struct pipe_screen *screen, unsign
    sctx->b.set_context_param = si_set_context_param;
    sctx->b.get_device_reset_status = si_get_reset_status;
    sctx->b.set_device_reset_callback = si_set_device_reset_callback;
+   sctx->b.set_frontend_noop = si_set_frontend_noop;
 
    si_init_all_descriptors(sctx);
    si_init_buffer_functions(sctx);
@@ -580,16 +590,9 @@ static struct pipe_context *si_create_context(struct pipe_screen *screen, unsign
       si_initialize_prim_discard_tunables(sscreen, is_aux_context,
                                           &sctx->prim_discard_vertex_count_threshold,
                                           &sctx->index_ring_size_per_ib);
+   } else {
+      sctx->prim_discard_vertex_count_threshold = UINT_MAX;
    }
-
-   /* Initialize SDMA functions. */
-   if (sctx->chip_class >= GFX7)
-      cik_init_sdma_functions(sctx);
-   else
-      sctx->dma_copy = si_resource_copy_region;
-
-   if (sscreen->debug_flags & DBG(FORCE_SDMA))
-      sctx->b.resource_copy_region = sctx->dma_copy;
 
    sctx->sample_mask = 0xffff;
 
@@ -604,18 +607,32 @@ static struct pipe_context *si_create_context(struct pipe_screen *screen, unsign
 
    if (sctx->chip_class >= GFX9 || si_compute_prim_discard_enabled(sctx)) {
       sctx->wait_mem_scratch =
-           si_aligned_buffer_create(screen, SI_RESOURCE_FLAG_UNMAPPABLE,
+           si_aligned_buffer_create(screen,
+                                    SI_RESOURCE_FLAG_UNMAPPABLE | SI_RESOURCE_FLAG_DRIVER_INTERNAL,
                                     PIPE_USAGE_DEFAULT, 8,
                                     sscreen->info.tcc_cache_line_size);
       if (!sctx->wait_mem_scratch)
          goto fail;
+
+      if (sscreen->info.has_tmz_support) {
+         sctx->wait_mem_scratch_tmz =
+              si_aligned_buffer_create(screen,
+                                       SI_RESOURCE_FLAG_UNMAPPABLE | SI_RESOURCE_FLAG_DRIVER_INTERNAL |
+                                       PIPE_RESOURCE_FLAG_ENCRYPTED,
+                                       PIPE_USAGE_DEFAULT, 8,
+                                       sscreen->info.tcc_cache_line_size);
+         if (!sctx->wait_mem_scratch_tmz)
+            goto fail;
+      }
    }
 
    /* GFX7 cannot unbind a constant buffer (S_BUFFER_LOAD doesn't skip loads
     * if NUM_RECORDS == 0). We need to use a dummy buffer instead. */
    if (sctx->chip_class == GFX7) {
       sctx->null_const_buf.buffer =
-         pipe_aligned_buffer_create(screen, SI_RESOURCE_FLAG_32BIT, PIPE_USAGE_DEFAULT, 16,
+         pipe_aligned_buffer_create(screen,
+                                    SI_RESOURCE_FLAG_32BIT | SI_RESOURCE_FLAG_DRIVER_INTERNAL,
+                                    PIPE_USAGE_DEFAULT, 16,
                                     sctx->screen->info.tcc_cache_line_size);
       if (!sctx->null_const_buf.buffer)
          goto fail;
@@ -643,7 +660,7 @@ static struct pipe_context *si_create_context(struct pipe_screen *screen, unsign
     * evenly between CUs. The number is only a function of the number of CUs.
     * We can decrease the constant to decrease the scratch buffer size.
     *
-    * sctx->scratch_waves must be >= the maximum posible size of
+    * sctx->scratch_waves must be >= the maximum possible size of
     * 1 threadgroup, so that the hw doesn't hang from being unable
     * to start any.
     *
@@ -664,26 +681,32 @@ static struct pipe_context *si_create_context(struct pipe_screen *screen, unsign
    util_dynarray_init(&sctx->resident_img_needs_color_decompress, NULL);
    util_dynarray_init(&sctx->resident_tex_needs_depth_decompress, NULL);
 
+   sctx->dirty_implicit_resources = _mesa_pointer_hash_table_create(NULL);
+   if (!sctx->dirty_implicit_resources)
+      goto fail;
+
    sctx->sample_pos_buffer =
       pipe_buffer_create(sctx->b.screen, 0, PIPE_USAGE_DEFAULT, sizeof(sctx->sample_positions));
    pipe_buffer_write(&sctx->b, sctx->sample_pos_buffer, 0, sizeof(sctx->sample_positions),
                      &sctx->sample_positions);
 
    /* The remainder of this function initializes the gfx CS and must be last. */
-   assert(sctx->gfx_cs->current.cdw == 0);
+   assert(sctx->gfx_cs.current.cdw == 0);
 
    if (sctx->has_graphics) {
       si_init_cp_reg_shadowing(sctx);
    }
 
    si_begin_new_gfx_cs(sctx, true);
-   assert(sctx->gfx_cs->current.cdw == sctx->initial_gfx_cs_size);
+   assert(sctx->gfx_cs.current.cdw == sctx->initial_gfx_cs_size);
 
    /* Initialize per-context buffers. */
-   if (sctx->wait_mem_scratch) {
+   if (sctx->wait_mem_scratch)
       si_cp_write_data(sctx, sctx->wait_mem_scratch, 0, 4, V_370_MEM, V_370_ME,
                        &sctx->wait_mem_number);
-   }
+   if (sctx->wait_mem_scratch_tmz)
+      si_cp_write_data(sctx, sctx->wait_mem_scratch_tmz, 0, 4, V_370_MEM, V_370_ME,
+                       &sctx->wait_mem_number);
 
    if (sctx->chip_class == GFX7) {
       /* Clear the NULL constant buffer, because loads should return zeros.
@@ -695,7 +718,7 @@ static struct pipe_context *si_create_context(struct pipe_screen *screen, unsign
                       &clear_value, 4, SI_COHERENCY_SHADER, true);
    }
 
-   sctx->initial_gfx_cs_size = sctx->gfx_cs->current.cdw;
+   sctx->initial_gfx_cs_size = sctx->gfx_cs.current.cdw;
    return &sctx->b;
 fail:
    fprintf(stderr, "radeonsi: Failed to create a context.\n");
@@ -714,6 +737,13 @@ static struct pipe_context *si_pipe_create_context(struct pipe_screen *screen, v
       flags |= PIPE_CONTEXT_DEBUG;
 
    ctx = si_create_context(screen, flags);
+
+   if (ctx && sscreen->info.chip_class >= GFX9 && sscreen->debug_flags & DBG(SQTT)) {
+      if (!si_init_thread_trace((struct si_context *)ctx)) {
+         FREE(ctx);
+         return NULL;
+      }
+   }
 
    if (!(flags & PIPE_CONTEXT_PREFER_THREADED))
       return ctx;
@@ -835,11 +865,6 @@ static void si_test_vmfault(struct si_screen *sscreen, uint64_t test_flags)
       ctx->flush(ctx, NULL, 0);
       puts("VM fault test: CP - done.");
    }
-   if (test_flags & DBG(TEST_VMFAULT_SDMA)) {
-      si_sdma_clear_buffer(sctx, buf, 0, 4, 0);
-      ctx->flush(ctx, NULL, 0);
-      puts("VM fault test: SDMA - done.");
-   }
    if (test_flags & DBG(TEST_VMFAULT_SHADER)) {
       util_test_constant_buffer(ctx, buf);
       puts("VM fault test: Shader - done.");
@@ -851,11 +876,11 @@ static void si_test_gds_memory_management(struct si_context *sctx, unsigned allo
                                           unsigned alignment, enum radeon_bo_domain domain)
 {
    struct radeon_winsys *ws = sctx->ws;
-   struct radeon_cmdbuf *cs[8];
+   struct radeon_cmdbuf cs[8];
    struct pb_buffer *gds_bo[ARRAY_SIZE(cs)];
 
    for (unsigned i = 0; i < ARRAY_SIZE(cs); i++) {
-      cs[i] = ws->cs_create(sctx->ctx, RING_COMPUTE, NULL, NULL, false);
+      ws->cs_create(&cs[i], sctx->ctx, RING_COMPUTE, NULL, NULL, false);
       gds_bo[i] = ws->buffer_create(ws, alloc_size, alignment, domain, 0);
       assert(gds_bo[i]);
    }
@@ -868,12 +893,12 @@ static void si_test_gds_memory_management(struct si_context *sctx, unsigned allo
           * to make the GPU busy for a moment.
           */
          si_cp_dma_clear_buffer(
-            sctx, cs[i], NULL, 0, alloc_size, 0,
+            sctx, &cs[i], NULL, 0, alloc_size, 0,
             SI_CPDMA_SKIP_BO_LIST_UPDATE | SI_CPDMA_SKIP_CHECK_CS_SPACE | SI_CPDMA_SKIP_GFX_SYNC, 0,
             0);
 
-         ws->cs_add_buffer(cs[i], gds_bo[i], RADEON_USAGE_READWRITE, domain, 0);
-         ws->cs_flush(cs[i], PIPE_FLUSH_ASYNC, NULL);
+         ws->cs_add_buffer(&cs[i], gds_bo[i], RADEON_USAGE_READWRITE, domain, 0);
+         ws->cs_flush(&cs[i], PIPE_FLUSH_ASYNC, NULL);
       }
    }
    exit(0);
@@ -898,18 +923,8 @@ static void si_disk_cache_create(struct si_screen *sscreen)
    _mesa_sha1_final(&ctx, sha1);
    disk_cache_format_hex_id(cache_id, sha1, 20 * 2);
 
-/* These flags affect shader compilation. */
-#define ALL_FLAGS (DBG(GISEL) | DBG(KILL_PS_INF_INTERP))
-   uint64_t shader_debug_flags = sscreen->debug_flags & ALL_FLAGS;
-
-   /* Add the high bits of 32-bit addresses, which affects
-    * how 32-bit addresses are expanded to 64 bits.
-    */
-   STATIC_ASSERT(ALL_FLAGS <= UINT_MAX);
-   assert((int16_t)sscreen->info.address32_hi == (int32_t)sscreen->info.address32_hi);
-   shader_debug_flags |= (uint64_t)(sscreen->info.address32_hi & 0xffff) << 32;
-
-   sscreen->disk_shader_cache = disk_cache_create(sscreen->info.name, cache_id, shader_debug_flags);
+   sscreen->disk_shader_cache = disk_cache_create(sscreen->info.name, cache_id,
+                                                  sscreen->info.address32_hi);
 }
 
 static void si_set_max_shader_compiler_threads(struct pipe_screen *screen, unsigned max_threads)
@@ -941,8 +956,19 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
       return NULL;
    }
 
+   {
+#define OPT_BOOL(name, dflt, description)                                                          \
+   sscreen->options.name = driQueryOptionb(config->options, "radeonsi_" #name);
+#include "si_debug_options.h"
+   }
+
    sscreen->ws = ws;
-   ws->query_info(ws, &sscreen->info);
+   ws->query_info(ws, &sscreen->info,
+                  sscreen->options.enable_sam,
+                  sscreen->options.disable_sam);
+
+   /* Older LLVM have buggy v_pk_* instructions. */
+   sscreen->info.has_packed_math_16bit &= LLVM_VERSION_MAJOR >= 11;
 
    if (sscreen->info.chip_class == GFX10_3 && LLVM_VERSION_MAJOR < 11) {
       fprintf(stderr, "radeonsi: GFX 10.3 requires LLVM 11 or higher\n");
@@ -963,12 +989,20 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
                            &sscreen->pa_sc_raster_config_1, &sscreen->se_tile_repeat);
    }
 
-   sscreen->debug_flags = debug_get_flags_option("R600_DEBUG", debug_options, 0);
-   sscreen->debug_flags |= debug_get_flags_option("AMD_DEBUG", debug_options, 0);
+   sscreen->debug_flags = debug_get_flags_option("R600_DEBUG", radeonsi_debug_options, 0);
+   sscreen->debug_flags |= debug_get_flags_option("AMD_DEBUG", radeonsi_debug_options, 0);
    test_flags = debug_get_flags_option("AMD_TEST", test_options, 0);
 
    if (sscreen->debug_flags & DBG(NO_GFX))
       sscreen->info.has_graphics = false;
+
+   if ((sscreen->debug_flags & DBG(TMZ)) &&
+       !sscreen->info.has_tmz_support) {
+      fprintf(stderr, "radeonsi: requesting TMZ features but TMZ is not supported\n");
+      FREE(sscreen);
+      return NULL;
+   }
+
 
    /* Set functions first. */
    sscreen->b.context_create = si_pipe_create_context;
@@ -992,7 +1026,7 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
       sscreen->debug_flags |= DBG(FS_CORRECT_DERIVS_AFTER_KILL);
 
    if (sscreen->debug_flags & DBG(INFO))
-      ac_print_gpu_info(&sscreen->info);
+      ac_print_gpu_info(&sscreen->info, stdout);
 
    slab_create_parent(&sscreen->pool_transfers, sizeof(struct si_transfer), 64);
 
@@ -1016,15 +1050,8 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
       return NULL;
    }
 
-   {
-#define OPT_BOOL(name, dflt, description)                                                          \
-   sscreen->options.name = driQueryOptionb(config->options, "radeonsi_" #name);
-#include "si_debug_options.h"
-   }
-
-   if (sscreen->options.no_infinite_interp) {
-      sscreen->debug_flags |= DBG(KILL_PS_INF_INTERP);
-   }
+   if (sscreen->info.chip_class < GFX10_3)
+      sscreen->options.vrs2x2 = false;
 
    si_disk_cache_create(sscreen);
 
@@ -1120,8 +1147,8 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
    } else if (sscreen->info.chip_class >= GFX7) {
       if (sscreen->info.chip_class >= GFX8)
          --max_offchip_buffers;
-      sscreen->vgt_hs_offchip_param = S_03093C_OFFCHIP_BUFFERING(max_offchip_buffers) |
-                                      S_03093C_OFFCHIP_GRANULARITY(offchip_granularity);
+      sscreen->vgt_hs_offchip_param = S_03093C_OFFCHIP_BUFFERING_GFX7(max_offchip_buffers) |
+                                      S_03093C_OFFCHIP_GRANULARITY_GFX7(offchip_granularity);
    } else {
       assert(offchip_granularity == V_03093C_X_8K_DWORDS);
       sscreen->vgt_hs_offchip_param = S_0089B0_OFFCHIP_BUFFERING(max_offchip_buffers);
@@ -1144,13 +1171,11 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
       driQueryOptionb(config->options, "radeonsi_commutative_blend_add") ||
       driQueryOptionb(config->options, "allow_draw_out_of_order");
 
-   sscreen->use_ngg = sscreen->info.chip_class >= GFX10 && sscreen->info.family != CHIP_NAVI14 &&
-                      !(sscreen->debug_flags & DBG(NO_NGG));
+   sscreen->use_ngg = !(sscreen->debug_flags & DBG(NO_NGG)) &&
+                      sscreen->info.chip_class >= GFX10 &&
+                      (sscreen->info.family != CHIP_NAVI14 ||
+                       sscreen->info.is_pro_graphics);
    sscreen->use_ngg_culling = sscreen->use_ngg && !(sscreen->debug_flags & DBG(NO_NGG_CULLING));
-   sscreen->always_use_ngg_culling_all =
-      sscreen->use_ngg_culling && sscreen->debug_flags & DBG(ALWAYS_NGG_CULLING_ALL);
-   sscreen->always_use_ngg_culling_tess =
-      sscreen->use_ngg_culling && sscreen->debug_flags & DBG(ALWAYS_NGG_CULLING_TESS);
    sscreen->use_ngg_streamout = false;
 
    /* Only enable primitive binning on APUs by default. */
@@ -1175,6 +1200,31 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
       sscreen->dfsm_allowed = false;
    } else if (sscreen->debug_flags & DBG(NO_DFSM)) {
       sscreen->dfsm_allowed = false;
+   }
+
+   if (sscreen->dpbb_allowed) {
+      if (sscreen->info.has_dedicated_vram) {
+         if (sscreen->info.max_render_backends > 4) {
+            sscreen->pbb_context_states_per_bin = 1;
+            sscreen->pbb_persistent_states_per_bin = 1;
+         } else {
+            sscreen->pbb_context_states_per_bin = 3;
+            sscreen->pbb_persistent_states_per_bin = 8;
+         }
+      } else {
+         /* This is a workaround for:
+          *    https://bugs.freedesktop.org/show_bug.cgi?id=110214
+          * (an alternative is to insert manual BATCH_BREAK event when
+          *  a context_roll is detected). */
+         sscreen->pbb_context_states_per_bin = sscreen->info.has_gfx9_scissor_bug ? 1 : 6;
+         /* Using 32 here can cause GPU hangs on RAVEN1 */
+         sscreen->pbb_persistent_states_per_bin = 16;
+      }
+
+      assert(sscreen->pbb_context_states_per_bin >= 1 &&
+             sscreen->pbb_context_states_per_bin <= 6);
+      assert(sscreen->pbb_persistent_states_per_bin >= 1 &&
+             sscreen->pbb_persistent_states_per_bin <= 32);
    }
 
    /* While it would be nice not to have this flag, we are constrained
@@ -1260,14 +1310,14 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
       sscreen->aux_context->set_log_context(sscreen->aux_context, log);
    }
 
-   if (test_flags & DBG(TEST_DMA))
-      si_test_dma(sscreen);
+   if (test_flags & DBG(TEST_BLIT))
+      si_test_blit(sscreen);
 
    if (test_flags & DBG(TEST_DMA_PERF)) {
       si_test_dma_perf(sscreen);
    }
 
-   if (test_flags & (DBG(TEST_VMFAULT_CP) | DBG(TEST_VMFAULT_SDMA) | DBG(TEST_VMFAULT_SHADER)))
+   if (test_flags & (DBG(TEST_VMFAULT_CP) | DBG(TEST_VMFAULT_SHADER)))
       si_test_vmfault(sscreen, test_flags);
 
    if (test_flags & DBG(TEST_GDS))

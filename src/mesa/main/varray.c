@@ -459,8 +459,7 @@ static const uint16_t vertex_formats[][4][4] = {
  */
 static enum pipe_format
 vertex_format_to_pipe_format(GLubyte size, GLenum16 type, GLenum16 format,
-                             GLboolean normalized, GLboolean integer,
-                             GLboolean doubles)
+                             bool normalized, bool integer, bool doubles)
 {
    assert(size >= 1 && size <= 4);
    assert(format == GL_RGBA || format == GL_BGRA);
@@ -674,8 +673,8 @@ validate_array_format(struct gl_context *ctx, const char *func,
                       struct gl_vertex_array_object *vao,
                       GLuint attrib, GLbitfield legalTypesMask,
                       GLint sizeMin, GLint sizeMax,
-                      GLint size, GLenum type, GLboolean normalized,
-                      GLboolean integer, GLboolean doubles,
+                      GLint size, GLenum type, bool normalized,
+                      bool integer, bool doubles,
                       GLuint relativeOffset, GLenum format)
 {
    GLbitfield typeBit;
@@ -2534,139 +2533,136 @@ _mesa_EdgeFlagPointerEXT(GLsizei stride, GLsizei count, const GLboolean *ptr)
 }
 
 
+bool
+_mesa_get_interleaved_layout(GLenum format,
+                             struct gl_interleaved_layout *layout)
+{
+   int f = sizeof(GLfloat);
+   int c = f * ((4 * sizeof(GLubyte) + (f - 1)) / f);
+
+   memset(layout, 0, sizeof(*layout));
+
+   switch (format) {
+      case GL_V2F:
+         layout->vcomps = 2;
+         layout->defstride = 2 * f;
+         break;
+      case GL_V3F:
+         layout->vcomps = 3;
+         layout->defstride = 3 * f;
+         break;
+      case GL_C4UB_V2F:
+         layout->cflag = true;
+         layout->ccomps = 4;  layout->vcomps = 2;
+         layout->ctype = GL_UNSIGNED_BYTE;
+         layout->voffset = c;
+         layout->defstride = c + 2 * f;
+         break;
+      case GL_C4UB_V3F:
+         layout->cflag = true;
+         layout->ccomps = 4;  layout->vcomps = 3;
+         layout->ctype = GL_UNSIGNED_BYTE;
+         layout->voffset = c;
+         layout->defstride = c + 3 * f;
+         break;
+      case GL_C3F_V3F:
+         layout->cflag = true;
+         layout->ccomps = 3;  layout->vcomps = 3;
+         layout->ctype = GL_FLOAT;
+         layout->voffset = 3 * f;
+         layout->defstride = 6 * f;
+         break;
+      case GL_N3F_V3F:
+         layout->nflag = true;
+         layout->vcomps = 3;
+         layout->voffset = 3 * f;
+         layout->defstride = 6 * f;
+         break;
+      case GL_C4F_N3F_V3F:
+         layout->cflag = true;  layout->nflag = true;
+         layout->ccomps = 4;  layout->vcomps = 3;
+         layout->ctype = GL_FLOAT;
+         layout->noffset = 4 * f;
+         layout->voffset = 7 * f;
+         layout->defstride = 10 * f;
+         break;
+      case GL_T2F_V3F:
+         layout->tflag = true;
+         layout->tcomps = 2;  layout->vcomps = 3;
+         layout->voffset = 2 * f;
+         layout->defstride = 5 * f;
+         break;
+      case GL_T4F_V4F:
+         layout->tflag = true;
+         layout->tcomps = 4;  layout->vcomps = 4;
+         layout->voffset = 4 * f;
+         layout->defstride = 8 * f;
+         break;
+      case GL_T2F_C4UB_V3F:
+         layout->tflag = true;  layout->cflag = true;
+         layout->tcomps = 2;  layout->ccomps = 4;  layout->vcomps = 3;
+         layout->ctype = GL_UNSIGNED_BYTE;
+         layout->coffset = 2 * f;
+         layout->voffset = c + 2 * f;
+         layout->defstride = c + 5 * f;
+         break;
+      case GL_T2F_C3F_V3F:
+         layout->tflag = true;  layout->cflag = true;
+         layout->tcomps = 2;  layout->ccomps = 3;  layout->vcomps = 3;
+         layout->ctype = GL_FLOAT;
+         layout->coffset = 2 * f;
+         layout->voffset = 5 * f;
+         layout->defstride = 8 * f;
+         break;
+      case GL_T2F_N3F_V3F:
+         layout->tflag = true;    layout->nflag = true;
+         layout->tcomps = 2;  layout->vcomps = 3;
+         layout->noffset = 2 * f;
+         layout->voffset = 5 * f;
+         layout->defstride = 8 * f;
+         break;
+      case GL_T2F_C4F_N3F_V3F:
+         layout->tflag = true;  layout->cflag = true;  layout->nflag = true;
+         layout->tcomps = 2;  layout->ccomps = 4;  layout->vcomps = 3;
+         layout->ctype = GL_FLOAT;
+         layout->coffset = 2 * f;
+         layout->noffset = 6 * f;
+         layout->voffset = 9 * f;
+         layout->defstride = 12 * f;
+         break;
+      case GL_T4F_C4F_N3F_V4F:
+         layout->tflag = true;  layout->cflag = true;  layout->nflag = true;
+         layout->tcomps = 4;  layout->ccomps = 4;  layout->vcomps = 4;
+         layout->ctype = GL_FLOAT;
+         layout->coffset = 4 * f;
+         layout->noffset = 8 * f;
+         layout->voffset = 11 * f;
+         layout->defstride = 15 * f;
+         break;
+      default:
+         return false;
+   }
+   return true;
+}
+
 void GLAPIENTRY
 _mesa_InterleavedArrays(GLenum format, GLsizei stride, const GLvoid *pointer)
 {
    GET_CURRENT_CONTEXT(ctx);
-   GLboolean tflag, cflag, nflag;  /* enable/disable flags */
-   GLint tcomps, ccomps, vcomps;   /* components per texcoord, color, vertex */
-   GLenum ctype = 0;               /* color type */
-   GLint coffset = 0, noffset = 0, voffset;/* color, normal, vertex offsets */
-   const GLint toffset = 0;        /* always zero */
-   GLint defstride;                /* default stride */
-   GLint c, f;
-
-   f = sizeof(GLfloat);
-   c = f * ((4 * sizeof(GLubyte) + (f - 1)) / f);
+   struct gl_interleaved_layout layout;
 
    if (stride < 0) {
       _mesa_error( ctx, GL_INVALID_VALUE, "glInterleavedArrays(stride)" );
       return;
    }
 
-   switch (format) {
-      case GL_V2F:
-         tflag = GL_FALSE;  cflag = GL_FALSE;  nflag = GL_FALSE;
-         tcomps = 0;  ccomps = 0;  vcomps = 2;
-         voffset = 0;
-         defstride = 2*f;
-         break;
-      case GL_V3F:
-         tflag = GL_FALSE;  cflag = GL_FALSE;  nflag = GL_FALSE;
-         tcomps = 0;  ccomps = 0;  vcomps = 3;
-         voffset = 0;
-         defstride = 3*f;
-         break;
-      case GL_C4UB_V2F:
-         tflag = GL_FALSE;  cflag = GL_TRUE;  nflag = GL_FALSE;
-         tcomps = 0;  ccomps = 4;  vcomps = 2;
-         ctype = GL_UNSIGNED_BYTE;
-         coffset = 0;
-         voffset = c;
-         defstride = c + 2*f;
-         break;
-      case GL_C4UB_V3F:
-         tflag = GL_FALSE;  cflag = GL_TRUE;  nflag = GL_FALSE;
-         tcomps = 0;  ccomps = 4;  vcomps = 3;
-         ctype = GL_UNSIGNED_BYTE;
-         coffset = 0;
-         voffset = c;
-         defstride = c + 3*f;
-         break;
-      case GL_C3F_V3F:
-         tflag = GL_FALSE;  cflag = GL_TRUE;  nflag = GL_FALSE;
-         tcomps = 0;  ccomps = 3;  vcomps = 3;
-         ctype = GL_FLOAT;
-         coffset = 0;
-         voffset = 3*f;
-         defstride = 6*f;
-         break;
-      case GL_N3F_V3F:
-         tflag = GL_FALSE;  cflag = GL_FALSE;  nflag = GL_TRUE;
-         tcomps = 0;  ccomps = 0;  vcomps = 3;
-         noffset = 0;
-         voffset = 3*f;
-         defstride = 6*f;
-         break;
-      case GL_C4F_N3F_V3F:
-         tflag = GL_FALSE;  cflag = GL_TRUE;  nflag = GL_TRUE;
-         tcomps = 0;  ccomps = 4;  vcomps = 3;
-         ctype = GL_FLOAT;
-         coffset = 0;
-         noffset = 4*f;
-         voffset = 7*f;
-         defstride = 10*f;
-         break;
-      case GL_T2F_V3F:
-         tflag = GL_TRUE;  cflag = GL_FALSE;  nflag = GL_FALSE;
-         tcomps = 2;  ccomps = 0;  vcomps = 3;
-         voffset = 2*f;
-         defstride = 5*f;
-         break;
-      case GL_T4F_V4F:
-         tflag = GL_TRUE;  cflag = GL_FALSE;  nflag = GL_FALSE;
-         tcomps = 4;  ccomps = 0;  vcomps = 4;
-         voffset = 4*f;
-         defstride = 8*f;
-         break;
-      case GL_T2F_C4UB_V3F:
-         tflag = GL_TRUE;  cflag = GL_TRUE;  nflag = GL_FALSE;
-         tcomps = 2;  ccomps = 4;  vcomps = 3;
-         ctype = GL_UNSIGNED_BYTE;
-         coffset = 2*f;
-         voffset = c+2*f;
-         defstride = c+5*f;
-         break;
-      case GL_T2F_C3F_V3F:
-         tflag = GL_TRUE;  cflag = GL_TRUE;  nflag = GL_FALSE;
-         tcomps = 2;  ccomps = 3;  vcomps = 3;
-         ctype = GL_FLOAT;
-         coffset = 2*f;
-         voffset = 5*f;
-         defstride = 8*f;
-         break;
-      case GL_T2F_N3F_V3F:
-         tflag = GL_TRUE;  cflag = GL_FALSE;  nflag = GL_TRUE;
-         tcomps = 2;  ccomps = 0;  vcomps = 3;
-         noffset = 2*f;
-         voffset = 5*f;
-         defstride = 8*f;
-         break;
-      case GL_T2F_C4F_N3F_V3F:
-         tflag = GL_TRUE;  cflag = GL_TRUE;  nflag = GL_TRUE;
-         tcomps = 2;  ccomps = 4;  vcomps = 3;
-         ctype = GL_FLOAT;
-         coffset = 2*f;
-         noffset = 6*f;
-         voffset = 9*f;
-         defstride = 12*f;
-         break;
-      case GL_T4F_C4F_N3F_V4F:
-         tflag = GL_TRUE;  cflag = GL_TRUE;  nflag = GL_TRUE;
-         tcomps = 4;  ccomps = 4;  vcomps = 4;
-         ctype = GL_FLOAT;
-         coffset = 4*f;
-         noffset = 8*f;
-         voffset = 11*f;
-         defstride = 15*f;
-         break;
-      default:
-         _mesa_error( ctx, GL_INVALID_ENUM, "glInterleavedArrays(format)" );
-         return;
+   if (!_mesa_get_interleaved_layout(format, &layout)) {
+      _mesa_error( ctx, GL_INVALID_ENUM, "glInterleavedArrays(format)" );
+      return;
    }
 
    if (stride==0) {
-      stride = defstride;
+      stride = layout.defstride;
    }
 
    _mesa_DisableClientState( GL_EDGE_FLAG_ARRAY );
@@ -2674,20 +2670,20 @@ _mesa_InterleavedArrays(GLenum format, GLsizei stride, const GLvoid *pointer)
    /* XXX also disable secondary color and generic arrays? */
 
    /* Texcoords */
-   if (tflag) {
+   if (layout.tflag) {
       _mesa_EnableClientState( GL_TEXTURE_COORD_ARRAY );
-      _mesa_TexCoordPointer( tcomps, GL_FLOAT, stride,
-                             (GLubyte *) pointer + toffset );
+      _mesa_TexCoordPointer( layout.tcomps, GL_FLOAT, stride,
+                             (GLubyte *) pointer + layout.toffset );
    }
    else {
       _mesa_DisableClientState( GL_TEXTURE_COORD_ARRAY );
    }
 
    /* Color */
-   if (cflag) {
+   if (layout.cflag) {
       _mesa_EnableClientState( GL_COLOR_ARRAY );
-      _mesa_ColorPointer( ccomps, ctype, stride,
-			  (GLubyte *) pointer + coffset );
+      _mesa_ColorPointer( layout.ccomps, layout.ctype, stride,
+			  (GLubyte *) pointer + layout.coffset );
    }
    else {
       _mesa_DisableClientState( GL_COLOR_ARRAY );
@@ -2695,9 +2691,9 @@ _mesa_InterleavedArrays(GLenum format, GLsizei stride, const GLvoid *pointer)
 
 
    /* Normals */
-   if (nflag) {
+   if (layout.nflag) {
       _mesa_EnableClientState( GL_NORMAL_ARRAY );
-      _mesa_NormalPointer( GL_FLOAT, stride, (GLubyte *) pointer + noffset );
+      _mesa_NormalPointer( GL_FLOAT, stride, (GLubyte *) pointer + layout.noffset );
    }
    else {
       _mesa_DisableClientState( GL_NORMAL_ARRAY );
@@ -2705,8 +2701,8 @@ _mesa_InterleavedArrays(GLenum format, GLsizei stride, const GLvoid *pointer)
 
    /* Vertices */
    _mesa_EnableClientState( GL_VERTEX_ARRAY );
-   _mesa_VertexPointer( vcomps, GL_FLOAT, stride,
-			(GLubyte *) pointer + voffset );
+   _mesa_VertexPointer( layout.vcomps, GL_FLOAT, stride,
+			(GLubyte *) pointer + layout.voffset );
 }
 
 
@@ -3134,7 +3130,8 @@ vertex_array_vertex_buffers(struct gl_context *ctx,
     *       their parameters are valid and no other error occurs."
     */
 
-   _mesa_HashLockMutex(ctx->Shared->BufferObjects);
+   _mesa_HashLockMaybeLocked(ctx->Shared->BufferObjects,
+                             ctx->BufferObjectsLocked);
 
    for (i = 0; i < count; i++) {
       struct gl_buffer_object *vbo;
@@ -3191,7 +3188,8 @@ vertex_array_vertex_buffers(struct gl_context *ctx,
                                vbo, offsets[i], strides[i], false, false);
    }
 
-   _mesa_HashUnlockMutex(ctx->Shared->BufferObjects);
+   _mesa_HashUnlockMaybeLocked(ctx->Shared->BufferObjects,
+                               ctx->BufferObjectsLocked);
 }
 
 
@@ -3933,7 +3931,7 @@ _mesa_init_varray(struct gl_context *ctx)
  * Callback for deleting an array object.  Called by _mesa_HashDeleteAll().
  */
 static void
-delete_arrayobj_cb(GLuint id, void *data, void *userData)
+delete_arrayobj_cb(void *data, void *userData)
 {
    struct gl_vertex_array_object *vao = (struct gl_vertex_array_object *) data;
    struct gl_context *ctx = (struct gl_context *) userData;

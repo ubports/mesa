@@ -51,6 +51,15 @@ expect_true(bool result, const char *test)
       error = true;
    }
 }
+static void
+expect_false(bool result, const char *test)
+{
+   if (result) {
+      fprintf(stderr, "Error: Test '%s' failed: Expected=false"
+              ", Actual=true\n", test);
+      error = true;
+   }
+}
 
 static void
 expect_equal(uint64_t actual, uint64_t expected, const char *test)
@@ -162,7 +171,7 @@ does_cache_contain(struct disk_cache *cache, const cache_key key)
    return false;
 }
 
-static void *
+static bool
 cache_exists(struct disk_cache *cache)
 {
    uint8_t dummy_key[20];
@@ -173,7 +182,10 @@ cache_exists(struct disk_cache *cache)
 
    disk_cache_put(cache, dummy_key, data, sizeof(data), NULL);
    disk_cache_wait_for_idle(cache);
-   return disk_cache_get(cache, dummy_key, NULL);
+   void *result = disk_cache_get(cache, dummy_key, NULL);
+
+   free(result);
+   return result != NULL;
 }
 
 #define CACHE_TEST_TMP "./cache-test-tmp"
@@ -193,6 +205,19 @@ test_disk_cache_create(void)
 
    unsetenv("MESA_GLSL_CACHE_DISABLE");
 
+#ifdef SHADER_CACHE_DISABLE_BY_DEFAULT
+   /* With SHADER_CACHE_DISABLE_BY_DEFAULT, ensure that with
+    * MESA_GLSL_CACHE_DISABLE set to nothing, disk_cache_create returns NULL.
+    */
+   unsetenv("MESA_GLSL_CACHE_DISABLE");
+   cache = disk_cache_create("test", "make_check", 0);
+   expect_null(cache, "disk_cache_create with MESA_GLSL_CACHE_DISABLE unset "
+               " and SHADER_CACHE_DISABLE_BY_DEFAULT build option");
+
+   /* For remaining tests, ensure that the cache is enabled. */
+   setenv("MESA_GLSL_CACHE_DISABLE", "false", 1);
+#endif /* SHADER_CACHE_DISABLE_BY_DEFAULT */
+
    /* For the first real disk_cache_create() clear these environment
     * variables to test creation of cache in home directory.
     */
@@ -204,11 +229,18 @@ test_disk_cache_create(void)
 
    disk_cache_destroy(cache);
 
+#ifdef ANDROID
+   /* Android doesn't try writing to disk (just calls the cache callbacks), so
+    * the directory tests below don't apply.
+    */
+   exit(error ? 1 : 0);
+#endif
+
    /* Test with XDG_CACHE_HOME set */
    setenv("XDG_CACHE_HOME", CACHE_TEST_TMP "/xdg-cache-home", 1);
    cache = disk_cache_create("test", "make_check", 0);
-   expect_null(cache_exists(cache), "disk_cache_create with XDG_CACHE_HOME set "
-               "with a non-existing parent directory");
+   expect_false(cache_exists(cache), "disk_cache_create with XDG_CACHE_HOME set "
+                "with a non-existing parent directory");
 
    err = mkdir(CACHE_TEST_TMP, 0755);
    if (err != 0) {
@@ -216,10 +248,11 @@ test_disk_cache_create(void)
       error = true;
       return;
    }
+   disk_cache_destroy(cache);
 
    cache = disk_cache_create("test", "make_check", 0);
-   expect_non_null(cache_exists(cache), "disk_cache_create with XDG_CACHE_HOME "
-                   "set");
+   expect_true(cache_exists(cache), "disk_cache_create with XDG_CACHE_HOME "
+               "set");
 
    check_directories_created(CACHE_TEST_TMP "/xdg-cache-home/"
                              CACHE_DIR_NAME);
@@ -232,8 +265,8 @@ test_disk_cache_create(void)
 
    setenv("MESA_GLSL_CACHE_DIR", CACHE_TEST_TMP "/mesa-glsl-cache-dir", 1);
    cache = disk_cache_create("test", "make_check", 0);
-   expect_null(cache_exists(cache), "disk_cache_create with MESA_GLSL_CACHE_DIR"
-               " set with a non-existing parent directory");
+   expect_false(cache_exists(cache), "disk_cache_create with MESA_GLSL_CACHE_DIR"
+                " set with a non-existing parent directory");
 
    err = mkdir(CACHE_TEST_TMP, 0755);
    if (err != 0) {
@@ -241,10 +274,11 @@ test_disk_cache_create(void)
       error = true;
       return;
    }
+   disk_cache_destroy(cache);
 
    cache = disk_cache_create("test", "make_check", 0);
-   expect_non_null(cache_exists(cache), "disk_cache_create with "
-                   "MESA_GLSL_CACHE_DIR set");
+   expect_true(cache_exists(cache), "disk_cache_create with "
+               "MESA_GLSL_CACHE_DIR set");
 
    check_directories_created(CACHE_TEST_TMP "/mesa-glsl-cache-dir/"
                              CACHE_DIR_NAME);
@@ -265,6 +299,10 @@ test_put_and_get(void)
    uint8_t *one_KB, *one_MB;
    uint8_t one_KB_key[20], one_MB_key[20];
    int count;
+
+#ifdef SHADER_CACHE_DISABLE_BY_DEFAULT
+   setenv("MESA_GLSL_CACHE_DISABLE", "false", 1);
+#endif /* SHADER_CACHE_DISABLE_BY_DEFAULT */
 
    cache = disk_cache_create("test", "make_check", 0);
 
@@ -436,6 +474,10 @@ test_put_key_and_get_key(void)
    uint8_t key_a_collide[20] =
                         { 0,  1, 42, 43, 44, 45, 46, 47, 48, 49,
                          50, 55, 52, 53, 54, 55, 56, 57, 58, 59};
+
+#ifdef SHADER_CACHE_DISABLE_BY_DEFAULT
+   setenv("MESA_GLSL_CACHE_DISABLE", "false", 1);
+#endif /* SHADER_CACHE_DISABLE_BY_DEFAULT */
 
    cache = disk_cache_create("test", "make_check", 0);
 

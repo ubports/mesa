@@ -33,6 +33,7 @@ files_mesa_util = files(
   'blob.h',
   'build_id.c',
   'build_id.h',
+  'cnd_monotonic.h',
   'compiler.h',
   'crc32.c',
   'crc32.h',
@@ -41,8 +42,11 @@ files_mesa_util = files(
   'debug.h',
   'disk_cache.c',
   'disk_cache.h',
+  'disk_cache_os.c',
+  'disk_cache_os.h',
   'double.c',
   'double.h',
+  'enum_operators.h',
   'fast_idiv_by_const.c',
   'fast_idiv_by_const.h',
   'format_r11g11b10f.h',
@@ -53,8 +57,13 @@ files_mesa_util = files(
   'half_float.h',
   'hash_table.c',
   'hash_table.h',
+  'u_idalloc.c',
+  'u_idalloc.h',
   'list.h',
+  'log.c',
   'macros.h',
+  'memstream.c',
+  'memstream.h',
   'mesa-sha1.c',
   'mesa-sha1.h',
   'os_time.c',
@@ -66,6 +75,7 @@ files_mesa_util = files(
   'os_socket.h',
   'u_process.c',
   'u_process.h',
+  'rwlock.h',
   'sha1/sha1.c',
   'sha1/sha1.h',
   'ralloc.c',
@@ -116,6 +126,8 @@ files_mesa_util = files(
   'u_debug_memory.c',
   'u_cpu_detect.c',
   'u_cpu_detect.h',
+  'u_printf.cpp',
+  'u_printf.h',
   'vma.c',
   'vma.h',
   'xxhash.h',
@@ -158,15 +170,28 @@ deps_for_libmesa_util = [
   dep_m,
   dep_valgrind,
   dep_zstd,
+  dep_dl,
+  dep_unwind,
 ]
 
 if with_platform_android
   deps_for_libmesa_util += dep_android
+  files_debug_stack = files('u_debug_stack_android.cpp')
+ else
+  files_debug_stack = files(
+    'u_debug_stack.c',
+    'u_debug_symbol.c',
+    'u_debug_symbol.h',
+  )
+endif
+
+if with_platform_haiku
+  deps_for_libmesa_util += dep_network
 endif
 
 _libmesa_util = static_library(
   'mesa_util',
-  [files_mesa_util, format_srgb],
+  [files_mesa_util, files_debug_stack, format_srgb],
   include_directories : [inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux],
   dependencies : deps_for_libmesa_util,
   link_with: libmesa_format,
@@ -178,14 +203,19 @@ _libmesa_util = static_library(
 idep_mesautil = declare_dependency(
   link_with : _libmesa_util,
   include_directories : inc_util,
-  dependencies : [dep_zlib, dep_clock, dep_thread, dep_atomic, dep_m],
+  dependencies : [dep_zlib, dep_clock, dep_thread, dep_atomic, dep_m, dep_valgrind],
 )
+
+xmlconfig_deps = []
+if not (with_platform_android or with_platform_windows)
+  xmlconfig_deps += dep_expat
+endif
 
 _libxmlconfig = static_library(
   'xmlconfig',
   files_xmlconfig,
   include_directories : [inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux],
-  dependencies : [idep_mesautil, dep_expat, dep_m],
+  dependencies : [idep_mesautil, dep_m, xmlconfig_deps],
   c_args : [
     c_msvc_compat_args,
     '-DSYSCONFDIR="@0@"'.format(
@@ -200,11 +230,32 @@ _libxmlconfig = static_library(
 )
 
 idep_xmlconfig = declare_dependency(
-  dependencies : dep_expat,
+  dependencies : xmlconfig_deps,
   link_with : _libxmlconfig,
 )
 
+files_xxd = files('xxd.py')
+
 if with_tests
+  # DRI_CONF macros use designated initializers (required for union
+  # initializaiton), so we need c++2a since gtest forces us to use c++
+  if host_machine.system() != 'windows' and cpp.has_argument('-std=c++2a')
+    test('xmlconfig',
+      executable('xmlconfig_test',
+        files('tests/xmlconfig.cpp'),
+        include_directories : [inc_include, inc_src],
+        dependencies : [idep_mesautil, idep_xmlconfig, idep_gtest],
+        override_options : ['cpp_std=c++2a'],
+        cpp_args: ['-Wno-write-strings']
+      ),
+      suite : ['util'],
+      env: ['HOME=' + join_paths(meson.current_source_dir(),
+                                 'tests', 'drirc_home'),
+            'DRIRC_CONFIGDIR=' + join_paths(meson.current_source_dir(),
+                                            'tests', 'drirc_configdir')]
+        )
+  endif
+
   test(
     'u_atomic',
     executable(
@@ -277,6 +328,18 @@ if with_tests
        include_directories : [inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux],
        dependencies : [idep_mesautil, idep_gtest],
      ),
+     suite : ['util'],
+  )
+
+  test(
+    'u_debug_stack',
+    executable(
+      'u_debug_stack_test',
+      files('u_debug_stack_test.cpp'),
+      include_directories : [inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux],
+      dependencies : [idep_mesautil, idep_gtest],
+      c_args : [c_msvc_compat_args],
+    ),
      suite : ['util'],
   )
 

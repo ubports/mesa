@@ -285,7 +285,7 @@ vlVaHandleVAProcPipelineParameterBufferType(vlVaDriver *drv, vlVaContext *contex
    VARectangle def_src_region, def_dst_region;
    const VARectangle *src_region, *dst_region;
    VAProcPipelineParameterBuffer *param;
-   struct pipe_video_buffer *src;
+   struct pipe_video_buffer *src, *dst;
    vlVaSurface *src_surface, *dst_surface;
    unsigned i;
 
@@ -307,6 +307,21 @@ vlVaHandleVAProcPipelineParameterBufferType(vlVaDriver *drv, vlVaContext *contex
       return VA_STATUS_ERROR_INVALID_SURFACE;
 
    src = src_surface->buffer;
+   dst = dst_surface->buffer;
+
+   /* convert the destination buffer to progressive if we're deinterlacing
+      otherwise we might end up deinterlacing twice */
+   if (param->num_filters && dst->interlaced) {
+      vlVaSurface *surf;
+      surf = dst_surface;
+      surf->templat.interlaced = false;
+      dst->destroy(dst);
+
+      if (vlVaHandleSurfaceAllocate(drv, surf, &surf->templat) != VA_STATUS_SUCCESS)
+         return VA_STATUS_ERROR_ALLOCATION_FAILED;
+
+      dst = context->target = surf->buffer;
+   }
 
    for (i = 0; i < param->num_filters; i++) {
       vlVaBuffer *buf = handle_table_get(drv->htab, param->filters[i]);
@@ -321,7 +336,7 @@ vlVaHandleVAProcPipelineParameterBufferType(vlVaDriver *drv, vlVaContext *contex
          VAProcFilterParameterBufferDeinterlacing *deint = buf->data;
          switch (deint->algorithm) {
          case VAProcDeinterlacingBob:
-            if (deint->flags & VA_DEINTERLACING_BOTTOM_FIELD_FIRST)
+            if (deint->flags & VA_DEINTERLACING_BOTTOM_FIELD)
                deinterlace = VL_COMPOSITOR_BOB_BOTTOM;
             else
                deinterlace = VL_COMPOSITOR_BOB_TOP;
@@ -333,7 +348,7 @@ vlVaHandleVAProcPipelineParameterBufferType(vlVaDriver *drv, vlVaContext *contex
 
          case VAProcDeinterlacingMotionAdaptive:
             src = vlVaApplyDeint(drv, context, param, src,
-				 !!(deint->flags & VA_DEINTERLACING_BOTTOM_FIELD_FIRST));
+				 !!(deint->flags & VA_DEINTERLACING_BOTTOM_FIELD));
             break;
 
          default:

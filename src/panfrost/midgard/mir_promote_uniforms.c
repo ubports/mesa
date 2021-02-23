@@ -43,7 +43,7 @@ mir_is_promoteable_ubo(midgard_instruction *ins)
         /* TODO: promote unaligned access via swizzle? */
 
         return (ins->type == TAG_LOAD_STORE_4) &&
-                (OP_IS_UBO_READ(ins->load_store.op)) &&
+                (OP_IS_UBO_READ(ins->op)) &&
                 !(ins->constants.u32[0] & 0xF) &&
                 !(ins->load_store.arg_1) &&
                 (ins->load_store.arg_2 == 0x1E) &&
@@ -195,10 +195,7 @@ midgard_promote_uniforms(compiler_context *ctx)
                         unsigned type_size = nir_alu_type_get_type_size(ins->dest_type);
                         midgard_instruction mov = v_mov(promoted, ins->dest);
                         mov.dest_type = nir_type_uint | type_size;
-                        mov.src_types[0] = mov.dest_type;
-
-                        if (type_size == 64)
-                                mov.alu.reg_mode = midgard_reg_mode_64;
+                        mov.src_types[1] = mov.dest_type;
 
                         uint16_t rounded = mir_round_bytemask_up(mir_bytemask(ins), type_size);
                         mir_set_bytemask(&mov, rounded);

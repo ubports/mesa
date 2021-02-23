@@ -285,7 +285,6 @@ vec4_instruction::can_do_writemask(const struct gen_device_info *devinfo)
    case VEC4_OPCODE_SET_HIGH_32BIT:
    case VS_OPCODE_PULL_CONSTANT_LOAD:
    case VS_OPCODE_PULL_CONSTANT_LOAD_GEN7:
-   case VS_OPCODE_SET_SIMD4X2_HEADER_GEN9:
    case TCS_OPCODE_SET_INPUT_URB_OFFSETS:
    case TCS_OPCODE_SET_OUTPUT_URB_OFFSETS:
    case TES_OPCODE_CREATE_INPUT_READ_HEADER:
@@ -1009,23 +1008,7 @@ vec4_visitor::is_dep_ctrl_unsafe(const vec4_instruction *inst)
 
 #define IS_64BIT(reg) (reg.file != BAD_FILE && type_sz(reg.type) == 8)
 
-   /* From the Cherryview and Broadwell PRMs:
-    *
-    * "When source or destination datatype is 64b or operation is integer DWord
-    * multiply, DepCtrl must not be used."
-    *
-    * SKL PRMs don't include this restriction, however, gen7 seems to be
-    * affected, at least by the 64b restriction, since DepCtrl with double
-    * precision instructions seems to produce GPU hangs in some cases.
-    */
-   if (devinfo->gen == 8 || gen_device_info_is_9lp(devinfo)) {
-      if (inst->opcode == BRW_OPCODE_MUL &&
-         IS_DWORD(inst->src[0]) &&
-         IS_DWORD(inst->src[1]))
-         return true;
-   }
-
-   if (devinfo->gen >= 7 && devinfo->gen <= 8) {
+   if (devinfo->gen >= 7) {
       if (IS_64BIT(inst->dst) || IS_64BIT(inst->src[0]) ||
           IS_64BIT(inst->src[1]) || IS_64BIT(inst->src[2]))
       return true;
@@ -1033,11 +1016,6 @@ vec4_visitor::is_dep_ctrl_unsafe(const vec4_instruction *inst)
 
 #undef IS_64BIT
 #undef IS_DWORD
-
-   if (devinfo->gen >= 8) {
-      if (inst->opcode == BRW_OPCODE_F32TO16)
-         return true;
-   }
 
    /*
     * mlen:
@@ -1891,11 +1869,19 @@ vec4_visitor::lower_minmax()
 
       if (inst->opcode == BRW_OPCODE_SEL &&
           inst->predicate == BRW_PREDICATE_NONE) {
-         /* FIXME: Using CMP doesn't preserve the NaN propagation semantics of
-          *        the original SEL.L/GE instruction
+         /* If src1 is an immediate value that is not NaN, then it can't be
+          * NaN.  In that case, emit CMP because it is much better for cmod
+          * propagation.  Likewise if src1 is not float.  Gen4 and Gen5 don't
+          * support HF or DF, so it is not necessary to check for those.
           */
-         ibld.CMP(ibld.null_reg_d(), inst->src[0], inst->src[1],
-                  inst->conditional_mod);
+         if (inst->src[1].type != BRW_REGISTER_TYPE_F ||
+             (inst->src[1].file == IMM && !isnan(inst->src[1].f))) {
+            ibld.CMP(ibld.null_reg_d(), inst->src[0], inst->src[1],
+                     inst->conditional_mod);
+         } else {
+            ibld.CMPN(ibld.null_reg_d(), inst->src[0], inst->src[1],
+                      inst->conditional_mod);
+         }
          inst->predicate = BRW_PREDICATE_NORMAL;
          inst->conditional_mod = BRW_CONDITIONAL_NONE;
 
@@ -1912,7 +1898,7 @@ vec4_visitor::lower_minmax()
 src_reg
 vec4_visitor::get_timestamp()
 {
-   assert(devinfo->gen >= 7);
+   assert(devinfo->gen == 7);
 
    src_reg ts = src_reg(brw_reg(BRW_ARCHITECTURE_REGISTER_FILE,
                                 BRW_ARF_TIMESTAMP,
@@ -2707,7 +2693,7 @@ vec4_visitor::run()
       pass_num++;                                                      \
       bool this_progress = pass(args);                                 \
                                                                        \
-      if (unlikely(INTEL_DEBUG & DEBUG_OPTIMIZER) && this_progress) {  \
+      if ((INTEL_DEBUG & DEBUG_OPTIMIZER) && this_progress) {  \
          char filename[64];                                            \
          snprintf(filename, 64, "%s-%s-%02d-%02d-" #pass,              \
                   stage_abbrev, nir->info.name, iteration, pass_num); \
@@ -2720,7 +2706,7 @@ vec4_visitor::run()
    })
 
 
-   if (unlikely(INTEL_DEBUG & DEBUG_OPTIMIZER)) {
+   if (INTEL_DEBUG & DEBUG_OPTIMIZER) {
       char filename[64];
       snprintf(filename, 64, "%s-%s-00-00-start",
                stage_abbrev, nir->info.name);
@@ -2783,7 +2769,7 @@ vec4_visitor::run()
 
    setup_payload();
 
-   if (unlikely(INTEL_DEBUG & DEBUG_SPILL_VEC4)) {
+   if (INTEL_DEBUG & DEBUG_SPILL_VEC4) {
       /* Debug of register spilling: Go spill everything. */
       const int grf_count = alloc.count;
       float spill_costs[alloc.count];
@@ -2853,13 +2839,15 @@ brw_compile_vs(const struct brw_compiler *compiler, void *log_data,
                void *mem_ctx,
                const struct brw_vs_prog_key *key,
                struct brw_vs_prog_data *prog_data,
-               nir_shader *shader,
+               nir_shader *nir,
                int shader_time_index,
                struct brw_compile_stats *stats,
                char **error_str)
 {
+   prog_data->base.base.stage = MESA_SHADER_VERTEX;
+
    const bool is_scalar = compiler->scalar_stage[MESA_SHADER_VERTEX];
-   brw_nir_apply_key(shader, compiler, &key->base, 8, is_scalar);
+   brw_nir_apply_key(nir, compiler, &key->base, 8, is_scalar);
 
    const unsigned *assembly = NULL;
 
@@ -2875,64 +2863,56 @@ brw_compile_vs(const struct brw_compiler *compiler, void *log_data,
        */
       assert(!is_scalar);
       assert(key->copy_edgeflag);
-      shader->info.inputs_read |= VERT_BIT_EDGEFLAG;
+      nir->info.inputs_read |= VERT_BIT_EDGEFLAG;
    }
 
-   prog_data->inputs_read = shader->info.inputs_read;
-   prog_data->double_inputs_read = shader->info.vs.double_inputs;
+   prog_data->inputs_read = nir->info.inputs_read;
+   prog_data->double_inputs_read = nir->info.vs.double_inputs;
 
-   brw_nir_lower_vs_inputs(shader, key->gl_attrib_wa_flags);
-   brw_nir_lower_vue_outputs(shader);
-   brw_postprocess_nir(shader, compiler, is_scalar);
+   brw_nir_lower_vs_inputs(nir, key->gl_attrib_wa_flags);
+   brw_nir_lower_vue_outputs(nir);
+   brw_postprocess_nir(nir, compiler, is_scalar);
 
    prog_data->base.clip_distance_mask =
-      ((1 << shader->info.clip_distance_array_size) - 1);
+      ((1 << nir->info.clip_distance_array_size) - 1);
    prog_data->base.cull_distance_mask =
-      ((1 << shader->info.cull_distance_array_size) - 1) <<
-      shader->info.clip_distance_array_size;
+      ((1 << nir->info.cull_distance_array_size) - 1) <<
+      nir->info.clip_distance_array_size;
 
    unsigned nr_attribute_slots = util_bitcount64(prog_data->inputs_read);
 
    /* gl_VertexID and gl_InstanceID are system values, but arrive via an
     * incoming vertex attribute.  So, add an extra slot.
     */
-   if (shader->info.system_values_read &
-       (BITFIELD64_BIT(SYSTEM_VALUE_FIRST_VERTEX) |
-        BITFIELD64_BIT(SYSTEM_VALUE_BASE_INSTANCE) |
-        BITFIELD64_BIT(SYSTEM_VALUE_VERTEX_ID_ZERO_BASE) |
-        BITFIELD64_BIT(SYSTEM_VALUE_INSTANCE_ID))) {
+   if (BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_FIRST_VERTEX) ||
+       BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_BASE_INSTANCE) ||
+       BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_VERTEX_ID_ZERO_BASE) ||
+       BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_INSTANCE_ID)) {
       nr_attribute_slots++;
    }
 
    /* gl_DrawID and IsIndexedDraw share its very own vec4 */
-   if (shader->info.system_values_read &
-       (BITFIELD64_BIT(SYSTEM_VALUE_DRAW_ID) |
-        BITFIELD64_BIT(SYSTEM_VALUE_IS_INDEXED_DRAW))) {
+   if (BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_DRAW_ID) ||
+       BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_IS_INDEXED_DRAW)) {
       nr_attribute_slots++;
    }
 
-   if (shader->info.system_values_read &
-       BITFIELD64_BIT(SYSTEM_VALUE_IS_INDEXED_DRAW))
+   if (BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_IS_INDEXED_DRAW))
       prog_data->uses_is_indexed_draw = true;
 
-   if (shader->info.system_values_read &
-       BITFIELD64_BIT(SYSTEM_VALUE_FIRST_VERTEX))
+   if (BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_FIRST_VERTEX))
       prog_data->uses_firstvertex = true;
 
-   if (shader->info.system_values_read &
-       BITFIELD64_BIT(SYSTEM_VALUE_BASE_INSTANCE))
+   if (BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_BASE_INSTANCE))
       prog_data->uses_baseinstance = true;
 
-   if (shader->info.system_values_read &
-       BITFIELD64_BIT(SYSTEM_VALUE_VERTEX_ID_ZERO_BASE))
+   if (BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_VERTEX_ID_ZERO_BASE))
       prog_data->uses_vertexid = true;
 
-   if (shader->info.system_values_read &
-       BITFIELD64_BIT(SYSTEM_VALUE_INSTANCE_ID))
+   if (BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_INSTANCE_ID))
       prog_data->uses_instanceid = true;
 
-   if (shader->info.system_values_read &
-       BITFIELD64_BIT(SYSTEM_VALUE_DRAW_ID))
+   if (BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_DRAW_ID))
           prog_data->uses_drawid = true;
 
    /* The 3DSTATE_VS documentation lists the lower bound on "Vertex URB Entry
@@ -2959,12 +2939,6 @@ brw_compile_vs(const struct brw_compiler *compiler, void *log_data,
       prog_data->base.urb_entry_size = DIV_ROUND_UP(vue_entries, 8);
    } else {
       prog_data->base.urb_entry_size = DIV_ROUND_UP(vue_entries, 4);
-      /* On Cannonlake software shall not program an allocation size that
-       * specifies a size that is a multiple of 3 64B (512-bit) cachelines.
-       */
-      if (compiler->devinfo->gen == 10 &&
-          prog_data->base.urb_entry_size % 3 == 0)
-         prog_data->base.urb_entry_size++;
    }
 
    if (INTEL_DEBUG & DEBUG_VS) {
@@ -2977,7 +2951,7 @@ brw_compile_vs(const struct brw_compiler *compiler, void *log_data,
 
       fs_visitor v(compiler, log_data, mem_ctx, &key->base,
                    &prog_data->base.base,
-                   shader, 8, shader_time_index);
+                   nir, 8, shader_time_index);
       if (!v.run_vs()) {
          if (error_str)
             *error_str = ralloc_strdup(mem_ctx, v.fail_msg);
@@ -2993,14 +2967,15 @@ brw_compile_vs(const struct brw_compiler *compiler, void *log_data,
       if (INTEL_DEBUG & DEBUG_VS) {
          const char *debug_name =
             ralloc_asprintf(mem_ctx, "%s vertex shader %s",
-                            shader->info.label ? shader->info.label :
+                            nir->info.label ? nir->info.label :
                                "unnamed",
-                            shader->info.name);
+                            nir->info.name);
 
          g.enable_debug(debug_name);
       }
       g.generate_code(v.cfg, 8, v.shader_stats,
                       v.performance_analysis.require(), stats);
+      g.add_const_data(nir->constant_data, nir->constant_data_size);
       assembly = g.get_assembly();
    }
 
@@ -3008,7 +2983,7 @@ brw_compile_vs(const struct brw_compiler *compiler, void *log_data,
       prog_data->base.dispatch_mode = DISPATCH_MODE_4X2_DUAL_OBJECT;
 
       vec4_vs_visitor v(compiler, log_data, key, prog_data,
-                        shader, mem_ctx, shader_time_index);
+                        nir, mem_ctx, shader_time_index);
       if (!v.run()) {
          if (error_str)
             *error_str = ralloc_strdup(mem_ctx, v.fail_msg);
@@ -3017,7 +2992,7 @@ brw_compile_vs(const struct brw_compiler *compiler, void *log_data,
       }
 
       assembly = brw_vec4_generate_assembly(compiler, log_data, mem_ctx,
-                                            shader, &prog_data->base,
+                                            nir, &prog_data->base,
                                             v.cfg,
                                             v.performance_analysis.require(),
                                             stats);

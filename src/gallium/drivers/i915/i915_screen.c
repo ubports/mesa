@@ -162,7 +162,7 @@ i915_get_shader_param(struct pipe_screen *screen,
       case PIPE_SHADER_CAP_FP16:
       case PIPE_SHADER_CAP_FP16_DERIVATIVES:
       case PIPE_SHADER_CAP_INT16:
-      case PIPE_SHADER_CAP_GLSL_16BIT_TEMPS:
+      case PIPE_SHADER_CAP_GLSL_16BIT_CONSTS:
          return 0;
       case PIPE_SHADER_CAP_MAX_TEXTURE_SAMPLERS:
       case PIPE_SHADER_CAP_MAX_SAMPLER_VIEWS:
@@ -449,6 +449,7 @@ i915_fence_finish(struct pipe_screen *screen,
 
 static void
 i915_flush_frontbuffer(struct pipe_screen *screen,
+                       struct pipe_context *pipe,
                        struct pipe_resource *resource,
                        unsigned level, unsigned layer,
                        void *winsys_drawable_handle,
@@ -456,6 +457,7 @@ i915_flush_frontbuffer(struct pipe_screen *screen,
 {
    /* XXX: Dummy right now. */
    (void)screen;
+   (void)pipe;
    (void)resource;
    (void)level;
    (void)layer;

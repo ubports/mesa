@@ -22,13 +22,41 @@
 
 #include "api/util.hpp"
 #include "core/program.hpp"
+#include "spirv/invocation.hpp"
 #include "util/u_debug.h"
 
+#include <limits>
 #include <sstream>
 
 using namespace clover;
 
 namespace {
+
+   std::string
+   build_options(const char *p_opts, const char *p_debug) {
+      auto opts = std::string(p_opts ? p_opts : "");
+      std::string extra_opts = debug_get_option(p_debug, "");
+
+      return detokenize(std::vector<std::string>{opts, extra_opts}, " ");
+   }
+
+   class build_notifier {
+   public:
+      build_notifier(cl_program prog,
+                     void (*notifer)(cl_program, void *), void *data) :
+                     prog_(prog), notifer(notifer), data_(data) { }
+
+      ~build_notifier() {
+         if (notifer)
+            notifer(prog_, data_);
+      }
+
+   private:
+      cl_program prog_;
+      void (*notifer)(cl_program, void *);
+      void *data_;
+   };
+
    void
    validate_build_common(const program &prog, cl_uint num_devs,
                          const cl_device_id *d_devs,
@@ -44,6 +72,29 @@ namespace {
                return !count(dev, prog.devices());
             }, objs<allow_empty_tag>(d_devs, num_devs)))
          throw error(CL_INVALID_DEVICE);
+   }
+
+   enum program::il_type
+   identify_and_validate_il(const std::string &il,
+                            const cl_version opencl_version,
+                            const context::notify_action &notify) {
+
+      enum program::il_type il_type = program::il_type::none;
+
+#ifdef HAVE_CLOVER_SPIRV
+      if (spirv::is_binary_spirv(il)) {
+         std::string log;
+         if (!spirv::is_valid_spirv(il, opencl_version, log)) {
+            if (notify) {
+               notify(log.c_str());
+            }
+            throw error(CL_INVALID_VALUE);
+         }
+         il_type = program::il_type::spirv;
+      }
+#endif
+
+      return il_type;
    }
 }
 
@@ -66,7 +117,7 @@ clCreateProgramWithSource(cl_context d_ctx, cl_uint count,
 
    // ...and create a program object for them.
    ret_error(r_errcode, CL_SUCCESS);
-   return new program(ctx, source);
+   return new program(ctx, std::move(source), program::il_type::source);
 
 } catch (error &e) {
    ret_error(r_errcode, e);
@@ -97,7 +148,7 @@ clCreateProgramWithBinary(cl_context d_ctx, cl_uint n,
             return { CL_INVALID_VALUE, {} };
 
          try {
-            std::stringbuf bin( { (char*)p, l } );
+            std::stringbuf bin( std::string{ (char*)p, l } );
             std::istream s(&bin);
 
             return { CL_SUCCESS, module::deserialize(s) };
@@ -126,6 +177,48 @@ clCreateProgramWithBinary(cl_context d_ctx, cl_uint n,
 } catch (error &e) {
    ret_error(r_errcode, e);
    return NULL;
+}
+
+cl_program
+clover::CreateProgramWithILKHR(cl_context d_ctx, const void *il,
+                               size_t length, cl_int *r_errcode) try {
+   auto &ctx = obj(d_ctx);
+
+   if (!il || !length)
+      throw error(CL_INVALID_VALUE);
+
+   // Compute the highest OpenCL version supported by all devices associated to
+   // the context. That is the version used for validating the SPIR-V binary.
+   cl_version min_opencl_version = std::numeric_limits<uint32_t>::max();
+   for (const device &dev : ctx.devices()) {
+      const cl_version opencl_version = dev.device_version();
+      min_opencl_version = std::min(opencl_version, min_opencl_version);
+   }
+
+   const char *stream = reinterpret_cast<const char *>(il);
+   std::string binary(stream, stream + length);
+   const enum program::il_type il_type = identify_and_validate_il(binary,
+                                                                  min_opencl_version,
+                                                                  ctx.notify);
+
+   if (il_type == program::il_type::none)
+      throw error(CL_INVALID_VALUE);
+
+   // Initialize a program object with it.
+   ret_error(r_errcode, CL_SUCCESS);
+   return new program(ctx, std::move(binary), il_type);
+
+} catch (error &e) {
+   ret_error(r_errcode, e);
+   return NULL;
+}
+
+CLOVER_API cl_program
+clCreateProgramWithIL(cl_context d_ctx,
+                      const void *il,
+                      size_t length,
+                      cl_int *r_errcode) {
+   return CreateProgramWithILKHR(d_ctx, il, length, r_errcode);
 }
 
 CLOVER_API cl_program
@@ -178,12 +271,13 @@ clBuildProgram(cl_program d_prog, cl_uint num_devs,
    auto &prog = obj(d_prog);
    auto devs =
       (d_devs ? objs(d_devs, num_devs) : ref_vector<device>(prog.devices()));
-   const auto opts = std::string(p_opts ? p_opts : "") + " " +
-                     debug_get_option("CLOVER_EXTRA_BUILD_OPTIONS", "");
+   const auto opts = build_options(p_opts, "CLOVER_EXTRA_BUILD_OPTIONS");
 
    validate_build_common(prog, num_devs, d_devs, pfn_notify, user_data);
 
-   if (prog.has_source) {
+   auto notifier = build_notifier(d_prog, pfn_notify, user_data);
+
+   if (prog.il_type() != program::il_type::none) {
       prog.compile(devs, opts);
       prog.link(devs, opts, { prog });
    } else if (any_of([&](const device &dev){
@@ -211,20 +305,21 @@ clCompileProgram(cl_program d_prog, cl_uint num_devs,
    auto &prog = obj(d_prog);
    auto devs =
        (d_devs ? objs(d_devs, num_devs) : ref_vector<device>(prog.devices()));
-   const auto opts = std::string(p_opts ? p_opts : "") + " " +
-                     debug_get_option("CLOVER_EXTRA_COMPILE_OPTIONS", "");
+   const auto opts = build_options(p_opts, "CLOVER_EXTRA_COMPILE_OPTIONS");
    header_map headers;
 
    validate_build_common(prog, num_devs, d_devs, pfn_notify, user_data);
 
+   auto notifier = build_notifier(d_prog, pfn_notify, user_data);
+
    if (bool(num_headers) != bool(header_names))
       throw error(CL_INVALID_VALUE);
 
-   if (!prog.has_source)
+   if (prog.il_type() == program::il_type::none)
       throw error(CL_INVALID_OPERATION);
 
    for_each([&](const char *name, const program &header) {
-         if (!header.has_source)
+         if (header.il_type() == program::il_type::none)
             throw error(CL_INVALID_OPERATION);
 
          if (!any_of(key_equals(name), headers))
@@ -333,12 +428,15 @@ clLinkProgram(cl_context d_ctx, cl_uint num_devs, const cl_device_id *d_devs,
               void (*pfn_notify) (cl_program, void *), void *user_data,
               cl_int *r_errcode) try {
    auto &ctx = obj(d_ctx);
-   const auto opts = std::string(p_opts ? p_opts : "") + " " +
-                     debug_get_option("CLOVER_EXTRA_LINK_OPTIONS", "");
+   const auto opts = build_options(p_opts, "CLOVER_EXTRA_LINK_OPTIONS");
    auto progs = objs(d_progs, num_progs);
    auto all_devs =
       (d_devs ? objs(d_devs, num_devs) : ref_vector<device>(ctx.devices()));
    auto prog = create<program>(ctx, all_devs);
+   auto r_prog = ret_object(prog);
+
+   auto notifier = build_notifier(r_prog, pfn_notify, user_data);
+
    auto devs = validate_link_devices(progs, all_devs, opts);
 
    validate_build_common(prog, num_devs, d_devs, pfn_notify, user_data);
@@ -351,7 +449,7 @@ clLinkProgram(cl_context d_ctx, cl_uint num_devs, const cl_device_id *d_devs,
       ret_error(r_errcode, CL_LINK_PROGRAM_FAILURE);
    }
 
-   return ret_object(prog);
+   return r_prog;
 
 } catch (invalid_build_options_error &e) {
    ret_error(r_errcode, CL_INVALID_LINKER_OPTIONS);
@@ -430,6 +528,17 @@ clGetProgramInfo(cl_program d_prog, cl_program_info param,
          }, std::string(), prog.symbols());
       break;
 
+   case CL_PROGRAM_SCOPE_GLOBAL_CTORS_PRESENT:
+   case CL_PROGRAM_SCOPE_GLOBAL_DTORS_PRESENT:
+      buf.as_scalar<cl_bool>() = CL_FALSE;
+      break;
+
+   case CL_PROGRAM_IL:
+      if (prog.il_type() != program::il_type::none)
+         buf.as_string() = prog.source();
+      else if (r_size)
+         *r_size = 0u;
+      break;
    default:
       throw error(CL_INVALID_VALUE);
    }
@@ -466,6 +575,10 @@ clGetProgramBuildInfo(cl_program d_prog, cl_device_id d_dev,
 
    case CL_PROGRAM_BINARY_TYPE:
       buf.as_scalar<cl_program_binary_type>() = prog.build(dev).binary_type();
+      break;
+
+   case CL_PROGRAM_BUILD_GLOBAL_VARIABLE_TOTAL_SIZE:
+      buf.as_scalar<size_t>() = 0;
       break;
 
    default:

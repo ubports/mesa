@@ -99,7 +99,7 @@ brw_codegen_wm_prog(struct brw_context *brw,
    } else {
       brw_nir_setup_arb_uniforms(mem_ctx, nir, &fp->program, &prog_data.base);
 
-      if (unlikely(INTEL_DEBUG & DEBUG_WM))
+      if (INTEL_DEBUG & DEBUG_WM)
          brw_dump_arb_asm("fragment", &fp->program);
    }
 
@@ -153,7 +153,7 @@ brw_codegen_wm_prog(struct brw_context *brw,
 
    brw_alloc_stage_scratch(brw, &brw->wm.base, prog_data.base.total_scratch);
 
-   if (unlikely((INTEL_DEBUG & DEBUG_WM) && fp->program.is_arb_asm))
+   if (((INTEL_DEBUG & DEBUG_WM) && fp->program.is_arb_asm))
       fprintf(stderr, "\n");
 
    /* The param and pull_param arrays will be freed by the shader cache. */
@@ -206,10 +206,10 @@ brw_populate_sampler_prog_key_data(struct gl_context *ctx,
 
       if (unit->_Current && unit->_Current->Target != GL_TEXTURE_BUFFER) {
          const struct gl_texture_object *t = unit->_Current;
-         const struct gl_texture_image *img = t->Image[0][t->BaseLevel];
+         const struct gl_texture_image *img = t->Image[0][t->Attrib.BaseLevel];
          struct gl_sampler_object *sampler = _mesa_get_samplerobj(ctx, unit_id);
 
-         const bool alpha_depth = t->DepthMode == GL_ALPHA &&
+         const bool alpha_depth = t->Attrib.DepthMode == GL_ALPHA &&
             (img->_BaseFormat == GL_DEPTH_COMPONENT ||
              img->_BaseFormat == GL_DEPTH_STENCIL);
 
@@ -220,13 +220,13 @@ brw_populate_sampler_prog_key_data(struct gl_context *ctx,
             key->swizzles[s] = brw_get_texture_swizzle(ctx, t);
 
          if (devinfo->gen < 8 &&
-             sampler->MinFilter != GL_NEAREST &&
-             sampler->MagFilter != GL_NEAREST) {
-            if (sampler->WrapS == GL_CLAMP)
+             sampler->Attrib.MinFilter != GL_NEAREST &&
+             sampler->Attrib.MagFilter != GL_NEAREST) {
+            if (sampler->Attrib.WrapS == GL_CLAMP)
                key->gl_clamp_mask[0] |= 1 << s;
-            if (sampler->WrapT == GL_CLAMP)
+            if (sampler->Attrib.WrapT == GL_CLAMP)
                key->gl_clamp_mask[1] |= 1 << s;
-            if (sampler->WrapR == GL_CLAMP)
+            if (sampler->Attrib.WrapR == GL_CLAMP)
                key->gl_clamp_mask[2] |= 1 << s;
          }
 
@@ -245,7 +245,7 @@ brw_populate_sampler_prog_key_data(struct gl_context *ctx,
                 * leaving normal texture swizzling to SCS.
                 */
                unsigned src_swizzle =
-                  devinfo->is_haswell ? t->_Swizzle : key->swizzles[s];
+                  devinfo->is_haswell ? t->Attrib._Swizzle : key->swizzles[s];
                for (int i = 0; i < 4; i++) {
                   unsigned src_comp = GET_SWZ(src_swizzle, i);
                   if (src_comp == SWIZZLE_ONE || src_comp == SWIZZLE_W) {
@@ -322,6 +322,17 @@ brw_populate_sampler_prog_key_data(struct gl_context *ctx,
                break;
             default:
                break;
+            }
+
+            switch (intel_tex->yuv_color_space) {
+            case __DRI_YUV_COLOR_SPACE_ITU_REC709:
+              key->bt709_mask |= 1 << s;
+              break;
+            case __DRI_YUV_COLOR_SPACE_ITU_REC2020:
+              key->bt2020_mask |= 1 << s;
+              break;
+            default:
+              break;
             }
          }
 

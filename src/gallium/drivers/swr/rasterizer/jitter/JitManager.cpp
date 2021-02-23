@@ -159,7 +159,7 @@ JitManager::JitManager(uint32_t simdWidth, const char* arch, const char* core) :
 
     mFetchShaderTy = FunctionType::get(Type::getVoidTy(mContext), fsArgs, false);
 
-#if defined(_WIN32)
+#if defined(_MSC_VER)
     // explicitly instantiate used symbols from potentially staticly linked libs
     sys::DynamicLibrary::AddSymbol("exp2f", &exp2f);
     sys::DynamicLibrary::AddSymbol("log2f", &log2f);
@@ -381,7 +381,13 @@ DIType* JitManager::GetDebugIntegerType(Type* pTy)
 DIType* JitManager::GetDebugVectorType(Type* pTy)
 {
     DIBuilder                 builder(*mpCurrentModule);
+#if LLVM_VERSION_MAJOR >= 12
+    FixedVectorType*          pVecTy    = cast<FixedVectorType>(pTy);
+#elif LLVM_VERSION_MAJOR >= 11
     VectorType*               pVecTy    = cast<VectorType>(pTy);
+#else
+    auto                      pVecTy    = pTy;
+#endif
     DataLayout                DL        = DataLayout(mpCurrentModule);
     uint32_t                  size      = DL.getTypeAllocSizeInBits(pVecTy);
     uint32_t                  alignment = DL.getABITypeAlignment(pVecTy);

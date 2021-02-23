@@ -55,16 +55,9 @@
 static nir_variable *
 get_texcoord(nir_shader *shader)
 {
-   nir_variable *texcoord = NULL;
-
-   /* find gl_TexCoord, if it exists: */
-   nir_foreach_variable(var, &shader->inputs) {
-      if (var->data.location == VARYING_SLOT_TEX0) {
-         texcoord = var;
-         break;
-      }
-   }
-
+   nir_variable *texcoord =
+      nir_find_variable_with_location(shader, nir_var_shader_in,
+                                      VARYING_SLOT_TEX0);
    /* otherwise create it: */
    if (texcoord == NULL) {
       texcoord = nir_variable_create(shader,
@@ -84,7 +77,6 @@ lower_bitmap(nir_shader *shader, nir_builder *b,
    nir_ssa_def *texcoord;
    nir_tex_instr *tex;
    nir_ssa_def *cond;
-   nir_intrinsic_instr *discard;
 
    texcoord = nir_load_var(b, get_texcoord(shader));
 
@@ -120,9 +112,7 @@ lower_bitmap(nir_shader *shader, nir_builder *b,
    cond = nir_f2b(b, nir_channel(b, &tex->dest.ssa,
                   options->swizzle_xxxx ? 0 : 3));
 
-   discard = nir_intrinsic_instr_create(shader, nir_intrinsic_discard_if);
-   discard->src[0] = nir_src_for_ssa(cond);
-   nir_builder_instr_insert(b, &discard->instr);
+   nir_discard_if(b, cond);
 
    shader->info.fs.uses_discard = true;
 }

@@ -27,6 +27,7 @@
 
 #include "pipe/p_state.h"
 #include "util/u_blend.h"
+#include "util/u_dual_blend.h"
 #include "util/u_string.h"
 #include "util/u_memory.h"
 
@@ -127,6 +128,7 @@ __fd6_setup_blend_variant(struct fd6_blend_stateobj *blend, unsigned sample_mask
 			.unk8              = true,
 			.alpha_to_coverage = cso->alpha_to_coverage,
 			.enabled           = !!mrt_blend,
+			.dual_color_in_enable = blend->use_dual_src_blend,
 		));
 
 	OUT_REG(ring, A6XX_RB_BLEND_CNTL(
@@ -134,7 +136,8 @@ __fd6_setup_blend_variant(struct fd6_blend_stateobj *blend, unsigned sample_mask
 			.alpha_to_coverage = cso->alpha_to_coverage,
 			.alpha_to_one = cso->alpha_to_one,
 			.independent_blend = cso->independent_blend_enable,
-			.sample_mask       = sample_mask
+			.sample_mask       = sample_mask,
+			.dual_color_in_enable = blend->use_dual_src_blend,
 		));
 
 	so->sample_mask = sample_mask;
@@ -161,12 +164,28 @@ fd6_blend_state_create(struct pipe_context *pctx,
 		so->reads_dest |= util_logicop_reads_dest(cso->logicop_func);
 	}
 
+	so->use_dual_src_blend =
+		cso->rt[0].blend_enable && util_blend_state_is_dual(cso, 0);
+
 	unsigned nr = cso->independent_blend_enable ? cso->max_rt : 0;
 	for (unsigned i = 0; i <= nr; i++) {
 		const struct pipe_rt_blend_state *rt = &cso->rt[i];
 
 		so->reads_dest |= rt->blend_enable;
-		if (rt->blend_enable) {
+
+		/* From the PoV of LRZ, having masked color channels is
+		 * the same as having blend enabled, in that the draw will
+		 * care about the fragments from an earlier draw.
+		 *
+		 * NOTE we actually don't care about masked color channels
+		 * that don't actually exist in the render target, but we
+		 * don't know the render target format here to determine
+		 * that.  It is probably not worth worrying about, but if
+		 * we find a game/benchmark that goes out of it's way to
+		 * mask off non-existent channels, we should fixup the
+		 * pipe_blend_state to give us more info.
+		 */
+		if (rt->blend_enable || (rt->colormask != 0xf)) {
 			so->reads_dest = true;
 		}
 	}

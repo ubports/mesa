@@ -30,6 +30,7 @@
 #include "main/mtypes.h"
 #include "main/atifragshader.h"
 #include "program/program.h"
+#include "program/prog_instruction.h"
 #include "util/u_memory.h"
 
 #define MESA_DEBUG_ATI_FS 0
@@ -205,7 +206,7 @@ _mesa_GenFragmentShadersATI(GLuint range)
 
    first = _mesa_HashFindFreeKeyBlock(ctx->Shared->ATIShaders, range);
    for (i = 0; i < range; i++) {
-      _mesa_HashInsertLocked(ctx->Shared->ATIShaders, first + i, &DummyShader);
+      _mesa_HashInsertLocked(ctx->Shared->ATIShaders, first + i, &DummyShader, true);
    }
 
    _mesa_HashUnlockMutex(ctx->Shared->ATIShaders);
@@ -244,8 +245,10 @@ _mesa_BindFragmentShaderATI(GLuint id)
       newProg = ctx->Shared->DefaultFragmentShader;
    }
    else {
+      bool isGenName;
       newProg = (struct ati_fragment_shader *)
          _mesa_HashLookup(ctx->Shared->ATIShaders, id);
+      isGenName = newProg != NULL;
       if (!newProg || newProg == &DummyShader) {
 	 /* allocate a new program now */
 	 newProg = _mesa_new_ati_fragment_shader(ctx, id);
@@ -253,7 +256,7 @@ _mesa_BindFragmentShaderATI(GLuint id)
 	    _mesa_error(ctx, GL_OUT_OF_MEMORY, "glBindFragmentShaderATI");
 	    return;
 	 }
-	 _mesa_HashInsert(ctx->Shared->ATIShaders, id, newProg);
+	 _mesa_HashInsert(ctx->Shared->ATIShaders, id, newProg, isGenName);
       }
 
    }
@@ -709,7 +712,22 @@ _mesa_FragmentOpXATI(GLint optype, GLuint arg_count, GLenum op, GLuint dst,
 
    curI->DstReg[optype].Index = dst;
    curI->DstReg[optype].dstMod = dstMod;
-   curI->DstReg[optype].dstMask = dstMask;
+   /* From the ATI_fs spec:
+    *
+    *     "The <dstMask> parameter specifies which of the color components in
+    *      <dst> will be written (ColorFragmentOp[1..3]ATI only).  This can
+    *      either be NONE, in which case there is no mask and everything is
+    *      written, or the bitwise-or of RED_BIT_ATI, GREEN_BIT_ATI, and
+    *      BLUE_BIT_ATI."
+    *
+    * For AlphaFragmentOp, it always writes alpha.
+    */
+   if (optype == ATI_FRAGMENT_SHADER_ALPHA_OP)
+      curI->DstReg[optype].dstMask = WRITEMASK_W;
+   else if (dstMask == GL_NONE)
+      curI->DstReg[optype].dstMask = WRITEMASK_XYZ;
+   else
+      curI->DstReg[optype].dstMask = dstMask;
 
 #if MESA_DEBUG_ATI_FS
    debug_op(optype, arg_count, op, dst, dstMask, dstMod, arg1, arg1Rep, arg1Mod, arg2, arg2Rep, arg2Mod, arg3, arg3Rep, arg3Mod);

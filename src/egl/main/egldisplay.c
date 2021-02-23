@@ -76,6 +76,7 @@ static const struct {
    const char *name;
 } egl_platforms[] = {
    { _EGL_PLATFORM_X11, "x11" },
+   { _EGL_PLATFORM_XCB, "xcb" },
    { _EGL_PLATFORM_WAYLAND, "wayland" },
    { _EGL_PLATFORM_DRM, "drm" },
    { _EGL_PLATFORM_ANDROID, "android" },
@@ -313,32 +314,33 @@ _eglFindDisplay(_EGLPlatformType plat, void *plat_dpy,
    for (disp = _eglGlobal.DisplayList; disp; disp = disp->Next) {
       if (disp->Platform == plat && disp->PlatformDisplay == plat_dpy &&
           _eglSameAttribs(disp->Options.Attribs, attrib_list))
-         break;
+         goto out;
    }
 
    /* create a new display */
-   if (!disp) {
-      disp = calloc(1, sizeof(_EGLDisplay));
-      if (disp) {
-         mtx_init(&disp->Mutex, mtx_plain);
-         disp->Platform = plat;
-         disp->PlatformDisplay = plat_dpy;
-         num_attribs = _eglNumAttribs(attrib_list);
-         if (num_attribs) {
-            disp->Options.Attribs = calloc(num_attribs, sizeof(EGLAttrib));
-            if (!disp->Options.Attribs) {
-               free(disp);
-               disp = NULL;
-               goto out;
-            }
-            memcpy(disp->Options.Attribs, attrib_list,
-                   num_attribs * sizeof(EGLAttrib));
-         }
-         /* add to the display list */
-         disp->Next = _eglGlobal.DisplayList;
-         _eglGlobal.DisplayList = disp;
+   assert(!disp);
+   disp = calloc(1, sizeof(_EGLDisplay));
+   if (!disp)
+      goto out;
+
+   mtx_init(&disp->Mutex, mtx_plain);
+   disp->Platform = plat;
+   disp->PlatformDisplay = plat_dpy;
+   num_attribs = _eglNumAttribs(attrib_list);
+   if (num_attribs) {
+      disp->Options.Attribs = calloc(num_attribs, sizeof(EGLAttrib));
+      if (!disp->Options.Attribs) {
+         free(disp);
+         disp = NULL;
+         goto out;
       }
+      memcpy(disp->Options.Attribs, attrib_list,
+             num_attribs * sizeof(EGLAttrib));
    }
+
+   /* add to the display list */
+   disp->Next = _eglGlobal.DisplayList;
+   _eglGlobal.DisplayList = disp;
 
 out:
    mtx_unlock(_eglGlobal.Mutex);
@@ -351,9 +353,10 @@ out:
  * Destroy the contexts and surfaces that are linked to the display.
  */
 void
-_eglReleaseDisplayResources(_EGLDriver *drv, _EGLDisplay *display)
+_eglReleaseDisplayResources(_EGLDisplay *display)
 {
    _EGLResource *list;
+   const _EGLDriver *drv = display->Driver;
 
    list = display->ResourceLists[_EGL_RESOURCE_CONTEXT];
    while (list) {
@@ -361,7 +364,7 @@ _eglReleaseDisplayResources(_EGLDriver *drv, _EGLDisplay *display)
       list = list->Next;
 
       _eglUnlinkContext(ctx);
-      drv->DestroyContext(drv, display, ctx);
+      drv->DestroyContext(display, ctx);
    }
    assert(!display->ResourceLists[_EGL_RESOURCE_CONTEXT]);
 
@@ -371,7 +374,7 @@ _eglReleaseDisplayResources(_EGLDriver *drv, _EGLDisplay *display)
       list = list->Next;
 
       _eglUnlinkSurface(surf);
-      drv->DestroySurface(drv, display, surf);
+      drv->DestroySurface(display, surf);
    }
    assert(!display->ResourceLists[_EGL_RESOURCE_SURFACE]);
 
@@ -381,7 +384,7 @@ _eglReleaseDisplayResources(_EGLDriver *drv, _EGLDisplay *display)
       list = list->Next;
 
       _eglUnlinkImage(image);
-      drv->DestroyImageKHR(drv, display, image);
+      drv->DestroyImageKHR(display, image);
    }
    assert(!display->ResourceLists[_EGL_RESOURCE_IMAGE]);
 
@@ -391,7 +394,7 @@ _eglReleaseDisplayResources(_EGLDriver *drv, _EGLDisplay *display)
       list = list->Next;
 
       _eglUnlinkSync(sync);
-      drv->DestroySyncKHR(drv, display, sync);
+      drv->DestroySyncKHR(display, sync);
    }
    assert(!display->ResourceLists[_EGL_RESOURCE_SYNC]);
 }
@@ -561,6 +564,27 @@ _eglGetX11Display(Display *native_display,
    return _eglFindDisplay(_EGL_PLATFORM_X11, native_display, attrib_list);
 }
 #endif /* HAVE_X11_PLATFORM */
+
+#ifdef HAVE_XCB_PLATFORM
+_EGLDisplay*
+_eglGetXcbDisplay(xcb_connection_t *native_display,
+                  const EGLAttrib *attrib_list)
+{
+   /* EGL_EXT_platform_xcb recognizes exactly one attribute,
+    * EGL_PLATFORM_XCB_SCREEN_EXT, which is optional.
+    */
+   if (attrib_list != NULL) {
+      for (int i = 0; attrib_list[i] != EGL_NONE; i += 2) {
+         if (attrib_list[i] != EGL_PLATFORM_XCB_SCREEN_EXT) {
+            _eglError(EGL_BAD_ATTRIBUTE, "eglGetPlatformDisplay");
+            return NULL;
+         }
+      }
+   }
+
+   return _eglFindDisplay(_EGL_PLATFORM_XCB, native_display, attrib_list);
+}
+#endif /* HAVE_XCB_PLATFORM */
 
 #ifdef HAVE_DRM_PLATFORM
 _EGLDisplay*

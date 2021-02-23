@@ -124,8 +124,9 @@ nv50_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_MAX_STREAM_OUTPUT_BUFFERS:
       return 4;
    case PIPE_CAP_MAX_STREAM_OUTPUT_INTERLEAVED_COMPONENTS:
-   case PIPE_CAP_MAX_STREAM_OUTPUT_SEPARATE_COMPONENTS:
       return 64;
+   case PIPE_CAP_MAX_STREAM_OUTPUT_SEPARATE_COMPONENTS:
+      return 4;
    case PIPE_CAP_MAX_GEOMETRY_OUTPUT_VERTICES:
    case PIPE_CAP_MAX_GEOMETRY_TOTAL_OUTPUT_COMPONENTS:
       return 1024;
@@ -234,7 +235,6 @@ nv50_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_TWO_SIDED_COLOR:
    case PIPE_CAP_CLIP_PLANES:
    case PIPE_CAP_PACKED_STREAM_OUTPUT:
-   case PIPE_CAP_DRAW_INFO_START_WITH_USER_INDICES:
       return 1;
    case PIPE_CAP_SEAMLESS_CUBE_MAP:
       return 1; /* class_3d >= NVA0_3D_CLASS; */
@@ -438,7 +438,7 @@ nv50_screen_get_shader_param(struct pipe_screen *pscreen,
    case PIPE_SHADER_CAP_FP16:
    case PIPE_SHADER_CAP_FP16_DERIVATIVES:
    case PIPE_SHADER_CAP_INT16:
-   case PIPE_SHADER_CAP_GLSL_16BIT_TEMPS:
+   case PIPE_SHADER_CAP_GLSL_16BIT_CONSTS:
    case PIPE_SHADER_CAP_SUBROUTINES:
       return 0; /* please inline, or provide function declarations */
    case PIPE_SHADER_CAP_INTEGERS:
@@ -453,13 +453,14 @@ nv50_screen_get_shader_param(struct pipe_screen *pscreen,
       return screen->prefer_nir ? PIPE_SHADER_IR_NIR : PIPE_SHADER_IR_TGSI;
    case PIPE_SHADER_CAP_MAX_UNROLL_ITERATIONS_HINT:
       return 32;
+   case PIPE_SHADER_CAP_SUPPORTED_IRS:
+      return (1 << PIPE_SHADER_IR_TGSI) | (1 << PIPE_SHADER_IR_NIR);
    case PIPE_SHADER_CAP_TGSI_DROUND_SUPPORTED:
    case PIPE_SHADER_CAP_TGSI_DFRACEXP_DLDEXP_SUPPORTED:
    case PIPE_SHADER_CAP_TGSI_LDEXP_SUPPORTED:
    case PIPE_SHADER_CAP_TGSI_FMA_SUPPORTED:
    case PIPE_SHADER_CAP_TGSI_ANY_INOUT_DECL_RANGE:
    case PIPE_SHADER_CAP_MAX_SHADER_BUFFERS:
-   case PIPE_SHADER_CAP_SUPPORTED_IRS:
    case PIPE_SHADER_CAP_MAX_SHADER_IMAGES:
    case PIPE_SHADER_CAP_LOWER_IF_THRESHOLD:
    case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTERS:
@@ -554,17 +555,8 @@ nv50_screen_destroy(struct pipe_screen *pscreen)
    if (!nouveau_drm_screen_unref(&screen->base))
       return;
 
-   if (screen->base.fence.current) {
-      struct nouveau_fence *current = NULL;
+   nouveau_fence_cleanup(&screen->base);
 
-      /* nouveau_fence_wait will create a new current fence, so wait on the
-       * _current_ one, and remove both.
-       */
-      nouveau_fence_ref(screen->base.fence.current, &current);
-      nouveau_fence_wait(current, NULL);
-      nouveau_fence_ref(NULL, &current);
-      nouveau_fence_ref(NULL, &screen->base.fence.current);
-   }
    if (screen->base.pushbuf)
       screen->base.pushbuf->user_priv = NULL;
 
@@ -923,13 +915,14 @@ int nv50_tls_realloc(struct nv50_screen *screen, unsigned tls_space)
 }
 
 static const nir_shader_compiler_options nir_options = {
-   .fuse_ffma = false, /* nir doesn't track mad vs fma */
+   .fuse_ffma16 = false, /* nir doesn't track mad vs fma */
+   .fuse_ffma32 = false, /* nir doesn't track mad vs fma */
+   .fuse_ffma64 = false, /* nir doesn't track mad vs fma */
    .lower_flrp32 = true,
    .lower_flrp64 = true,
    .lower_fpow = false,
    .lower_uadd_carry = true,
    .lower_usub_borrow = true,
-   .lower_sub = true,
    .lower_ffract = true,
    .lower_pack_half_2x16 = true,
    .lower_pack_unorm_2x16 = true,

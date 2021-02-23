@@ -658,8 +658,8 @@ qpu_compatible_peripheral_access(const struct v3d_device_info *devinfo,
         /* V3D 4.1 and later allow TMU read along with a VPM read or write, and
          * WRTMUC with a TMU magic register write (other than tmuc).
          */
-        if ((a->sig.ldtmu && v3d_qpu_uses_vpm(b)) ||
-            (b->sig.ldtmu && v3d_qpu_uses_vpm(a))) {
+        if ((a->sig.ldtmu && v3d_qpu_reads_or_writes_vpm(b)) ||
+            (b->sig.ldtmu && v3d_qpu_reads_or_writes_vpm(a))) {
                 return true;
         }
 
@@ -1490,7 +1490,7 @@ qpu_set_branch_targets(struct v3d_compile *c)
                 struct list_head *entry = block->instructions.prev;
                 for (int i = 0; i < 3; i++)
                         entry = entry->prev;
-                struct qinst *branch = container_of(entry, branch, link);
+                struct qinst *branch = container_of(entry, struct qinst, link);
                 assert(branch->qpu.type == V3D_QPU_INSTR_TYPE_BRANCH);
 
                 /* Make sure that the if-we-don't-jump

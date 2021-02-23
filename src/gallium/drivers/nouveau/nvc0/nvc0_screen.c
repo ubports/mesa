@@ -297,7 +297,6 @@ nvc0_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_CLIP_PLANES:
    case PIPE_CAP_TEXTURE_SHADOW_LOD:
    case PIPE_CAP_PACKED_STREAM_OUTPUT:
-   case PIPE_CAP_DRAW_INFO_START_WITH_USER_INDICES:
       return 1;
    case PIPE_CAP_PREFER_BLIT_BASED_TEXTURE_TRANSFER:
       return nouveau_screen(pscreen)->vram_domain & NOUVEAU_BO_VRAM ? 1 : 0;
@@ -513,7 +512,7 @@ nvc0_screen_get_shader_param(struct pipe_screen *pscreen,
    case PIPE_SHADER_CAP_FP16:
    case PIPE_SHADER_CAP_FP16_DERIVATIVES:
    case PIPE_SHADER_CAP_INT16:
-   case PIPE_SHADER_CAP_GLSL_16BIT_TEMPS:
+   case PIPE_SHADER_CAP_GLSL_16BIT_CONSTS:
    case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTERS:
    case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTER_BUFFERS:
       return 0;
@@ -622,7 +621,7 @@ nvc0_screen_get_compute_param(struct pipe_screen *pscreen,
    case PIPE_COMPUTE_CAP_MAX_MEM_ALLOC_SIZE:
       RET((uint64_t []) { 1ULL << 40 });
    case PIPE_COMPUTE_CAP_IMAGES_SUPPORTED:
-      RET((uint32_t []) { 0 });
+      RET((uint32_t []) { NVC0_MAX_IMAGES });
    case PIPE_COMPUTE_CAP_MAX_COMPUTE_UNITS:
       RET((uint32_t []) { screen->mp_count_compute });
    case PIPE_COMPUTE_CAP_MAX_CLOCK_FREQUENCY:
@@ -674,17 +673,8 @@ nvc0_screen_destroy(struct pipe_screen *pscreen)
    if (!nouveau_drm_screen_unref(&screen->base))
       return;
 
-   if (screen->base.fence.current) {
-      struct nouveau_fence *current = NULL;
+   nouveau_fence_cleanup(&screen->base);
 
-      /* nouveau_fence_wait will create a new current fence, so wait on the
-       * _current_ one, and remove both.
-       */
-      nouveau_fence_ref(screen->base.fence.current, &current);
-      nouveau_fence_wait(current, NULL);
-      nouveau_fence_ref(NULL, &current);
-      nouveau_fence_ref(NULL, &screen->base.fence.current);
-   }
    if (screen->base.pushbuf)
       screen->base.pushbuf->user_priv = NULL;
 

@@ -11,13 +11,19 @@ mount -t tmpfs tmpfs /tmp
 
 . /set-job-env-vars.sh
 
+[ -z "$BM_KERNEL_MODULES" ] || modprobe "$BM_KERNEL_MODULES"
+
 # Store Mesa's disk cache under /tmp, rather than sending it out over NFS.
 export XDG_CACHE_HOME=/tmp
 
 echo "nameserver 8.8.8.8" > /etc/resolv.conf
 
-# Overwrite traces.yml file with the baremetal version
-cp /install/traces-baremetal.yml /install/traces.yml
+# Not all DUTs have network
+sntp -sS pool.ntp.org || true
+
+# Start a little daemon to capture the first devcoredump we encounter.  (They
+# expire after 5 minutes, so we poll for them).
+./capture-devcoredump.sh &
 
 if sh $BARE_METAL_TEST_SCRIPT; then
   OK=1

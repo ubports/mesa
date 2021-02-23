@@ -142,6 +142,7 @@ files_libnouveau = files(
   'codegen/nv50_ir_peephole.cpp',
   'codegen/nv50_ir_print.cpp',
   'codegen/nv50_ir_ra.cpp',
+  'codegen/nv50_ir_serialize.cpp',
   'codegen/nv50_ir_ssa.cpp',
   'codegen/nv50_ir_target.cpp',
   'codegen/nv50_ir_target.h',
@@ -230,7 +231,7 @@ libnouveau = static_library(
     inc_src, inc_include, inc_gallium, inc_gallium_aux, inc_mapi, inc_mesa,
   ],
   gnu_symbol_visibility : 'hidden',
-  dependencies : [dep_libdrm, dep_libdrm_nouveau, idep_nir_headers],
+  dependencies : [dep_libdrm, dep_libdrm_nouveau, idep_mesautil, idep_nir_headers],
 )
 
 nouveau_compiler = executable(

@@ -57,6 +57,7 @@ struct st_external_sampler_key
    GLuint lower_yx_xuxv;          /**< bitmask of 2 plane YUV samplers */
    GLuint lower_ayuv;
    GLuint lower_xyuv;
+   GLuint lower_yuv;
 };
 
 static inline struct st_external_sampler_key
@@ -79,7 +80,13 @@ st_get_external_sampler_key(struct st_context *st, struct gl_program *prog)
 
       switch (format) {
       case PIPE_FORMAT_NV12:
+         if (stObj->pt->format == PIPE_FORMAT_R8_G8B8_420_UNORM) {
+            key.lower_yuv |= (1 << unit);
+            break;
+         }
+         FALLTHROUGH;
       case PIPE_FORMAT_P010:
+      case PIPE_FORMAT_P012:
       case PIPE_FORMAT_P016:
          key.lower_nv12 |= (1 << unit);
          break;
@@ -140,7 +147,7 @@ struct st_fp_variant_key
    unsigned lower_alpha_func:3;
 
    /** needed for ATI_fragment_shader */
-   char texture_targets[MAX_NUM_FRAGMENT_REGISTERS_ATI];
+   uint8_t texture_index[MAX_NUM_FRAGMENT_REGISTERS_ATI];
 
    struct st_external_sampler_key external;
 };

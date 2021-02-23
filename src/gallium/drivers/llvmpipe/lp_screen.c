@@ -74,7 +74,6 @@ static const struct debug_named_value lp_debug_flags[] = {
    { "fs", DEBUG_FS, NULL },
    { "cs", DEBUG_CS, NULL },
    { "tgsi_ir", DEBUG_TGSI_IR, NULL },
-   { "cl", DEBUG_CL, NULL },
    { "cache_stats", DEBUG_CACHE_STATS, NULL },
    DEBUG_NAMED_VALUE_END
 };
@@ -204,7 +203,7 @@ llvmpipe_get_param(struct pipe_screen *screen, enum pipe_cap param)
       return 1;
    case PIPE_CAP_GLSL_FEATURE_LEVEL: {
       struct llvmpipe_screen *lscreen = llvmpipe_screen(screen);
-      return lscreen->use_tgsi ? 330 : 430;
+      return lscreen->use_tgsi ? 330 : 450;
    }
    case PIPE_CAP_GLSL_FEATURE_LEVEL_COMPATIBILITY:
       return 140;
@@ -357,9 +356,9 @@ llvmpipe_get_shader_param(struct pipe_screen *screen,
    switch(shader)
    {
    case PIPE_SHADER_COMPUTE:
-      if ((LP_DEBUG & DEBUG_CL) && param == PIPE_SHADER_CAP_SUPPORTED_IRS)
+      if ((lscreen->allow_cl) && param == PIPE_SHADER_CAP_SUPPORTED_IRS)
          return (1 << PIPE_SHADER_IR_TGSI) | (1 << PIPE_SHADER_IR_NIR) | (1 << PIPE_SHADER_IR_NIR_SERIALIZED);
-      /* fallthrough */
+      FALLTHROUGH;
    case PIPE_SHADER_FRAGMENT:
       if (param == PIPE_SHADER_CAP_PREFERRED_IR) {
          if (lscreen->use_tgsi)
@@ -371,13 +370,13 @@ llvmpipe_get_shader_param(struct pipe_screen *screen,
       default:
          return gallivm_get_shader_param(param);
       }
-      /* fallthrough */
+      FALLTHROUGH;
    case PIPE_SHADER_TESS_CTRL:
    case PIPE_SHADER_TESS_EVAL:
       /* Tessellation shader needs llvm coroutines support */
       if (!GALLIVM_HAVE_CORO || lscreen->use_tgsi)
          return 0;
-      /* fallthrough */
+      FALLTHROUGH;
    case PIPE_SHADER_VERTEX:
    case PIPE_SHADER_GEOMETRY:
       if (param == PIPE_SHADER_CAP_PREFERRED_IR) {
@@ -415,11 +414,11 @@ llvmpipe_get_paramf(struct pipe_screen *screen, enum pipe_capf param)
 {
    switch (param) {
    case PIPE_CAPF_MAX_LINE_WIDTH:
-      /* fall-through */
+      FALLTHROUGH;
    case PIPE_CAPF_MAX_LINE_WIDTH_AA:
       return 255.0; /* arbitrary */
    case PIPE_CAPF_MAX_POINT_WIDTH:
-      /* fall-through */
+      FALLTHROUGH;
    case PIPE_CAPF_MAX_POINT_WIDTH_AA:
       return LP_MAX_POINT_WIDTH; /* arbitrary */
    case PIPE_CAPF_MAX_TEXTURE_ANISOTROPY:
@@ -508,7 +507,7 @@ llvmpipe_get_compute_param(struct pipe_screen *_screen,
    case PIPE_COMPUTE_CAP_IMAGES_SUPPORTED:
       if (ret) {
          uint32_t *images = ret;
-         *images = 0;
+         *images = LP_MAX_TGSI_SHADER_IMAGES;
       }
       return sizeof(uint32_t);
    case PIPE_COMPUTE_CAP_MAX_VARIABLE_THREADS_PER_BLOCK:
@@ -548,26 +547,40 @@ static const struct nir_shader_compiler_options gallivm_nir_options = {
    .lower_fsat = true,
    .lower_bitfield_insert_to_shifts = true,
    .lower_bitfield_extract_to_shifts = true,
-   .lower_sub = true,
-   .lower_ffma = true,
+   .lower_fdot = true,
+   .lower_fdph = true,
+   .lower_ffma16 = true,
+   .lower_ffma32 = true,
+   .lower_ffma64 = true,
    .lower_fmod = true,
    .lower_hadd = true,
    .lower_add_sat = true,
+   .lower_ldexp = true,
    .lower_pack_snorm_2x16 = true,
    .lower_pack_snorm_4x8 = true,
    .lower_pack_unorm_2x16 = true,
    .lower_pack_unorm_4x8 = true,
+   .lower_pack_half_2x16 = true,
+   .lower_pack_split = true,
    .lower_unpack_snorm_2x16 = true,
    .lower_unpack_snorm_4x8 = true,
    .lower_unpack_unorm_2x16 = true,
    .lower_unpack_unorm_4x8 = true,
+   .lower_unpack_half_2x16 = true,
    .lower_extract_byte = true,
    .lower_extract_word = true,
    .lower_rotate = true,
+   .lower_uadd_carry = true,
+   .lower_usub_borrow = true,
+   .lower_mul_2x32_64 = true,
    .lower_ifind_msb = true,
    .max_unroll_iterations = 32,
    .use_interpolated_input_intrinsics = true,
    .lower_to_scalar = true,
+   .lower_cs_local_index_from_id = true,
+   .lower_uniforms_to_ubo = true,
+   .lower_vector_cmp = true,
+   .lower_device_index_to_zero = true,
 };
 
 static void
@@ -701,6 +714,7 @@ llvmpipe_is_format_supported( struct pipe_screen *_screen,
 
 static void
 llvmpipe_flush_frontbuffer(struct pipe_screen *_screen,
+                           struct pipe_context *_pipe,
                            struct pipe_resource *resource,
                            unsigned level, unsigned layer,
                            void *context_private,
@@ -793,6 +807,7 @@ llvmpipe_get_timestamp(struct pipe_screen *_screen)
 static void lp_disk_cache_create(struct llvmpipe_screen *screen)
 {
    struct mesa_sha1 ctx;
+   unsigned gallivm_perf = gallivm_get_perf_flags();
    unsigned char sha1[20];
    char cache_id[20 * 2 + 1];
    _mesa_sha1_init(&ctx);
@@ -801,6 +816,7 @@ static void lp_disk_cache_create(struct llvmpipe_screen *screen)
        !disk_cache_get_function_identifier(LLVMLinkInMCJIT, &ctx))
       return;
 
+   _mesa_sha1_update(&ctx, &gallivm_perf, sizeof(gallivm_perf));
    _mesa_sha1_final(&ctx, sha1);
    disk_cache_format_hex_id(cache_id, sha1, 20 * 2);
 
@@ -901,6 +917,7 @@ llvmpipe_create_screen(struct sw_winsys *winsys)
    screen->base.get_disk_shader_cache = lp_get_disk_shader_cache;
    llvmpipe_init_screen_resource_funcs(&screen->base);
 
+   screen->allow_cl = !!getenv("LP_CL");
    screen->use_tgsi = (LP_DEBUG & DEBUG_TGSI_IR);
    screen->num_threads = util_cpu_caps.nr_cpus > 1 ? util_cpu_caps.nr_cpus : 0;
 #ifdef EMBEDDED_DEVICE

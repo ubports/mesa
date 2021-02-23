@@ -63,7 +63,7 @@
 
 #include "util/u_debug.h"
 #include "util/u_math.h"
-#include "util/u_half.h"
+#include "util/half_float.h"
 #include "util/u_cpu_detect.h"
 
 #include "lp_bld_type.h"
@@ -78,6 +78,15 @@
 #include "lp_bld_format.h"
 
 
+/* the lp_test_format test fails on mingw/i686 at -O2
+ * it is ok with gcc 9.3, but not for 10.2, assume broken for gcc>=10
+ * ref https://gitlab.freedesktop.org/mesa/mesa/-/issues/3906
+ */
+
+#if defined(__MINGW32__) && !defined(__MINGW64__) && ((__GNUC__ * 100) + __GNUC_MINOR >= 1000)
+#warning "disabling caller-saves optimization for this file to work around compiler bug"
+#pragma GCC optimize("-fno-caller-saves")
+#endif
 
 /**
  * Converts int16 half-float to float32
@@ -204,8 +213,8 @@ lp_build_float_to_half(struct gallivm_state *gallivm,
      unsigned i;
 
      LLVMTypeRef func_type = LLVMFunctionType(i16t, &f32t, 1, 0);
-     LLVMValueRef func = lp_build_const_int_pointer(gallivm, func_to_pointer((func_pointer)util_float_to_half));
-     func = LLVMBuildBitCast(builder, func, LLVMPointerType(func_type, 0), "util_float_to_half");
+     LLVMValueRef func = lp_build_const_int_pointer(gallivm, func_to_pointer((func_pointer)_mesa_float_to_half));
+     func = LLVMBuildBitCast(builder, func, LLVMPointerType(func_type, 0), "_mesa_float_to_half");
 
      for (i = 0; i < length; ++i) {
         LLVMValueRef index = LLVMConstInt(i32t, i, 0);

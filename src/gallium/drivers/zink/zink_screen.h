@@ -24,16 +24,26 @@
 #ifndef ZINK_SCREEN_H
 #define ZINK_SCREEN_H
 
+#include "zink_device_info.h"
+#include "zink_instance.h"
+
 #include "pipe/p_screen.h"
 #include "util/slab.h"
+#include "compiler/nir/nir.h"
 
 #include <vulkan/vulkan.h>
+
+#if defined(__APPLE__)
+// Source of MVK_VERSION
+#include "MoltenVK/vk_mvk_moltenvk.h"
+#endif
 
 extern uint32_t zink_debug;
 
 #define ZINK_DEBUG_NIR 0x1
 #define ZINK_DEBUG_SPIRV 0x2
 #define ZINK_DEBUG_TGSI 0x4
+#define ZINK_DEBUG_VALIDATION 0x8
 
 struct zink_screen {
    struct pipe_screen base;
@@ -42,25 +52,36 @@ struct zink_screen {
 
    struct slab_parent_pool transfer_pool;
 
+   unsigned shader_id;
+
    VkInstance instance;
+   struct zink_instance_info instance_info;
+
    VkPhysicalDevice pdev;
 
-   VkPhysicalDeviceProperties props;
-   VkPhysicalDeviceFeatures feats;
-   VkPhysicalDeviceMemoryProperties mem_props;
-   VkPhysicalDeviceTransformFeedbackPropertiesEXT tf_props;
-
-   bool have_KHR_maintenance1;
-   bool have_KHR_external_memory_fd;
-   bool have_EXT_conditional_rendering;
-   bool have_EXT_transform_feedback;
-   bool have_EXT_index_type_uint8;
+   struct zink_device_info info;
+   struct nir_shader_compiler_options nir_options;
 
    bool have_X8_D24_UNORM_PACK32;
    bool have_D24_UNORM_S8_UINT;
+   bool have_triangle_fans;
 
    uint32_t gfx_queue;
+   uint32_t timestamp_valid_bits;
    VkDevice dev;
+   VkDebugUtilsMessengerEXT debugUtilsCallbackHandle;
+
+   uint32_t cur_custom_border_color_samplers;
+
+   uint32_t loader_version;
+
+   bool needs_mesa_wsi;
+
+   PFN_vkGetPhysicalDeviceFeatures2 vk_GetPhysicalDeviceFeatures2;
+   PFN_vkGetPhysicalDeviceProperties2 vk_GetPhysicalDeviceProperties2;
+
+   PFN_vkCmdDrawIndirectCount vk_CmdDrawIndirectCount;
+   PFN_vkCmdDrawIndexedIndirectCount vk_CmdDrawIndexedIndirectCount;
 
    PFN_vkGetMemoryFdKHR vk_GetMemoryFdKHR;
    PFN_vkCmdBeginConditionalRenderingEXT vk_CmdBeginConditionalRenderingEXT;
@@ -72,6 +93,25 @@ struct zink_screen {
    PFN_vkCmdBeginQueryIndexedEXT vk_CmdBeginQueryIndexedEXT;
    PFN_vkCmdEndQueryIndexedEXT vk_CmdEndQueryIndexedEXT;
    PFN_vkCmdDrawIndirectByteCountEXT vk_CmdDrawIndirectByteCountEXT;
+
+   PFN_vkGetPhysicalDeviceCalibrateableTimeDomainsEXT vk_GetPhysicalDeviceCalibrateableTimeDomainsEXT;
+   PFN_vkGetCalibratedTimestampsEXT vk_GetCalibratedTimestampsEXT;
+
+   PFN_vkCmdSetViewportWithCountEXT vk_CmdSetViewportWithCountEXT;
+   PFN_vkCmdSetScissorWithCountEXT vk_CmdSetScissorWithCountEXT;
+
+   PFN_vkCreateDebugUtilsMessengerEXT vk_CreateDebugUtilsMessengerEXT;
+   PFN_vkDestroyDebugUtilsMessengerEXT vk_DestroyDebugUtilsMessengerEXT;
+
+#if defined(MVK_VERSION)
+   PFN_vkGetMoltenVKConfigurationMVK vk_GetMoltenVKConfigurationMVK;
+   PFN_vkSetMoltenVKConfigurationMVK vk_SetMoltenVKConfigurationMVK;
+
+   PFN_vkGetPhysicalDeviceMetalFeaturesMVK vk_GetPhysicalDeviceMetalFeaturesMVK;
+   PFN_vkGetVersionStringsMVK vk_GetVersionStringsMVK;
+   PFN_vkUseIOSurfaceMVK vk_UseIOSurfaceMVK;
+   PFN_vkGetIOSurfaceMVK vk_GetIOSurfaceMVK;
+#endif
 };
 
 static inline struct zink_screen *
@@ -85,5 +125,23 @@ zink_get_format(struct zink_screen *screen, enum pipe_format format);
 
 bool
 zink_is_depth_format_supported(struct zink_screen *screen, VkFormat format);
+
+#define GET_PROC_ADDR(x) do {                                               \
+      screen->vk_##x = (PFN_vk##x)vkGetDeviceProcAddr(screen->dev, "vk"#x); \
+      if (!screen->vk_##x) {                                                \
+         debug_printf("vkGetDeviceProcAddr failed: vk"#x"\n");              \
+         return false;                                                      \
+      } \
+   } while (0)
+
+#define GET_PROC_ADDR_INSTANCE(x) do {                                          \
+      screen->vk_##x = (PFN_vk##x)vkGetInstanceProcAddr(screen->instance, "vk"#x); \
+      if (!screen->vk_##x) {                                                \
+         debug_printf("GetInstanceProcAddr failed: vk"#x"\n");        \
+         return false;                                                      \
+      } \
+   } while (0)
+
+#define GET_PROC_ADDR_INSTANCE_LOCAL(instance, x) PFN_vk##x vk_##x = (PFN_vk##x)vkGetInstanceProcAddr(instance, "vk"#x)
 
 #endif

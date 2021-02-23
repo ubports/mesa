@@ -15,6 +15,7 @@ STABLE_EPHEMERAL=" \
       liblz4-dev \
       libpng-dev \
       libvulkan-dev \
+      libwaffle-dev \
       libxcb-ewmh-dev \
       libxkbcommon-dev \
       libxrandr-dev \
@@ -22,6 +23,7 @@ STABLE_EPHEMERAL=" \
       libzstd-dev \
       meson \
       p7zip \
+      patch \
       pkg-config \
       python3-distutils \
       wget \
@@ -30,11 +32,14 @@ STABLE_EPHEMERAL=" \
 # Unfortunately, gfxreconstruct needs the -dev packages:
 # https://github.com/LunarG/gfxreconstruct/issues/402
 apt-get install -y --no-remove \
+      $STABLE_EPHEMERAL \
       libwayland-dev \
       libx11-xcb-dev \
       libxcb-keysyms1-dev \
+      libxcb-shm0 \
       libxcb1-dev \
-      $STABLE_EPHEMERAL
+      python3-lxml \
+      python3-simplejson
 
 # We need multiarch for Wine
 dpkg --add-architecture i386
@@ -107,17 +112,21 @@ wine \
 
 . .gitlab-ci/container/container_pre_build.sh
 
-############### Build dEQP runner
+############### Build piglit
 
-. .gitlab-ci/build-cts-runner.sh
+PIGLIT_BUILD_TARGETS="piglit_replayer" . .gitlab-ci/build-piglit.sh
+
+############### Build dEQP runner (and install rust temporarily for it)
+. .gitlab-ci/build-rust.sh
+. .gitlab-ci/build-deqp-runner.sh
+rm -rf /root/.rustup /root/.cargo
 
 ############### Build Fossilize
 
 . .gitlab-ci/build-fossilize.sh
 
 ############### Build dEQP VK
-
-. .gitlab-ci/build-deqp-vk.sh
+. .gitlab-ci/build-deqp.sh
 
 ############### Build gfxreconstruct
 

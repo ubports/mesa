@@ -308,8 +308,8 @@ void si_build_prim_discard_compute_shader(struct si_shader_context *ctx)
    LLVMSetLinkage(vs, LLVMPrivateLinkage);
 
    enum ac_arg_type const_desc_type;
-   if (ctx->shader->selector->info.const_buffers_declared == 1 &&
-       ctx->shader->selector->info.shader_buffers_declared == 0)
+   if (ctx->shader->selector->info.base.num_ubos == 1 &&
+       ctx->shader->selector->info.base.num_ssbos == 0)
       const_desc_type = AC_ARG_CONST_FLOAT_PTR;
    else
       const_desc_type = AC_ARG_CONST_DESC_PTR;
@@ -346,10 +346,10 @@ void si_build_prim_discard_compute_shader(struct si_shader_context *ctx)
    ac_add_arg(&ctx->args, AC_ARG_VGPR, 1, AC_ARG_INT, &param_local_id);
 
    /* Create the compute shader function. */
-   unsigned old_type = ctx->type;
-   ctx->type = PIPE_SHADER_COMPUTE;
+   gl_shader_stage old_stage = ctx->stage;
+   ctx->stage = MESA_SHADER_COMPUTE;
    si_llvm_create_func(ctx, "prim_discard_cs", NULL, 0, THREADGROUP_SIZE);
-   ctx->type = old_type;
+   ctx->stage = old_stage;
 
    if (VERTEX_COUNTER_GDS_MODE == 2) {
       ac_llvm_add_target_dep_function_attr(ctx->main_fn, "amdgpu-gds-size", 256);
@@ -460,7 +460,7 @@ void si_build_prim_discard_compute_shader(struct si_shader_context *ctx)
    if (key->opt.cs_indexed) {
       for (unsigned i = 0; i < 3; i++) {
          index[i] = ac_build_buffer_load_format(&ctx->ac, input_indexbuf, index[i], ctx->ac.i32_0,
-                                                1, 0, true, false);
+                                                1, 0, true, false, false);
          index[i] = ac_to_integer(&ctx->ac, index[i]);
       }
    }
@@ -539,7 +539,7 @@ void si_build_prim_discard_compute_shader(struct si_shader_context *ctx)
             LLVMValueRef strip_start = ac_build_umsb(&ctx->ac, preceding_reset_threadmask, NULL);
             strip_start = LLVMBuildAdd(builder, strip_start, ctx->ac.i32_1, "");
 
-            /* This flips the orientatino based on reset indices within this wave only. */
+            /* This flips the orientation based on reset indices within this wave only. */
             first_is_odd = LLVMBuildTrunc(builder, strip_start, ctx->ac.i1, "");
 
             LLVMValueRef last_strip_start, prev_wave_state, ret, tmp;
@@ -905,37 +905,39 @@ static bool si_initialize_prim_discard_cmdbuf(struct si_context *sctx)
    if (sctx->index_ring)
       return true;
 
-   if (!sctx->prim_discard_compute_cs) {
+   if (!sctx->prim_discard_compute_cs.priv) {
       struct radeon_winsys *ws = sctx->ws;
       unsigned gds_size =
          VERTEX_COUNTER_GDS_MODE == 1 ? GDS_SIZE_UNORDERED : VERTEX_COUNTER_GDS_MODE == 2 ? 8 : 0;
       unsigned num_oa_counters = VERTEX_COUNTER_GDS_MODE == 2 ? 2 : 0;
 
       if (gds_size) {
-         sctx->gds = ws->buffer_create(ws, gds_size, 4, RADEON_DOMAIN_GDS, 0);
+         sctx->gds = ws->buffer_create(ws, gds_size, 4, RADEON_DOMAIN_GDS,
+                                       RADEON_FLAG_DRIVER_INTERNAL);
          if (!sctx->gds)
             return false;
 
-         ws->cs_add_buffer(sctx->gfx_cs, sctx->gds, RADEON_USAGE_READWRITE, 0, 0);
+         ws->cs_add_buffer(&sctx->gfx_cs, sctx->gds, RADEON_USAGE_READWRITE, 0, 0);
       }
       if (num_oa_counters) {
          assert(gds_size);
-         sctx->gds_oa = ws->buffer_create(ws, num_oa_counters, 1, RADEON_DOMAIN_OA, 0);
+         sctx->gds_oa = ws->buffer_create(ws, num_oa_counters, 1, RADEON_DOMAIN_OA,
+                                          RADEON_FLAG_DRIVER_INTERNAL);
          if (!sctx->gds_oa)
             return false;
 
-         ws->cs_add_buffer(sctx->gfx_cs, sctx->gds_oa, RADEON_USAGE_READWRITE, 0, 0);
+         ws->cs_add_buffer(&sctx->gfx_cs, sctx->gds_oa, RADEON_USAGE_READWRITE, 0, 0);
       }
 
-      sctx->prim_discard_compute_cs =
-         ws->cs_add_parallel_compute_ib(sctx->gfx_cs, num_oa_counters > 0);
-      if (!sctx->prim_discard_compute_cs)
+      if (!ws->cs_add_parallel_compute_ib(&sctx->prim_discard_compute_cs,
+                                          &sctx->gfx_cs, num_oa_counters > 0))
          return false;
    }
 
    if (!sctx->index_ring) {
       sctx->index_ring = si_aligned_buffer_create(
-         sctx->b.screen, SI_RESOURCE_FLAG_UNMAPPABLE, PIPE_USAGE_DEFAULT,
+         sctx->b.screen, SI_RESOURCE_FLAG_UNMAPPABLE | SI_RESOURCE_FLAG_DRIVER_INTERNAL,
+         PIPE_USAGE_DEFAULT,
          sctx->index_ring_size_per_ib * 2, sctx->screen->info.pte_fragment_size);
       if (!sctx->index_ring)
          return false;
@@ -952,7 +954,9 @@ static bool si_check_ring_space(struct si_context *sctx, unsigned out_indexbuf_s
 
 enum si_prim_discard_outcome
 si_prepare_prim_discard_or_split_draw(struct si_context *sctx, const struct pipe_draw_info *info,
-                                      bool primitive_restart)
+                                      const struct pipe_draw_start_count *draws,
+                                      unsigned num_draws, bool primitive_restart,
+                                      unsigned total_count)
 {
    /* If the compute shader compilation isn't finished, this returns false. */
    if (!si_shader_select_prim_discard_cs(sctx, info, primitive_restart))
@@ -961,9 +965,9 @@ si_prepare_prim_discard_or_split_draw(struct si_context *sctx, const struct pipe
    if (!si_initialize_prim_discard_cmdbuf(sctx))
       return SI_PRIM_DISCARD_DISABLED;
 
-   struct radeon_cmdbuf *gfx_cs = sctx->gfx_cs;
+   struct radeon_cmdbuf *gfx_cs = &sctx->gfx_cs;
    unsigned prim = info->mode;
-   unsigned count = info->count;
+   unsigned count = total_count;
    unsigned instance_count = info->instance_count;
    unsigned num_prims_per_instance = u_decomposed_prims_for_vertices(prim, count);
    unsigned num_prims = num_prims_per_instance * instance_count;
@@ -977,42 +981,78 @@ si_prepare_prim_discard_or_split_draw(struct si_context *sctx, const struct pipe
    if (ring_full && num_prims > split_prims_draw_level &&
        instance_count == 1 && /* TODO: support splitting instanced draws */
        (1 << prim) & ((1 << PIPE_PRIM_TRIANGLES) | (1 << PIPE_PRIM_TRIANGLE_STRIP))) {
-      /* Split draws. */
+      unsigned vert_count_per_subdraw = 0;
+
+      if (prim == PIPE_PRIM_TRIANGLES)
+         vert_count_per_subdraw = split_prims_draw_level * 3;
+      else if (prim == PIPE_PRIM_TRIANGLE_STRIP)
+         vert_count_per_subdraw = split_prims_draw_level;
+      else
+         unreachable("shouldn't get here");
+
+      /* Split multi draws first. */
+      if (num_draws > 1) {
+         unsigned count = 0;
+         unsigned first_draw = 0;
+         unsigned num_draws_split = 0;
+
+         for (unsigned i = 0; i < num_draws; i++) {
+            if (count && count + draws[i].count > vert_count_per_subdraw) {
+               /* Submit previous draws.  */
+               sctx->b.draw_vbo(&sctx->b, info, NULL, draws + first_draw, num_draws_split);
+               count = 0;
+               first_draw = i;
+               num_draws_split = 0;
+            }
+
+            if (draws[i].count > vert_count_per_subdraw) {
+               /* Submit just 1 draw. It will be split. */
+               sctx->b.draw_vbo(&sctx->b, info, NULL, draws + i, 1);
+               assert(count == 0);
+               assert(first_draw == i);
+               assert(num_draws_split == 0);
+               first_draw = i + 1;
+               continue;
+            }
+
+            count += draws[i].count;
+            num_draws_split++;
+         }
+         return SI_PRIM_DISCARD_MULTI_DRAW_SPLIT;
+      }
+
+      /* Split single draws if splitting multi draws isn't enough. */
       struct pipe_draw_info split_draw = *info;
+      struct pipe_draw_start_count split_draw_range = draws[0];
+      unsigned base_start = split_draw_range.start;
+
       split_draw.primitive_restart = primitive_restart;
 
-      unsigned base_start = split_draw.start;
-
       if (prim == PIPE_PRIM_TRIANGLES) {
-         unsigned vert_count_per_subdraw = split_prims_draw_level * 3;
          assert(vert_count_per_subdraw < count);
 
          for (unsigned start = 0; start < count; start += vert_count_per_subdraw) {
-            split_draw.start = base_start + start;
-            split_draw.count = MIN2(count - start, vert_count_per_subdraw);
+            split_draw_range.start = base_start + start;
+            split_draw_range.count = MIN2(count - start, vert_count_per_subdraw);
 
-            sctx->b.draw_vbo(&sctx->b, &split_draw);
+            sctx->b.draw_vbo(&sctx->b, &split_draw, NULL, &split_draw_range, 1);
          }
       } else if (prim == PIPE_PRIM_TRIANGLE_STRIP) {
          /* No primitive pair can be split, because strips reverse orientation
           * for odd primitives. */
          STATIC_ASSERT(split_prims_draw_level % 2 == 0);
 
-         unsigned vert_count_per_subdraw = split_prims_draw_level;
-
          for (unsigned start = 0; start < count - 2; start += vert_count_per_subdraw) {
-            split_draw.start = base_start + start;
-            split_draw.count = MIN2(count - start, vert_count_per_subdraw + 2);
+            split_draw_range.start = base_start + start;
+            split_draw_range.count = MIN2(count - start, vert_count_per_subdraw + 2);
 
-            sctx->b.draw_vbo(&sctx->b, &split_draw);
+            sctx->b.draw_vbo(&sctx->b, &split_draw, NULL, &split_draw_range, 1);
 
             if (start == 0 && primitive_restart &&
                 sctx->cs_prim_discard_state.current->key.opt.cs_need_correct_orientation)
                sctx->preserve_prim_restart_gds_at_flush = true;
          }
          sctx->preserve_prim_restart_gds_at_flush = false;
-      } else {
-         assert(0);
       }
 
       return SI_PRIM_DISCARD_DRAW_SPLIT;
@@ -1025,11 +1065,11 @@ si_prepare_prim_discard_or_split_draw(struct si_context *sctx, const struct pipe
       return SI_PRIM_DISCARD_DISABLED;
    }
 
-   unsigned num_subdraws = DIV_ROUND_UP(num_prims, SPLIT_PRIMS_PACKET_LEVEL);
+   unsigned num_subdraws = DIV_ROUND_UP(num_prims, SPLIT_PRIMS_PACKET_LEVEL) * num_draws;
    unsigned need_compute_dw = 11 /* shader */ + 34 /* first draw */ +
                               24 * (num_subdraws - 1) + /* subdraws */
-                              20;                       /* leave some space at the end */
-   unsigned need_gfx_dw = si_get_minimum_num_gfx_cs_dwords(sctx);
+                              30;                       /* leave some space at the end */
+   unsigned need_gfx_dw = si_get_minimum_num_gfx_cs_dwords(sctx, 0);
 
    if (sctx->chip_class <= GFX7 || FORCE_REWIND_EMULATION)
       need_gfx_dw += 9; /* NOP(2) + WAIT_REG_MEM(7), then chain */
@@ -1052,7 +1092,7 @@ si_prepare_prim_discard_or_split_draw(struct si_context *sctx, const struct pipe
    }
 
    /* The compute IB is always chained, but we need to call cs_check_space to add more space. */
-   struct radeon_cmdbuf *cs = sctx->prim_discard_compute_cs;
+   struct radeon_cmdbuf *cs = &sctx->prim_discard_compute_cs;
    ASSERTED bool compute_has_space = sctx->ws->cs_check_space(cs, need_compute_dw, false);
    assert(compute_has_space);
    assert(si_check_ring_space(sctx, out_indexbuf_size));
@@ -1061,7 +1101,7 @@ si_prepare_prim_discard_or_split_draw(struct si_context *sctx, const struct pipe
 
 void si_compute_signal_gfx(struct si_context *sctx)
 {
-   struct radeon_cmdbuf *cs = sctx->prim_discard_compute_cs;
+   struct radeon_cmdbuf *cs = &sctx->prim_discard_compute_cs;
    unsigned writeback_L2_flags = 0;
 
    /* The writeback L2 flags vary with each chip generation. */
@@ -1095,13 +1135,14 @@ void si_compute_signal_gfx(struct si_context *sctx)
 
 /* Dispatch a primitive discard compute shader. */
 void si_dispatch_prim_discard_cs_and_draw(struct si_context *sctx,
-                                          const struct pipe_draw_info *info, unsigned index_size,
+                                          const struct pipe_draw_info *info,
+                                          unsigned count, unsigned index_size,
                                           unsigned base_vertex, uint64_t input_indexbuf_va,
                                           unsigned input_indexbuf_num_elements)
 {
-   struct radeon_cmdbuf *gfx_cs = sctx->gfx_cs;
-   struct radeon_cmdbuf *cs = sctx->prim_discard_compute_cs;
-   unsigned num_prims_per_instance = u_decomposed_prims_for_vertices(info->mode, info->count);
+   struct radeon_cmdbuf *gfx_cs = &sctx->gfx_cs;
+   struct radeon_cmdbuf *cs = &sctx->prim_discard_compute_cs;
+   unsigned num_prims_per_instance = u_decomposed_prims_for_vertices(info->mode, count);
    if (!num_prims_per_instance)
       return;
 
@@ -1185,7 +1226,7 @@ void si_dispatch_prim_discard_cs_and_draw(struct si_context *sctx,
 
       /* Disable ordered alloc for OA resources. */
       for (unsigned i = 0; i < 2; i++) {
-         radeon_set_uconfig_reg_seq(cs, R_031074_GDS_OA_CNTL, 3);
+         radeon_set_uconfig_reg_seq(cs, R_031074_GDS_OA_CNTL, 3, false);
          radeon_emit(cs, S_031074_INDEX(i));
          radeon_emit(cs, 0);
          radeon_emit(cs, S_03107C_ENABLE(0));
@@ -1271,19 +1312,6 @@ void si_dispatch_prim_discard_cs_and_draw(struct si_context *sctx,
    desc[9] = fui(cull_info.scale[1]);
    desc[10] = fui(cull_info.translate[0]);
    desc[11] = fui(cull_info.translate[1]);
-
-   /* Better subpixel precision increases the efficiency of small
-    * primitive culling. */
-   unsigned num_samples = sctx->framebuffer.nr_samples;
-   unsigned quant_mode = sctx->viewports.as_scissor[0].quant_mode;
-   float small_prim_cull_precision;
-
-   if (quant_mode == SI_QUANT_MODE_12_12_FIXED_POINT_1_4096TH)
-      small_prim_cull_precision = num_samples / 4096.0;
-   else if (quant_mode == SI_QUANT_MODE_14_10_FIXED_POINT_1_1024TH)
-      small_prim_cull_precision = num_samples / 1024.0;
-   else
-      small_prim_cull_precision = num_samples / 256.0;
 
    /* Set user data SGPRs. */
    /* This can't be greater than 14 if we want the fastest launch rate. */
@@ -1448,7 +1476,7 @@ void si_dispatch_prim_discard_cs_and_draw(struct si_context *sctx,
          radeon_emit(cs, num_prims_udiv.post_shift | (num_prims_per_instance << 5));
          radeon_emit(cs, info->restart_index);
          /* small-prim culling precision (same as rasterizer precision = QUANT_MODE) */
-         radeon_emit(cs, fui(small_prim_cull_precision));
+         radeon_emit(cs, fui(cull_info.small_prim_precision));
       } else {
          assert(VERTEX_COUNTER_GDS_MODE == 2);
          /* Only update the SGPRs that changed. */

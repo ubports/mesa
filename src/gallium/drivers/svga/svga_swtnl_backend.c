@@ -138,10 +138,10 @@ svga_vbuf_render_map_vertices(struct vbuf_render *render)
    if (svga_render->vbuf) {
       char *ptr = (char*)pipe_buffer_map(&svga->pipe,
                                          svga_render->vbuf,
-                                         PIPE_TRANSFER_WRITE |
-                                         PIPE_TRANSFER_FLUSH_EXPLICIT |
-                                         PIPE_TRANSFER_DISCARD_RANGE |
-                                         PIPE_TRANSFER_UNSYNCHRONIZED,
+                                         PIPE_MAP_WRITE |
+                                         PIPE_MAP_FLUSH_EXPLICIT |
+                                         PIPE_MAP_DISCARD_RANGE |
+                                         PIPE_MAP_UNSYNCHRONIZED,
                                          &svga_render->vbuf_transfer);
       if (ptr) {
          svga_render->vbuf_ptr = ptr;
@@ -330,10 +330,13 @@ svga_vbuf_render_draw_elements(struct vbuf_render *render,
       .start_instance = 0,
       .instance_count = 1,
       .index_bias = bias,
+      .index_bounds_valid = true,
       .min_index = svga_render->min_index,
       .max_index = svga_render->max_index,
+   };
+   const struct pipe_draw_start_count draw = {
       .start = 0,
-      .count = nr_indices
+      .count = nr_indices,
    };
 
    assert((svga_render->vbuf_offset - svga_render->vdecl_offset)
@@ -350,6 +353,7 @@ svga_vbuf_render_draw_elements(struct vbuf_render *render,
     */
    svga_update_state_retry(svga, SVGA_STATE_HW_DRAW);
    SVGA_RETRY_CHECK(svga, svga_hwtnl_draw_range_elements(svga->hwtnl, &info,
+                                                         &draw,
                                                          nr_indices), retried);
    if (retried) {
       svga->swtnl.new_vbuf = TRUE;

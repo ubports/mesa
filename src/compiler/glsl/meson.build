@@ -55,7 +55,7 @@ ir_expression_operation_strings_h = custom_target(
 
 float64_glsl_h = custom_target(
   'float64_glsl.h',
-  input : ['xxd.py', 'float64.glsl'],
+  input : [files_xxd, 'float64.glsl'],
   output : 'float64_glsl.h',
   command : [prog_python, '@INPUT@', '@OUTPUT@', '-n', 'float64_source'],
 )
@@ -254,7 +254,7 @@ glsl_compiler = executable(
   c_args : [c_msvc_compat_args, no_override_init_args],
   cpp_args : [cpp_msvc_compat_args],
   gnu_symbol_visibility : 'hidden',
-  dependencies : [dep_clock, dep_thread, idep_getopt],
+  dependencies : [dep_clock, dep_thread, idep_getopt, idep_mesautil],
   include_directories : [inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux],
   link_with : [libglsl_standalone],
   build_by_default : with_tools.contains('glsl'),
@@ -269,7 +269,7 @@ glsl_test = executable(
   cpp_args : [cpp_msvc_compat_args],
   gnu_symbol_visibility : 'hidden',
   include_directories : [inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux],
-  dependencies : [dep_clock, dep_thread, idep_getopt],
+  dependencies : [dep_clock, dep_thread, idep_getopt, idep_mesautil],
   link_with : [libglsl, libglsl_standalone, libglsl_util],
   build_by_default : with_tools.contains('glsl'),
   install : with_tools.contains('glsl'),

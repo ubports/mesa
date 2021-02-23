@@ -26,6 +26,7 @@
  **************************************************************************/
 
 
+#include "compiler/nir/nir.h"
 #include "util/u_memory.h"
 #include "util/format/u_format.h"
 #include "util/format/u_format_s3tc.h"
@@ -53,6 +54,7 @@ static const struct debug_named_value sp_debug_options[] = {
    {"cs",        SP_DBG_CS,         "dump compute shader assembly to stderr"},
    {"no_rast",   SP_DBG_NO_RAST,    "no-ops rasterization, for profiling purposes"},
    {"use_llvm",  SP_DBG_USE_LLVM,   "Use LLVM if available for shaders"},
+   {"use_tgsi",  SP_DBG_USE_TGSI,   "Request TGSI from the API instead of NIR"},
 };
 
 int sp_debug;
@@ -71,6 +73,28 @@ softpipe_get_name(struct pipe_screen *screen)
    return "softpipe";
 }
 
+static const nir_shader_compiler_options sp_compiler_options = {
+   .fuse_ffma32 = true,
+   .fuse_ffma64 = true,
+   .lower_extract_byte = true,
+   .lower_extract_word = true,
+   .lower_fdph = true,
+   .lower_flrp64 = true,
+   .lower_fmod = true,
+   .lower_rotate = true,
+   .lower_uniforms_to_ubo = true,
+   .lower_vector_cmp = true,
+   .use_interpolated_input_intrinsics = true,
+};
+
+static const void *
+softpipe_get_compiler_options(struct pipe_screen *pscreen,
+                              enum pipe_shader_ir ir,
+                              enum pipe_shader_type shader)
+{
+   assert(ir == PIPE_SHADER_IR_NIR);
+   return &sp_compiler_options;
+}
 
 static int
 softpipe_get_param(struct pipe_screen *screen, enum pipe_cap param)
@@ -165,9 +189,8 @@ softpipe_get_param(struct pipe_screen *screen, enum pipe_cap param)
    case PIPE_CAP_MIXED_COLORBUFFER_FORMATS:
       return 1;
    case PIPE_CAP_GLSL_FEATURE_LEVEL:
-      return 400;
    case PIPE_CAP_GLSL_FEATURE_LEVEL_COMPATIBILITY:
-      return 140;
+      return 400;
    case PIPE_CAP_COMPUTE:
       return 1;
    case PIPE_CAP_USER_VERTEX_BUFFERS:
@@ -219,6 +242,8 @@ softpipe_get_param(struct pipe_screen *screen, enum pipe_cap param)
       return 1;
    case PIPE_CAP_QUERY_SO_OVERFLOW:
       return 1;
+   case PIPE_CAP_NIR_IMAGES_AS_DEREF:
+      return 0;
 
    case PIPE_CAP_VENDOR_ID:
       return 0xFFFFFFFF;
@@ -264,7 +289,6 @@ softpipe_get_param(struct pipe_screen *screen, enum pipe_cap param)
    case PIPE_CAP_PCI_BUS:
    case PIPE_CAP_PCI_DEVICE:
    case PIPE_CAP_PCI_FUNCTION:
-   case PIPE_CAP_GLSL_OPTIMIZE_CONSERVATIVELY:
       return 0;
    case PIPE_CAP_MAX_GS_INVOCATIONS:
       return 32;
@@ -283,6 +307,16 @@ softpipe_get_shader_param(struct pipe_screen *screen,
                           enum pipe_shader_cap param)
 {
    struct softpipe_screen *sp_screen = softpipe_screen(screen);
+
+   switch (param) {
+   case PIPE_SHADER_CAP_PREFERRED_IR:
+      return (sp_debug & SP_DBG_USE_TGSI) ? PIPE_SHADER_IR_TGSI : PIPE_SHADER_IR_NIR;
+   case PIPE_SHADER_CAP_SUPPORTED_IRS:
+      return (1 << PIPE_SHADER_IR_NIR) | (1 << PIPE_SHADER_IR_TGSI);
+   default:
+      break;
+   }
+
    switch(shader)
    {
    case PIPE_SHADER_FRAGMENT:
@@ -446,6 +480,7 @@ softpipe_destroy_screen( struct pipe_screen *screen )
  */
 static void
 softpipe_flush_frontbuffer(struct pipe_screen *_screen,
+                           struct pipe_context *pipe,
                            struct pipe_resource *resource,
                            unsigned level, unsigned layer,
                            void *context_private,
@@ -548,6 +583,7 @@ softpipe_create_screen(struct sw_winsys *winsys)
    screen->base.context_create = softpipe_create_context;
    screen->base.flush_frontbuffer = softpipe_flush_frontbuffer;
    screen->base.get_compute_param = softpipe_get_compute_param;
+   screen->base.get_compiler_options = softpipe_get_compiler_options;
    screen->use_llvm = sp_debug & SP_DBG_USE_LLVM;
 
    softpipe_init_screen_texture_funcs(&screen->base);

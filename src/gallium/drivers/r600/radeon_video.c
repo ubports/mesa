@@ -98,12 +98,12 @@ bool rvid_resize_buffer(struct pipe_screen *screen, struct radeon_cmdbuf *cs,
 		goto error;
 
 	src = ws->buffer_map(old_buf.res->buf, cs,
-			     PIPE_TRANSFER_READ | RADEON_TRANSFER_TEMPORARY);
+			     PIPE_MAP_READ | RADEON_MAP_TEMPORARY);
 	if (!src)
 		goto error;
 
 	dst = ws->buffer_map(new_buf->res->buf, cs,
-			     PIPE_TRANSFER_WRITE | RADEON_TRANSFER_TEMPORARY);
+			     PIPE_MAP_WRITE | RADEON_MAP_TEMPORARY);
 	if (!dst)
 		goto error;
 
@@ -224,7 +224,7 @@ int rvid_get_video_param(struct pipe_screen *screen,
 	enum pipe_video_format codec = u_reduce_video_profile(profile);
 	struct radeon_info info;
 
-	rscreen->ws->query_info(rscreen->ws, &info);
+	rscreen->ws->query_info(rscreen->ws, &info, false, false);
 
 	if (entrypoint == PIPE_VIDEO_ENTRYPOINT_ENCODE) {
 		switch (param) {

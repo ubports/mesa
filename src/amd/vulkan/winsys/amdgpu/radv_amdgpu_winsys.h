@@ -32,6 +32,7 @@
 #include "ac_gpu_info.h"
 #include <amdgpu.h>
 #include "util/list.h"
+#include "util/rwlock.h"
 #include <pthread.h>
 
 struct radv_amdgpu_winsys {
@@ -43,18 +44,29 @@ struct radv_amdgpu_winsys {
 	struct ac_addrlib *addrlib;
 
 	bool debug_all_bos;
+	bool debug_log_bos;
 	bool use_ib_bos;
+	enum radeon_bo_domain cs_bo_domain;
 	bool zero_all_vram_allocs;
 	bool use_local_bos;
 	bool use_llvm;
 	unsigned num_buffers;
 
-	pthread_mutex_t global_bo_list_lock;
+	struct u_rwlock global_bo_list_lock;
 	struct list_head global_bo_list;
 
 	uint64_t allocated_vram;
 	uint64_t allocated_vram_vis;
 	uint64_t allocated_gtt;
+
+	/* syncobj cache */
+	pthread_mutex_t syncobj_lock;
+	uint32_t *syncobj;
+	uint32_t syncobj_count, syncobj_capacity;
+
+	/* BO log */
+	struct u_rwlock log_bo_list_lock;
+	struct list_head log_bo_list;
 };
 
 static inline struct radv_amdgpu_winsys *

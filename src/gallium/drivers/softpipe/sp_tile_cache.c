@@ -45,7 +45,7 @@ sp_alloc_tile(struct softpipe_tile_cache *tc);
 /**
  * Return the position in the cache for the tile that contains win pos (x,y).
  * We currently use a direct mapped cache so this is like a hack key.
- * At some point we should investige something more sophisticated, like
+ * At some point we should investigate something more sophisticated, like
  * a LRU replacement policy.
  */
 #define CACHE_POS(x, y, l)                        \
@@ -202,8 +202,8 @@ sp_tile_cache_set_surface(struct softpipe_tile_cache *tc,
          for (i = 0; i < tc->num_maps; i++) {
             tc->transfer_map[i] = pipe_transfer_map(pipe, ps->texture,
                                                     ps->u.tex.level, ps->u.tex.first_layer + i,
-                                                    PIPE_TRANSFER_READ_WRITE |
-                                                    PIPE_TRANSFER_UNSYNCHRONIZED,
+                                                    PIPE_MAP_READ_WRITE |
+                                                    PIPE_MAP_UNSYNCHRONIZED,
                                                     0, 0, ps->width, ps->height,
                                                     &tc->transfer[i]);
          }

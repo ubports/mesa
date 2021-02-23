@@ -108,6 +108,7 @@ _mesa_hash_table_random_entry(struct hash_table *ht,
                               bool (*predicate)(struct hash_entry *entry));
 
 uint32_t _mesa_hash_data(const void *data, size_t size);
+uint32_t _mesa_hash_data_with_seed(const void *data, size_t size, uint32_t seed);
 
 uint32_t _mesa_hash_int(const void *key);
 uint32_t _mesa_hash_uint(const void *key);
@@ -124,6 +125,8 @@ bool _mesa_key_pointer_equal(const void *a, const void *b);
 struct hash_table *
 _mesa_pointer_hash_table_create(void *mem_ctx);
 
+bool
+_mesa_hash_table_reserve(struct hash_table *ht, unsigned size);
 /**
  * This foreach function is safe against deletion (which just replaces
  * an entry's data with the deleted marker), but not against insertion

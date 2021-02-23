@@ -18,10 +18,25 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+amd_json_files = [
+  # Generated:
+  '../registers/gfx6.json',
+  '../registers/gfx7.json',
+  '../registers/gfx8.json',
+  '../registers/gfx81.json',
+  '../registers/gfx9.json',
+  '../registers/gfx10.json',
+  '../registers/gfx103.json',
+
+  # Manually written:
+  '../registers/pkt3.json',
+  '../registers/gfx10-rsrc.json',
+  '../registers/registers-manually-defined.json',
+]
+
 sid_tables_h = custom_target(
   'sid_tables_h',
-  input : ['sid_tables.py', 'sid.h', '../registers/amdgfxregs.json', '../registers/pkt3.json',
-           '../registers/gfx10.json', '../registers/gfx10-rsrc.json'],
+  input : ['sid_tables.py', 'sid.h'] + amd_json_files,
   output : 'sid_tables.h',
   command : [prog_python, '@INPUT@'],
   capture : true,
@@ -29,8 +44,7 @@ sid_tables_h = custom_target(
 
 amdgfxregs_h = custom_target(
   'amdgfxregs_h',
-  input : ['../registers/makeregheader.py', '../registers/amdgfxregs.json', '../registers/pkt3.json',
-           '../registers/gfx10.json', '../registers/gfx10-rsrc.json'],
+  input : ['../registers/makeregheader.py'] + amd_json_files,
   output : 'amdgfxregs.h',
   command : [prog_python, '@INPUT@', '--sort', 'address', '--guard', 'AMDGFXREGS_H'],
   capture : true,
@@ -66,6 +80,10 @@ amd_common_files = files(
   'ac_debug.h',
   'ac_shadowed_regs.c',
   'ac_shadowed_regs.h',
+  'ac_sqtt.c',
+  'ac_sqtt.h',
+  'ac_rgp.c',
+  'ac_rgp.h',
 )
 
 libamd_common = static_library(
@@ -76,9 +94,26 @@ libamd_common = static_library(
   ],
   dependencies : [
     dep_thread, dep_elf, dep_libdrm_amdgpu, dep_valgrind,
-    idep_nir_headers,
+    idep_mesautil, idep_nir_headers
   ],
   gnu_symbol_visibility : 'hidden',
 )
 
 idep_amdgfxregs_h = declare_dependency(sources : [amdgfxregs_h])
+
+
+if with_tests
+  test(
+    'ac_surface_modifier_test',
+    executable(
+      'ac_surface_modifier_test',
+      ['ac_surface_modifier_test.c'],
+      link_with: [libamd_common, libamdgpu_addrlib],
+      include_directories : [
+        inc_amd, inc_gallium, inc_include, inc_src,
+      ],
+      dependencies: [idep_amdgfxregs_h, dep_libdrm_amdgpu, idep_mesautil],
+    ),
+    suite: ['amd']
+  )
+endif

@@ -322,12 +322,11 @@ extern struct draw_stage *nvc0_draw_render_stage(struct nvc0_context *);
 
 /* nvc0_program.c */
 bool nvc0_program_translate(struct nvc0_program *, uint16_t chipset,
+                            struct disk_cache *,
                             struct pipe_debug_callback *);
 bool nvc0_program_upload(struct nvc0_context *, struct nvc0_program *);
 void nvc0_program_destroy(struct nvc0_context *, struct nvc0_program *);
 void nvc0_program_library_upload(struct nvc0_context *);
-uint32_t nvc0_program_symbol_offset(const struct nvc0_program *,
-                                    uint32_t label);
 void nvc0_program_init_tcp_empty(struct nvc0_context *);
 
 /* nvc0_shader_state.c */
@@ -414,7 +413,10 @@ nvc0_cb_bo_push(struct nouveau_context *,
                 unsigned offset, unsigned words, const uint32_t *data);
 
 /* nvc0_vbo.c */
-void nvc0_draw_vbo(struct pipe_context *, const struct pipe_draw_info *);
+void nvc0_draw_vbo(struct pipe_context *, const struct pipe_draw_info *,
+                   const struct pipe_draw_indirect_info *indirect,
+                   const struct pipe_draw_start_count *draws,
+                   unsigned num_draws);
 
 void *
 nvc0_vertex_state_create(struct pipe_context *pipe,
@@ -437,8 +439,12 @@ nvc0_video_buffer_create(struct pipe_context *pipe,
                          const struct pipe_video_buffer *templat);
 
 /* nvc0_push.c */
-void nvc0_push_vbo(struct nvc0_context *, const struct pipe_draw_info *);
-void nvc0_push_vbo_indirect(struct nvc0_context *, const struct pipe_draw_info *);
+void nvc0_push_vbo(struct nvc0_context *, const struct pipe_draw_info *,
+                   const struct pipe_draw_indirect_info *indirect,
+                   const struct pipe_draw_start_count *draw);
+void nvc0_push_vbo_indirect(struct nvc0_context *, const struct pipe_draw_info *,
+                            const struct pipe_draw_indirect_info *indirect,
+                            const struct pipe_draw_start_count *draw);
 
 /* nve4_compute.c */
 void nve4_launch_grid(struct pipe_context *, const struct pipe_grid_info *);

@@ -159,9 +159,9 @@ static bool r300_get_query_result(struct pipe_context* pipe,
         return vresult->b;
     }
 
-    map = r300->rws->buffer_map(q->buf, r300->cs,
-                                PIPE_TRANSFER_READ |
-                                (!wait ? PIPE_TRANSFER_DONTBLOCK : 0));
+    map = r300->rws->buffer_map(q->buf, &r300->cs,
+                                PIPE_MAP_READ |
+                                (!wait ? PIPE_MAP_DONTBLOCK : 0));
     if (!map)
         return FALSE;
 

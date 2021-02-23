@@ -118,9 +118,7 @@ static void r600_destroy_context(struct pipe_context *context)
 	if (rctx->blitter) {
 		util_blitter_destroy(rctx->blitter);
 	}
-	if (rctx->allocator_fetch_shader) {
-		u_suballocator_destroy(rctx->allocator_fetch_shader);
-	}
+	u_suballocator_destroy(&rctx->allocator_fetch_shader);
 
 	r600_release_command_buffer(&rctx->start_cs_cmd);
 
@@ -211,15 +209,12 @@ static struct pipe_context *r600_create_context(struct pipe_screen *screen,
 		goto fail;
 	}
 
-	rctx->b.gfx.cs = ws->cs_create(rctx->b.ctx, RING_GFX,
-				       r600_context_gfx_flush, rctx, false);
+	ws->cs_create(&rctx->b.gfx.cs, rctx->b.ctx, RING_GFX,
+                      r600_context_gfx_flush, rctx, false);
 	rctx->b.gfx.flush = r600_context_gfx_flush;
 
-	rctx->allocator_fetch_shader =
-		u_suballocator_create(&rctx->b.b, 64 * 1024,
-				      0, PIPE_USAGE_DEFAULT, 0, FALSE);
-	if (!rctx->allocator_fetch_shader)
-		goto fail;
+	u_suballocator_init(&rctx->allocator_fetch_shader, &rctx->b.b, 64 * 1024,
+                            0, PIPE_USAGE_DEFAULT, 0, FALSE);
 
 	rctx->isa = calloc(1, sizeof(struct r600_isa));
 	if (!rctx->isa || r600_isa_init(rctx, rctx->isa))
@@ -324,6 +319,7 @@ static int r600_get_param(struct pipe_screen* pscreen, enum pipe_cap param)
 	case PIPE_CAP_CAN_BIND_CONST_BUFFER_AS_VERTEX:
 	case PIPE_CAP_ALLOW_MAPPED_BUFFERS_DURING_EXECUTION:
 	case PIPE_CAP_ROBUST_BUFFER_ACCESS_BEHAVIOR:
+        case PIPE_CAP_NIR_ATOMICS_AS_DEREF:
 		return 1;
 
 	case PIPE_CAP_MAX_TEXTURE_UPLOAD_MEMORY_BUDGET:
@@ -411,13 +407,21 @@ static int r600_get_param(struct pipe_screen* pscreen, enum pipe_cap param)
 	case PIPE_CAP_GLSL_OPTIMIZE_CONSERVATIVELY:
 		return 0;
 
+        case PIPE_CAP_INT64:
 	case PIPE_CAP_DOUBLES:
 		if (rscreen->b.family == CHIP_ARUBA ||
 		    rscreen->b.family == CHIP_CAYMAN ||
 		    rscreen->b.family == CHIP_CYPRESS ||
 		    rscreen->b.family == CHIP_HEMLOCK)
 			return 1;
+                if (is_nir_enabled(&rscreen->b))
+                   return 1;
 		return 0;
+        case PIPE_CAP_INT64_DIVMOD:
+           /* it is actually not supported, but the nir lowering hdanles this corectly wheras
+            * the glsl lowering path seems to not initialize the buildins correctly.
+            */
+           return is_nir_enabled(&rscreen->b);
 	case PIPE_CAP_CULL_DISTANCE:
 		return 1;
 
@@ -558,14 +562,10 @@ static int r600_get_shader_param(struct pipe_screen* pscreen,
 		if (rscreen->b.info.drm_minor >= 37)
 			break;
 		return 0;
-      /* With NIR we currently disable TES, TCS and COMP shaders */
 	case PIPE_SHADER_TESS_CTRL:
 	case PIPE_SHADER_TESS_EVAL:
-		if (rscreen->b.family >= CHIP_CEDAR)
-			break;
-		/* fallthrough */
 	case PIPE_SHADER_COMPUTE:
-		if (!is_nir_enabled(&rscreen->b))
+		if (rscreen->b.family >= CHIP_CEDAR)
 			break;
 		/* fallthrough */
 	default:
@@ -615,7 +615,7 @@ static int r600_get_shader_param(struct pipe_screen* pscreen,
 	case PIPE_SHADER_CAP_FP16:
         case PIPE_SHADER_CAP_FP16_DERIVATIVES:
         case PIPE_SHADER_CAP_INT16:
-        case PIPE_SHADER_CAP_GLSL_16BIT_TEMPS:
+        case PIPE_SHADER_CAP_GLSL_16BIT_CONSTS:
 		return 0;
 	case PIPE_SHADER_CAP_INTEGERS:
 	case PIPE_SHADER_CAP_TGSI_ANY_INOUT_DECL_RANGE:
@@ -814,7 +814,7 @@ struct pipe_screen *r600_screen_create(struct radeon_winsys *ws,
 	templ.usage = PIPE_USAGE_DEFAULT;
 
 	struct r600_resource *res = r600_resource(rscreen->screen.resource_create(&rscreen->screen, &templ));
-	unsigned char *map = ws->buffer_map(res->buf, NULL, PIPE_TRANSFER_WRITE);
+	unsigned char *map = ws->buffer_map(res->buf, NULL, PIPE_MAP_WRITE);
 
 	memset(map, 0, 256);
 

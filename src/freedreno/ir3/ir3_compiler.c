@@ -56,6 +56,7 @@ enum ir3_shader_debug ir3_shader_debug = 0;
 void
 ir3_compiler_destroy(struct ir3_compiler *compiler)
 {
+	disk_cache_destroy(compiler->disk_cache);
 	ralloc_free(compiler);
 }
 
@@ -94,6 +95,12 @@ ir3_compiler_create(struct fd_device *dev, uint32_t gpu_id)
 		 */
 		compiler->max_const_compute = 256;
 
+		/* TODO: implement clip+cull distances on earlier gen's */
+		compiler->has_clip_cull = true;
+
+		/* TODO: implement private memory on earlier gen's */
+		compiler->has_pvtmem = true;
+
 		if (compiler->gpu_id == 650)
 			compiler->tess_use_shared = true;
 	} else {
@@ -115,6 +122,7 @@ ir3_compiler_create(struct fd_device *dev, uint32_t gpu_id)
 		compiler->unminify_coords = false;
 		compiler->txf_ms_with_isaml = false;
 		compiler->array_index_add_half = true;
+		compiler->instr_align = 16;
 		compiler->const_upload_unit = 4;
 	} else {
 		/* no special handling for "flat" */
@@ -123,6 +131,7 @@ ir3_compiler_create(struct fd_device *dev, uint32_t gpu_id)
 		compiler->unminify_coords = true;
 		compiler->txf_ms_with_isaml = true;
 		compiler->array_index_add_half = false;
+		compiler->instr_align = 4;
 		compiler->const_upload_unit = 8;
 	}
 

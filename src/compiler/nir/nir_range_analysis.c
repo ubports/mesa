@@ -87,7 +87,10 @@ static struct ssa_result_range
 analyze_constant(const struct nir_alu_instr *instr, unsigned src,
                  nir_alu_type use_type)
 {
-   uint8_t swizzle[4] = { 0, 1, 2, 3 };
+   uint8_t swizzle[NIR_MAX_VEC_COMPONENTS] = { 0, 1, 2, 3,
+                                               4, 5, 6, 7,
+                                               8, 9, 10, 11,
+                                               12, 13, 14, 15 };
 
    /* If the source is an explicitly sized source, then we need to reset
     * both the number of components and the swizzle.
@@ -861,6 +864,7 @@ analyze_expression(const nir_alu_instr *instr, unsigned src,
 
       case eq_zero:
          assert(r.is_integral);
+         FALLTHROUGH;
       case gt_zero:
       case ge_zero:
          /* The fsat doesn't add any information in these cases. */
@@ -939,7 +943,7 @@ analyze_expression(const nir_alu_instr *instr, unsigned src,
    case nir_op_flt:
    case nir_op_fge:
    case nir_op_feq:
-   case nir_op_fne:
+   case nir_op_fneu:
    case nir_op_ilt:
    case nir_op_ige:
    case nir_op_ieq:
@@ -1099,6 +1103,7 @@ static uint64_t mul_clamp(uint32_t a, uint32_t b)
       return a * b;
 }
 
+/* recursively gather at most "buf_size" phi/bcsel sources */
 static unsigned
 search_phi_bcsel(nir_ssa_scalar scalar, nir_ssa_scalar *buf, unsigned buf_size, struct set *visited)
 {
@@ -1109,15 +1114,18 @@ search_phi_bcsel(nir_ssa_scalar scalar, nir_ssa_scalar *buf, unsigned buf_size, 
    if (scalar.def->parent_instr->type == nir_instr_type_phi) {
       nir_phi_instr *phi = nir_instr_as_phi(scalar.def->parent_instr);
       unsigned num_sources_left = exec_list_length(&phi->srcs);
-      unsigned total_added = 0;
-      nir_foreach_phi_src(src, phi) {
-         unsigned added = search_phi_bcsel(
-            (nir_ssa_scalar){src->src.ssa, 0}, buf + total_added, buf_size - num_sources_left, visited);
-         buf_size -= added;
-         total_added += added;
-         num_sources_left--;
+      if (buf_size >= num_sources_left) {
+         unsigned total_added = 0;
+         nir_foreach_phi_src(src, phi) {
+            num_sources_left--;
+            unsigned added = search_phi_bcsel(
+               (nir_ssa_scalar){src->src.ssa, 0}, buf + total_added, buf_size - num_sources_left, visited);
+            assert(added <= buf_size);
+            buf_size -= added;
+            total_added += added;
+         }
+         return total_added;
       }
-      return total_added;
    }
 
    if (nir_ssa_scalar_is_alu(scalar)) {
@@ -1141,11 +1149,8 @@ search_phi_bcsel(nir_ssa_scalar scalar, nir_ssa_scalar *buf, unsigned buf_size, 
 static nir_variable *
 lookup_input(nir_shader *shader, unsigned driver_location)
 {
-   nir_foreach_variable(var, &shader->inputs) {
-      if (driver_location == var->data.driver_location)
-         return var;
-   }
-   return NULL;
+   return nir_find_variable_with_driver_location(shader, nir_var_shader_in,
+                                                 driver_location);
 }
 
 uint32_t
@@ -1319,10 +1324,6 @@ nir_unsigned_upper_bound(nir_shader *shader, struct hash_table *range_ht,
       case nir_op_udiv:
       case nir_op_bcsel:
       case nir_op_b32csel:
-      case nir_op_imax3:
-      case nir_op_imin3:
-      case nir_op_umax3:
-      case nir_op_umin3:
       case nir_op_ubfe:
       case nir_op_bfm:
       case nir_op_f2u32:
@@ -1405,16 +1406,6 @@ nir_unsigned_upper_bound(nir_shader *shader, struct hash_table *range_ht,
       case nir_op_b32csel:
          res = src1 > src2 ? src1 : src2;
          break;
-      case nir_op_imax3:
-      case nir_op_imin3:
-      case nir_op_umax3:
-         src0 = src0 > src1 ? src0 : src1;
-         res = src0 > src2 ? src0 : src2;
-         break;
-      case nir_op_umin3:
-         src0 = src0 < src1 ? src0 : src1;
-         res = src0 < src2 ? src0 : src2;
-         break;
       case nir_op_ubfe:
          res = bitmask(MIN2(src2, scalar.def->bit_size));
          break;
@@ -1467,36 +1458,38 @@ nir_addition_might_overflow(nir_shader *shader, struct hash_table *range_ht,
                             nir_ssa_scalar ssa, unsigned const_val,
                             const nir_unsigned_upper_bound_config *config)
 {
-   nir_op alu_op = nir_ssa_scalar_alu_op(ssa);
+   if (nir_ssa_scalar_is_alu(ssa)) {
+      nir_op alu_op = nir_ssa_scalar_alu_op(ssa);
 
-   /* iadd(imul(a, #b), #c) */
-   if (alu_op == nir_op_imul || alu_op == nir_op_ishl) {
-      nir_ssa_scalar mul_src0 = nir_ssa_scalar_chase_alu_src(ssa, 0);
-      nir_ssa_scalar mul_src1 = nir_ssa_scalar_chase_alu_src(ssa, 1);
-      uint32_t stride = 1;
-      if (nir_ssa_scalar_is_const(mul_src0))
-         stride = nir_ssa_scalar_as_uint(mul_src0);
-      else if (nir_ssa_scalar_is_const(mul_src1))
-         stride = nir_ssa_scalar_as_uint(mul_src1);
+      /* iadd(imul(a, #b), #c) */
+      if (alu_op == nir_op_imul || alu_op == nir_op_ishl) {
+         nir_ssa_scalar mul_src0 = nir_ssa_scalar_chase_alu_src(ssa, 0);
+         nir_ssa_scalar mul_src1 = nir_ssa_scalar_chase_alu_src(ssa, 1);
+         uint32_t stride = 1;
+         if (nir_ssa_scalar_is_const(mul_src0))
+            stride = nir_ssa_scalar_as_uint(mul_src0);
+         else if (nir_ssa_scalar_is_const(mul_src1))
+            stride = nir_ssa_scalar_as_uint(mul_src1);
 
-      if (alu_op == nir_op_ishl)
-         stride = 1u << (stride % 32u);
+         if (alu_op == nir_op_ishl)
+            stride = 1u << (stride % 32u);
 
-      if (!stride || const_val <= UINT32_MAX - (UINT32_MAX / stride * stride))
-         return false;
-   }
+         if (!stride || const_val <= UINT32_MAX - (UINT32_MAX / stride * stride))
+            return false;
+      }
 
-   /* iadd(iand(a, #b), #c) */
-   if (alu_op == nir_op_iand) {
-      nir_ssa_scalar and_src0 = nir_ssa_scalar_chase_alu_src(ssa, 0);
-      nir_ssa_scalar and_src1 = nir_ssa_scalar_chase_alu_src(ssa, 1);
-      uint32_t mask = 0xffffffff;
-      if (nir_ssa_scalar_is_const(and_src0))
-         mask = nir_ssa_scalar_as_uint(and_src0);
-      else if (nir_ssa_scalar_is_const(and_src1))
-         mask = nir_ssa_scalar_as_uint(and_src1);
-      if (mask == 0 || const_val < (1u << (ffs(mask) - 1)))
-         return false;
+      /* iadd(iand(a, #b), #c) */
+      if (alu_op == nir_op_iand) {
+         nir_ssa_scalar and_src0 = nir_ssa_scalar_chase_alu_src(ssa, 0);
+         nir_ssa_scalar and_src1 = nir_ssa_scalar_chase_alu_src(ssa, 1);
+         uint32_t mask = 0xffffffff;
+         if (nir_ssa_scalar_is_const(and_src0))
+            mask = nir_ssa_scalar_as_uint(and_src0);
+         else if (nir_ssa_scalar_is_const(and_src1))
+            mask = nir_ssa_scalar_as_uint(and_src1);
+         if (mask == 0 || const_val < (1u << (ffs(mask) - 1)))
+            return false;
+      }
    }
 
    uint32_t ub = nir_unsigned_upper_bound(shader, range_ht, ssa, config);

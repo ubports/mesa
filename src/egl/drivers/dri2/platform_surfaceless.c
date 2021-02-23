@@ -108,8 +108,8 @@ surfaceless_image_get_buffers(__DRIdrawable *driDrawable,
 }
 
 static _EGLSurface *
-dri2_surfaceless_create_surface(_EGLDriver *drv, _EGLDisplay *disp, EGLint type,
-                        _EGLConfig *conf, const EGLint *attrib_list)
+dri2_surfaceless_create_surface(_EGLDisplay *disp, EGLint type,
+                                _EGLConfig *conf, const EGLint *attrib_list)
 {
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
    struct dri2_egl_config *dri2_conf = dri2_egl_config(conf);
@@ -153,7 +153,7 @@ dri2_surfaceless_create_surface(_EGLDriver *drv, _EGLDisplay *disp, EGLint type,
 }
 
 static EGLBoolean
-surfaceless_destroy_surface(_EGLDriver *drv, _EGLDisplay *disp, _EGLSurface *surf)
+surfaceless_destroy_surface(_EGLDisplay *disp, _EGLSurface *surf)
 {
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
    struct dri2_egl_surface *dri2_surf = dri2_egl_surface(surf);
@@ -168,10 +168,10 @@ surfaceless_destroy_surface(_EGLDriver *drv, _EGLDisplay *disp, _EGLSurface *sur
 }
 
 static _EGLSurface *
-dri2_surfaceless_create_pbuffer_surface(_EGLDriver *drv, _EGLDisplay *disp,
-                                _EGLConfig *conf, const EGLint *attrib_list)
+dri2_surfaceless_create_pbuffer_surface(_EGLDisplay *disp, _EGLConfig *conf,
+                                        const EGLint *attrib_list)
 {
-   return dri2_surfaceless_create_surface(drv, disp, EGL_PBUFFER_BIT, conf,
+   return dri2_surfaceless_create_surface(disp, EGL_PBUFFER_BIT, conf,
                                   attrib_list);
 }
 
@@ -210,6 +210,7 @@ static const __DRIextension *image_loader_extensions[] = {
    &image_loader_extension.base,
    &image_lookup_extension.base,
    &use_invalidate.base,
+   &background_callable_extension.base,
    NULL,
 };
 
@@ -226,7 +227,7 @@ surfaceless_probe_device(_EGLDisplay *disp, bool swrast)
 {
 #define MAX_DRM_DEVICES 64
    const unsigned node_type = swrast ? DRM_NODE_PRIMARY : DRM_NODE_RENDER;
-   struct dri2_egl_display *dri2_dpy = disp->DriverData;
+   struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
    drmDevicePtr device, devices[MAX_DRM_DEVICES] = { NULL };
    int i, num_devices;
 
@@ -292,7 +293,7 @@ surfaceless_probe_device(_EGLDisplay *disp, bool swrast)
 static bool
 surfaceless_probe_device_sw(_EGLDisplay *disp)
 {
-   struct dri2_egl_display *dri2_dpy = disp->DriverData;
+   struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
 
    dri2_dpy->fd = -1;
    disp->Device = _eglAddDevice(dri2_dpy->fd, true);
@@ -313,7 +314,7 @@ surfaceless_probe_device_sw(_EGLDisplay *disp)
 }
 
 EGLBoolean
-dri2_initialize_surfaceless(_EGLDriver *drv, _EGLDisplay *disp)
+dri2_initialize_surfaceless(_EGLDisplay *disp)
 {
    struct dri2_egl_display *dri2_dpy;
    const char* err;
@@ -326,15 +327,7 @@ dri2_initialize_surfaceless(_EGLDriver *drv, _EGLDisplay *disp)
    dri2_dpy->fd = -1;
    disp->DriverData = (void *) dri2_dpy;
 
-   if (!disp->Options.ForceSoftware) {
-      driver_loaded = surfaceless_probe_device(disp, false);
-      if (!driver_loaded)
-         _eglLog(_EGL_WARNING,
-                 "No hardware driver found, falling back to software rendering");
-   }
-
-   if (!driver_loaded)
-      driver_loaded = surfaceless_probe_device(disp, true);
+   driver_loaded = surfaceless_probe_device(disp, disp->Options.ForceSoftware);
 
    if (!driver_loaded) {
       _eglLog(_EGL_DEBUG, "Falling back to surfaceless swrast without DRM.");
@@ -358,9 +351,9 @@ dri2_initialize_surfaceless(_EGLDriver *drv, _EGLDisplay *disp)
 #ifdef HAVE_WAYLAND_PLATFORM
    dri2_dpy->device_name = loader_get_device_name_for_fd(dri2_dpy->fd);
 #endif
-   dri2_set_WL_bind_wayland_display(drv, disp);
+   dri2_set_WL_bind_wayland_display(disp);
 
-   if (!dri2_add_pbuffer_configs_for_visuals(drv, disp)) {
+   if (!dri2_add_pbuffer_configs_for_visuals(disp)) {
       err = "DRI2: failed to add configs";
       goto cleanup;
    }

@@ -116,7 +116,7 @@ set_class(unsigned *classes, unsigned node, unsigned class)
 /* Special register classes impose special constraints on who can read their
  * values, so check that */
 
-static bool
+static bool ASSERTED
 check_read_class(unsigned *classes, unsigned tag, unsigned node)
 {
         /* Non-nodes are implicitly ok */
@@ -137,7 +137,7 @@ check_read_class(unsigned *classes, unsigned tag, unsigned node)
         }
 }
 
-static bool
+static bool ASSERTED
 check_write_class(unsigned *classes, unsigned tag, unsigned node)
 {
         /* Non-nodes are implicitly ok */
@@ -203,6 +203,7 @@ mir_lower_special_reads(compiler_context *ctx)
                         mark_node_class(ldst, ins->src[0]);
                         mark_node_class(ldst, ins->src[1]);
                         mark_node_class(ldst, ins->src[2]);
+                        mark_node_class(ldst, ins->src[3]);
                         break;
 
                 case TAG_TEXTURE_4:
@@ -450,7 +451,7 @@ allocate_registers(compiler_context *ctx, bool *spilled)
                         }
                 }
 
-                if (ins->type == TAG_LOAD_STORE_4 && OP_HAS_ADDRESS(ins->load_store.op)) {
+                if (ins->type == TAG_LOAD_STORE_4 && OP_HAS_ADDRESS(ins->op)) {
                         mir_foreach_src(ins, v) {
                                 unsigned s = ins->src[v];
                                 unsigned size = nir_alu_type_get_type_size(ins->src_types[v]);
@@ -488,11 +489,17 @@ allocate_registers(compiler_context *ctx, bool *spilled)
                 if (size == 16)
                         min_bound[dest] = 8;
 
+                mir_foreach_src(ins, s) {
+                        unsigned src_size = nir_alu_type_get_type_size(ins->src_types[s]);
+                        if (src_size == 16 && ins->src[s] < SSA_FIXED_MINIMUM)
+                                min_bound[ins->src[s]] = MAX2(min_bound[ins->src[s]], 8);
+                }
+
                 /* We don't have a swizzle for the conditional and we don't
                  * want to muck with the conditional itself, so just force
                  * alignment for now */
 
-                if (ins->type == TAG_ALU_4 && OP_IS_CSEL_V(ins->alu.op)) {
+                if (ins->type == TAG_ALU_4 && OP_IS_CSEL_V(ins->op)) {
                         min_alignment[dest] = 4; /* 1 << 4= 16-byte = vec4 */
 
                         /* LCRA assumes bound >= alignment */
@@ -529,12 +536,14 @@ allocate_registers(compiler_context *ctx, bool *spilled)
                         set_class(l->class, ins->src[0], REG_CLASS_LDST);
                         set_class(l->class, ins->src[1], REG_CLASS_LDST);
                         set_class(l->class, ins->src[2], REG_CLASS_LDST);
+                        set_class(l->class, ins->src[3], REG_CLASS_LDST);
 
-                        if (OP_IS_VEC4_ONLY(ins->load_store.op)) {
+                        if (OP_IS_VEC4_ONLY(ins->op)) {
                                 lcra_restrict_range(l, ins->dest, 16);
                                 lcra_restrict_range(l, ins->src[0], 16);
                                 lcra_restrict_range(l, ins->src[1], 16);
                                 lcra_restrict_range(l, ins->src[2], 16);
+                                lcra_restrict_range(l, ins->src[3], 16);
                         }
                 } else if (ins->type == TAG_TEXTURE_4) {
                         set_class(l->class, ins->dest, REG_CLASS_TEXW);
@@ -551,6 +560,7 @@ allocate_registers(compiler_context *ctx, bool *spilled)
                 assert(check_read_class(l->class, ins->type, ins->src[0]));
                 assert(check_read_class(l->class, ins->type, ins->src[1]));
                 assert(check_read_class(l->class, ins->type, ins->src[2]));
+                assert(check_read_class(l->class, ins->type, ins->src[3]));
         }
 
         /* Mark writeout to r0, depth to r1.x, stencil to r1.y,
@@ -681,33 +691,18 @@ install_registers_instr(
                 mir_set_bytemask(ins, mir_bytemask(ins) << dest.offset);
 
                 unsigned dest_offset =
-                        GET_CHANNEL_COUNT(alu_opcode_props[ins->alu.op].props) ? 0 :
+                        GET_CHANNEL_COUNT(alu_opcode_props[ins->op].props) ? 0 :
                         dest.offset;
 
                 offset_swizzle(ins->swizzle[0], src1.offset, src1.shift, dest.shift, dest_offset);
-
-                ins->registers.src1_reg = src1.reg;
-
-                ins->registers.src2_imm = ins->has_inline_constant;
-
-                if (ins->has_inline_constant) {
-                        /* Encode inline 16-bit constant. See disassembler for
-                         * where the algorithm is from */
-
-                        ins->registers.src2_reg = ins->inline_constant >> 11;
-
-                        int lower_11 = ins->inline_constant & ((1 << 12) - 1);
-                        uint16_t imm = ((lower_11 >> 8) & 0x7) |
-                                       ((lower_11 & 0xFF) << 3);
-
-                        ins->alu.src2 = imm << 2;
-                } else {
+                if (!ins->has_inline_constant)
                         offset_swizzle(ins->swizzle[1], src2.offset, src2.shift, dest.shift, dest_offset);
-
-                        ins->registers.src2_reg = src2.reg;
-                }
-
-                ins->registers.out_reg = dest.reg;
+                if (ins->src[0] != ~0)
+                        ins->src[0] = SSA_FIXED_REGISTER(src1.reg);
+                if (ins->src[1] != ~0)
+                        ins->src[1] = SSA_FIXED_REGISTER(src2.reg);
+                if (ins->dest != ~0)
+                        ins->dest = SSA_FIXED_REGISTER(dest.reg);
                 break;
         }
 
@@ -716,46 +711,40 @@ install_registers_instr(
                  * whether we are loading or storing -- think about the
                  * logical dataflow */
 
-                bool encodes_src = OP_IS_STORE(ins->load_store.op);
+                bool encodes_src = OP_IS_STORE(ins->op);
 
                 if (encodes_src) {
                         struct phys_reg src = index_to_reg(ctx, l, ins->src[0], src_shift[0]);
                         assert(src.reg == 26 || src.reg == 27);
 
-                        ins->load_store.reg = src.reg - 26;
+                        ins->src[0] = SSA_FIXED_REGISTER(src.reg);
                         offset_swizzle(ins->swizzle[0], src.offset, src.shift, 0, 0);
                } else {
                         struct phys_reg dst = index_to_reg(ctx, l, ins->dest, dest_shift);
 
-                        ins->load_store.reg = dst.reg;
+                        ins->dest = SSA_FIXED_REGISTER(dst.reg);
                         offset_swizzle(ins->swizzle[0], 0, 2, 2, dst.offset);
                         mir_set_bytemask(ins, mir_bytemask(ins) << dst.offset);
                 }
 
                 /* We also follow up by actual arguments */
 
-                unsigned src2 = ins->src[1];
-                unsigned src3 = ins->src[2];
-
-                if (src2 != ~0) {
-                        struct phys_reg src = index_to_reg(ctx, l, src2, 2);
-                        unsigned component = src.offset >> src.shift;
-                        assert(component << src.shift == src.offset);
-                        ins->load_store.arg_1 |= midgard_ldst_reg(src.reg, component);
+                for (int i = 1; i <= 3; i++) {
+                        unsigned src_index = ins->src[i];
+                        if (src_index != ~0) {
+                                struct phys_reg src = index_to_reg(ctx, l, src_index, src_shift[i]);
+                                unsigned component = src.offset >> src.shift;
+                                assert(component << src.shift == src.offset);
+                                ins->src[i] = SSA_FIXED_REGISTER(src.reg);
+                                ins->swizzle[i][0] += component;
+                        }
                 }
 
-                if (src3 != ~0) {
-                        struct phys_reg src = index_to_reg(ctx, l, src3, 2);
-                        unsigned component = src.offset >> src.shift;
-                        assert(component << src.shift == src.offset);
-                        ins->load_store.arg_2 |= midgard_ldst_reg(src.reg, component);
-                }
- 
                 break;
         }
 
         case TAG_TEXTURE_4: {
-                if (ins->texture.op == TEXTURE_OP_BARRIER)
+                if (ins->op == TEXTURE_OP_BARRIER)
                         break;
 
                 /* Grab RA results */
@@ -765,11 +754,13 @@ install_registers_instr(
                 struct phys_reg offset = index_to_reg(ctx, l, ins->src[3], src_shift[3]);
 
                 /* First, install the texture coordinate */
-                ins->texture.in_reg_select = coord.reg & 1;
+                if (ins->src[1] != ~0)
+                        ins->src[1] = SSA_FIXED_REGISTER(coord.reg);
                 offset_swizzle(ins->swizzle[1], coord.offset, coord.shift, dest.shift, 0);
 
                 /* Next, install the destination */
-                ins->texture.out_reg_select = dest.reg & 1;
+                if (ins->dest != ~0)
+                        ins->dest = SSA_FIXED_REGISTER(dest.reg);
                 offset_swizzle(ins->swizzle[0], 0, 2, dest.shift,
                                 dest_shift == 1 ? dest.offset % 8 :
                                 dest.offset);
@@ -778,33 +769,14 @@ install_registers_instr(
                 /* If there is a register LOD/bias, use it */
                 if (ins->src[2] != ~0) {
                         assert(!(lod.offset & 3));
-                        midgard_tex_register_select sel = {
-                                .select = lod.reg & 1,
-                                .full = 1,
-                                .component = lod.offset / 4
-                        };
-
-                        uint8_t packed;
-                        memcpy(&packed, &sel, sizeof(packed));
-                        ins->texture.bias = packed;
+                        ins->src[2] = SSA_FIXED_REGISTER(lod.reg);
+                        ins->swizzle[2][0] = lod.offset / 4;
                 }
 
                 /* If there is an offset register, install it */
                 if (ins->src[3] != ~0) {
-                        unsigned x = offset.offset / 4;
-                        unsigned y = x + 1;
-                        unsigned z = x + 2;
-
-                        /* Check range, TODO: half-registers */
-                        assert(z < 4);
-
-                        ins->texture.offset =
-                                (1)                   | /* full */
-                                (offset.reg & 1) << 1 | /* select */
-                                (0 << 2)              | /* upper */
-                                (x << 3)              | /* swizzle */
-                                (y << 5)              | /* swizzle */
-                                (z << 7);               /* swizzle */
+                        ins->src[3] = SSA_FIXED_REGISTER(offset.reg);
+                        ins->swizzle[3][0] = offset.offset / 4;
                 }
 
                 break;
@@ -885,9 +857,17 @@ mir_spill_register(
 
                         midgard_instruction st;
 
+                        /* Note: it's important to match the mask of the spill
+                         * with the mask of the instruction whose destination
+                         * we're spilling, or otherwise we'll read invalid
+                         * components and can fail RA in a subsequent iteration
+                         */
+
                         if (is_special_w) {
                                 st = v_mov(spill_node, spill_slot);
                                 st.no_spill |= (1 << spill_class);
+                                st.mask = ins->mask;
+                                st.dest_type = st.src_types[1] = ins->dest_type;
                         } else {
                                 ins->dest = spill_index++;
                                 ins->no_spill |= (1 << spill_class);
@@ -976,6 +956,51 @@ mir_spill_register(
         }
 }
 
+static void
+mir_demote_uniforms(compiler_context *ctx, unsigned new_cutoff)
+{
+        unsigned old_work_count = 16 - MAX2((ctx->uniform_cutoff - 8), 0);
+        unsigned work_count = 16 - MAX2((new_cutoff - 8), 0);
+
+        unsigned min_demote = SSA_FIXED_REGISTER(old_work_count);
+        unsigned max_demote = SSA_FIXED_REGISTER(work_count);
+
+        ctx->uniform_cutoff = new_cutoff;
+
+        mir_foreach_block(ctx, _block) {
+                midgard_block *block = (midgard_block *) _block;
+                mir_foreach_instr_in_block(block, ins) {
+                        mir_foreach_src(ins, i) {
+                                if (ins->src[i] < min_demote || ins->src[i] >= max_demote)
+                                        continue;
+
+                                midgard_instruction *before = ins;
+
+                                unsigned temp = make_compiler_temp(ctx);
+
+                                midgard_instruction ld = {
+                                        .type = TAG_LOAD_STORE_4,
+                                        .mask = 0xF,
+                                        .dest = temp,
+                                        .dest_type = ins->src_types[i],
+                                        .src = { ~0, ~0, ~0, ~0 },
+                                        .swizzle = SWIZZLE_IDENTITY_4,
+                                        .op = midgard_op_ld_ubo_int4,
+                                        .load_store = {
+                                                .arg_2 = 0x1E,
+                                        },
+                                };
+
+                                ld.constants.u32[0] = (23 - SSA_REG_FROM_FIXED(ins->src[i])) * 16;
+
+                                mir_insert_instruction_before_scheduled(ctx, block, before, ld);
+
+                                mir_rewrite_index_src_single(ins, ins->src[i], temp);
+                        }
+                }
+        }
+}
+
 /* Run register allocation in a loop, spilling until we succeed */
 
 void
@@ -986,7 +1011,7 @@ mir_ra(compiler_context *ctx)
         int iter_count = 1000; /* max iterations */
 
         /* Number of 128-bit slots in memory we've spilled into */
-        unsigned spill_count = 0;
+        unsigned spill_count = DIV_ROUND_UP(ctx->tls_size, 16);
 
 
         mir_create_pipeline_registers(ctx);
@@ -995,12 +1020,19 @@ mir_ra(compiler_context *ctx)
                 if (spilled) {
                         signed spill_node = mir_choose_spill_node(ctx, l);
 
-                        if (spill_node == -1) {
-                                fprintf(stderr, "ERROR: Failed to choose spill node\n");
-                                return;
-                        }
+                        /* It's a lot cheaper to demote uniforms to get more
+                         * work registers than to spill to TLS. */
+                        if (l->spill_class == REG_CLASS_WORK &&
+                            ctx->uniform_cutoff > 8) {
 
-                        mir_spill_register(ctx, spill_node, l->spill_class, &spill_count);
+                                mir_demote_uniforms(ctx, MAX2(ctx->uniform_cutoff - 4, 8));
+                        } else if (spill_node == -1) {
+                                fprintf(stderr, "ERROR: Failed to choose spill node\n");
+                                lcra_free(l);
+                                return;
+                        } else {
+                                mir_spill_register(ctx, spill_node, l->spill_class, &spill_count);
+                        }
                 }
 
                 mir_squeeze_index(ctx);
