@@ -39,8 +39,7 @@ ifeq ($(DEB_HOST_ARCH_OS), hurd)
 
 	confflags_DIRECT_RENDERING = -Dglx-direct=false
 	confflags_GBM = -Dgbm=false
-	confflags_OSMESA = -Dosmesa=classic
-	DRI_DRIVERS = swrast,
+	confflags_OSMESA = -Dosmesa=false
 	with_libva = 
 else
 	EGL_PLATFORMS = x11,surfaceless,
@@ -88,19 +87,18 @@ else
   # It's also required for building OpenCL support.
   # Don't use LLVM for now as UBPorts version is too old
   ifneq (,$(filter $(DEB_HOST_ARCH), kfreebsd-amd64 kfreebsd-i386 mips mips64el mipsel powerpc ppc64 ppc64el s390x sparc64))
-	GALLIUM_DRIVERS += radeonsi, swrast,
+	GALLIUM_DRIVERS += radeonsi,
 	confflags_GALLIUM += -Dllvm=true
 	confflags_GALLIUM += -Dgallium-opencl=icd
-	confflags_OSMESA = -Dosmesa=gallium
+	confflags_OSMESA = -DDosmesa=true
 
 	# nine makes sense only on archs that build wine
 	ifneq (,$(filter $(DEB_HOST_ARCH), amd64 arm64 armel armhf i386 kfreebsd-i386 powerpc))
 		confflags_GALLIUM += -Dgallium-nine=true
 	endif
   else
-	DRI_DRIVERS += swrast,
 	confflags_GALLIUM += -Dllvm=false
-	confflags_OSMESA = -Dosmesa=classic
+	confflags_OSMESA = -Dosmesa=false
   endif
 
   # radv needs LLVM and the Vulkan loader, so only build on the subset of
@@ -174,7 +172,7 @@ override_dh_clean:
 	dh_clean
 
 override_dh_auto_configure:
-	mkdir build
+	mkdir build || true
 	$(buildflags) meson . build --prefix /usr \
 		$(confflags)
 
