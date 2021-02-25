@@ -1187,12 +1187,12 @@ dri2_initialize(_EGLDisplay *disp)
       break;
 #ifdef HAVE_MIR_PLATFORM
    case _EGL_PLATFORM_MIR:
-      ret = dri2_initialize_mir(drv, disp);
+      ret = dri2_initialize_mir(disp);
       break;
 #endif
 #ifdef HAVE_RS_PLATFORM
    case _EGL_PLATFORM_RS:
-      ret = dri2_initialize_rs(drv, disp);
+      ret = dri2_initialize_rs(disp);
       break;
 #endif
    case _EGL_PLATFORM_ANDROID:

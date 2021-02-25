@@ -314,8 +314,8 @@ mir_advance_colour_buffer(struct dri2_egl_surface *dri2_surf)
  * Called via eglCreateWindowSurface(), drv->API.CreateWindowSurface().
  */
 static _EGLSurface *
-dri2_create_mir_window_surface(_EGLDriver *drv, _EGLDisplay *disp,
-                               _EGLConfig *conf, EGLNativeWindowType window,
+dri2_create_mir_window_surface(_EGLDisplay *disp, _EGLConfig *conf,
+                               EGLNativeWindowType window,
                                const EGLint *attrib_list)
 {
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
@@ -323,8 +323,6 @@ dri2_create_mir_window_surface(_EGLDriver *drv, _EGLDisplay *disp,
    struct dri2_egl_surface *dri2_surf;
    const __DRIconfig *config;
    MirWindowParameters win_params;
-
-   (void) drv;
 
    dri2_surf = calloc(1, sizeof *dri2_surf);
    if (!dri2_surf) {
@@ -395,9 +393,8 @@ cleanup_surf:
 }
 
 static _EGLSurface *
-dri2_mir_create_pixmap_surface(_EGLDriver *drv, _EGLDisplay *disp,
-                              _EGLConfig *conf, void *native_window,
-                              const EGLint *attrib_list)
+dri2_mir_create_pixmap_surface(_EGLDisplay *disp, _EGLConfig *conf,
+                              void *native_window, const EGLint *attrib_list)
 {
    _eglError(EGL_BAD_PARAMETER, "cannot create EGL pixmap surfaces on mir");
    return NULL;
@@ -405,13 +402,11 @@ dri2_mir_create_pixmap_surface(_EGLDriver *drv, _EGLDisplay *disp,
 // 
 
 static EGLBoolean
-dri2_destroy_mir_surface(_EGLDriver *drv, _EGLDisplay *disp, _EGLSurface *surf)
+dri2_destroy_mir_surface(_EGLDisplay *disp, _EGLSurface *surf)
 {
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
    struct dri2_egl_surface *dri2_surf = dri2_egl_surface(surf);
    int i;
-
-   (void) drv;
 
    if (!_eglPutSurface(surf))
       return EGL_TRUE;
@@ -443,8 +438,7 @@ dri2_destroy_mir_surface(_EGLDriver *drv, _EGLDisplay *disp, _EGLSurface *surf)
  * Called via eglSwapInterval(), drv->API.SwapInterval().
  */
 static EGLBoolean
-dri2_set_swap_interval(_EGLDriver *drv, _EGLDisplay *disp,
-                       _EGLSurface *surf, EGLint interval)
+dri2_set_swap_interval(_EGLDisplay *disp, _EGLSurface *surf, EGLint interval)
 {
    struct dri2_egl_surface *dri2_surf = dri2_egl_surface(surf);
    if(!dri2_surf->mir_surf->surface_set_swapinterval(dri2_surf->mir_surf, interval))
@@ -456,7 +450,7 @@ dri2_set_swap_interval(_EGLDriver *drv, _EGLDisplay *disp,
  * Called via eglSwapBuffers(), drv->API.SwapBuffers().
  */
 static EGLBoolean
-dri2_swap_buffers(_EGLDriver *drv, _EGLDisplay *disp, _EGLSurface *draw)
+dri2_swap_buffers(_EGLDisplay *disp, _EGLSurface *draw)
 {
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
    struct dri2_egl_surface *dri2_surf = dri2_egl_surface(draw);
@@ -503,23 +497,19 @@ dri2_create_image_khr_pixmap(_EGLDisplay *disp, _EGLContext *ctx,
 }
 
 static _EGLImage *
-dri2_mir_create_image_khr(_EGLDriver *drv, _EGLDisplay *disp,
-                          _EGLContext *ctx, EGLenum target,
+dri2_mir_create_image_khr(_EGLDisplay *disp, _EGLContext *ctx, EGLenum target,
                           EGLClientBuffer buffer, const EGLint *attr_list)
 {
-   (void) drv;
-
    switch (target) {
    case EGL_NATIVE_PIXMAP_KHR:
       return dri2_create_image_khr_pixmap(disp, ctx, buffer, attr_list);
    default:
-      return dri2_create_image_khr(drv, disp, ctx, target, buffer, attr_list);
+      return dri2_create_image_khr(disp, ctx, target, buffer, attr_list);
    }
 }
 
 static EGLint
-dri2_mir_query_buffer_age(_EGLDriver *drv, _EGLDisplay *dpy,
-                               _EGLSurface *surf)
+dri2_mir_query_buffer_age(_EGLDisplay *dpy, _EGLSurface *surf)
 {
    struct dri2_egl_surface *dri2_surf = dri2_egl_surface(surf);
    if (dri2_surf->back)
@@ -542,7 +532,7 @@ static struct dri2_egl_display_vtbl dri2_mir_display_vtbl = {
 };
 
 EGLBoolean
-dri2_initialize_mir(_EGLDriver *drv, _EGLDisplay *disp)
+dri2_initialize_mir(_EGLDisplay *disp)
 {
    struct dri2_egl_display *dri2_dpy;
    struct gbm_device *gbm = NULL;

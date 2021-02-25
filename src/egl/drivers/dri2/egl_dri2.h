@@ -546,12 +546,12 @@ dri2_initialize_surfaceless(_EGLDisplay *disp);
 
 #ifdef HAVE_MIR_PLATFORM
 EGLBoolean
-dri2_initialize_mir(_EGLDriver *drv, _EGLDisplay *disp);
+dri2_initialize_mir(_EGLDisplay *disp);
 void
 dri2_teardown_mir(struct dri2_egl_display *dri2_dpy);
 #else
 static inline EGLBoolean
-dri2_initialize_mir(_EGLDriver *drv, _EGLDisplay *disp)
+dri2_initialize_mir(_EGLDisplay *disp)
 {
    return _eglError(EGL_NOT_INITIALIZED, "Mir platform not built");
 }
@@ -561,10 +561,10 @@ dri2_teardown_mir(struct dri2_egl_display *dri2_dpy) {}
 
 #ifdef HAVE_RS_PLATFORM
 EGLBoolean
-dri2_initialize_rs(_EGLDriver *drv, _EGLDisplay *disp);
+dri2_initialize_rs(_EGLDisplay *disp);
 #else
 static inline EGLBoolean
-dri2_initialize_rs(_EGLDriver *drv, _EGLDisplay *disp)
+dri2_initialize_rs(_EGLDisplay *disp)
 {
    return _eglError(EGL_NOT_INITIALIZED, "Mir rs platform not built");
 }

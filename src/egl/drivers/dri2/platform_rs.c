@@ -379,9 +379,9 @@ mir_acquire_buffer(struct dri2_egl_display *dri2_dpy, struct dri2_egl_surface *d
 }
 
 static _EGLSurface *
-dri2_rs_create_window_surface(_EGLDriver *drv, _EGLDisplay *disp,
-                               _EGLConfig *conf, EGLNativeWindowType window,
-                               const EGLint *attrib_list)
+dri2_rs_create_window_surface(_EGLDisplay *disp, _EGLConfig *conf,
+                              EGLNativeWindowType window,
+                              const EGLint *attrib_list)
 {
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
    struct dri2_egl_config *dri2_conf = dri2_egl_config(conf);
@@ -525,22 +525,19 @@ cleanup_surf:
 }
 
 static _EGLSurface *
-dri2_rs_create_pixmap_surface(_EGLDriver *drv, _EGLDisplay *disp,
-                              _EGLConfig *conf, void *native_window,
-                              const EGLint *attrib_list)
+dri2_rs_create_pixmap_surface(_EGLDisplay *disp, _EGLConfig *conf,
+                              void *native_window, const EGLint *attrib_list)
 {
    _eglError(EGL_BAD_PARAMETER, "EGL pixmap surfaces are unsupported on Mir (RS)");
    return NULL;
 }
 
 static EGLBoolean
-dri2_rs_destroy_surface(_EGLDriver *drv, _EGLDisplay *disp, _EGLSurface *surf)
+dri2_rs_destroy_surface(_EGLDisplay *disp, _EGLSurface *surf)
 {
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
    struct dri2_egl_surface *dri2_surf = dri2_egl_surface(surf);
    int i;
-
-   (void) drv;
 
    if (!_eglPutSurface(surf))
       return EGL_TRUE;
@@ -598,24 +595,20 @@ dri2_rs_destroy_surface(_EGLDriver *drv, _EGLDisplay *disp, _EGLSurface *surf)
 }
 
 static _EGLImage *
-dri2_rs_create_image_khr(_EGLDriver *drv, _EGLDisplay *disp,
-                         _EGLContext *ctx, EGLenum target,
+dri2_rs_create_image_khr(_EGLDisplay *disp, _EGLContext *ctx, EGLenum target,
                          EGLClientBuffer buffer, const EGLint *attr_list)
 {
-   (void) drv;
-
    switch (target) {
    case EGL_NATIVE_PIXMAP_KHR:
       _eglError(EGL_BAD_PARAMETER, "Mir has no native pixmaps");
       return NULL;
    default:
-      return dri2_create_image_khr(drv, disp, ctx, target, buffer, attr_list);
+      return dri2_create_image_khr(disp, ctx, target, buffer, attr_list);
    }
 }
 
 static EGLBoolean
-dri2_rs_swap_interval(_EGLDriver *drv, _EGLDisplay *disp,
-                       _EGLSurface *surf, EGLint interval)
+dri2_rs_swap_interval(_EGLDisplay *disp, _EGLSurface *surf, EGLint interval)
 {
     struct dri2_egl_surface *dri2_surf = dri2_egl_surface(surf);
     SwapChain* sc = (SwapChain *)dri2_surf->sc;
@@ -639,7 +632,7 @@ dri2_rs_swap_interval(_EGLDriver *drv, _EGLDisplay *disp,
 }
 
 static EGLBoolean
-dri2_rs_swap_buffers(_EGLDriver *drv, _EGLDisplay *disp, _EGLSurface *draw)
+dri2_rs_swap_buffers(_EGLDisplay *disp, _EGLSurface *draw)
 {
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
    struct dri2_egl_surface *dri2_surf = dri2_egl_surface(draw);
@@ -658,8 +651,7 @@ dri2_rs_swap_buffers(_EGLDriver *drv, _EGLDisplay *disp, _EGLSurface *draw)
 }
 
 static EGLint
-dri2_rs_query_buffer_age(_EGLDriver *drv, _EGLDisplay *dpy,
-                          _EGLSurface *surf)
+dri2_rs_query_buffer_age(_EGLDisplay *dpy, _EGLSurface *surf)
 {
    struct dri2_egl_surface *dri2_surf = dri2_egl_surface(surf);
    if (dri2_surf->back)
@@ -821,7 +813,7 @@ static void set_auth_fd(int auth_fd, void* context)
 }
 
 static EGLBoolean
-mir_add_configs_for_visuals(_EGLDriver *drv, _EGLDisplay *dpy)
+mir_add_configs_for_visuals(_EGLDisplay *dpy)
 {
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(dpy);
    static const struct {
@@ -874,7 +866,7 @@ mir_add_configs_for_visuals(_EGLDriver *drv, _EGLDisplay *dpy)
 }
 
 EGLBoolean
-dri2_initialize_rs(_EGLDriver *drv, _EGLDisplay *disp)
+dri2_initialize_rs(_EGLDisplay *disp)
 {
    struct dri2_egl_display *dri2_dpy;
    struct gbm_device *gbm = NULL;
@@ -936,7 +928,7 @@ dri2_initialize_rs(_EGLDriver *drv, _EGLDisplay *disp)
       dri2_setup_screen(disp);
    }
 
-   if (!mir_add_configs_for_visuals(drv, disp)) {
+   if (!mir_add_configs_for_visuals(disp)) {
       _eglLog(_EGL_FATAL, "DRI2: failed to add configs");
       goto cleanup_dpy;
    }
