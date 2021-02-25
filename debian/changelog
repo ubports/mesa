@@ -1,3 +1,9 @@
+mesa (21.0.0~git-1ubports1) xenial; urgency=medium
+
+  * Update from upstream 21.0-rc5
+
+ -- Alfred Neumayer <dev.beidl@gmail.com>  Wed, 24 Feb 2021 01:01:00 +0100
+
 mesa (20.2.0~git-1ubports1) xenial; urgency=medium
 
   * Update from upstream master
