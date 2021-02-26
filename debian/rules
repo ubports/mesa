@@ -90,15 +90,16 @@ else
 	GALLIUM_DRIVERS += radeonsi,
 	confflags_GALLIUM += -Dllvm=true
 	confflags_GALLIUM += -Dgallium-opencl=icd
-	confflags_OSMESA = -DDosmesa=true
+	confflags_OSMESA = -Dosmesa=true
 
 	# nine makes sense only on archs that build wine
 	ifneq (,$(filter $(DEB_HOST_ARCH), amd64 arm64 armel armhf i386 kfreebsd-i386 powerpc))
 		confflags_GALLIUM += -Dgallium-nine=true
 	endif
   else
+	GALLIUM_DRIVERS += swrast,
 	confflags_GALLIUM += -Dllvm=false
-	confflags_OSMESA = -Dosmesa=false
+	confflags_OSMESA = -Dosmesa=true
   endif
 
   # radv needs LLVM and the Vulkan loader, so only build on the subset of
